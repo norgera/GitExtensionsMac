@@ -22,6 +22,10 @@
 		AA6000000000000000000002 /* GitPull.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB6000000000000000000001 /* GitPull.swift */; };
 		AA6000000000000000000003 /* PullDialog.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB6000000000000000000002 /* PullDialog.swift */; };
 		AA6100000000000000000001 /* GitPullTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB6100000000000000000001 /* GitPullTests.swift */; };
+		AA6200000000000000000001 /* GitPush.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB6200000000000000000001 /* GitPush.swift */; };
+		AA6200000000000000000002 /* GitPush.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB6200000000000000000001 /* GitPush.swift */; };
+		AA6300000000000000000001 /* PushDialog.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB6300000000000000000001 /* PushDialog.swift */; };
+		AA6400000000000000000001 /* GitPushTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB6400000000000000000001 /* GitPushTests.swift */; };
 		EE5000000000000000000001 /* HelpPullFetch.png in Resources */ = {isa = PBXBuildFile; fileRef = FF5000000000000000000001 /* HelpPullFetch.png */; };
 		EE5000000000000000000002 /* HelpPullMerge.png in Resources */ = {isa = PBXBuildFile; fileRef = FF5000000000000000000002 /* HelpPullMerge.png */; };
 		EE5000000000000000000003 /* HelpPullMergeFastForward.png in Resources */ = {isa = PBXBuildFile; fileRef = FF5000000000000000000003 /* HelpPullMergeFastForward.png */; };
@@ -139,6 +143,9 @@
 		BB6000000000000000000001 /* GitPull.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GitPull.swift; sourceTree = "<group>"; };
 		BB6000000000000000000002 /* PullDialog.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PullDialog.swift; sourceTree = "<group>"; };
 		BB6100000000000000000001 /* GitPullTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GitPullTests.swift; sourceTree = "<group>"; };
+		BB6200000000000000000001 /* GitPush.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GitPush.swift; sourceTree = "<group>"; };
+		BB6300000000000000000001 /* PushDialog.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PushDialog.swift; sourceTree = "<group>"; };
+		BB6400000000000000000001 /* GitPushTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GitPushTests.swift; sourceTree = "<group>"; };
 		FF5000000000000000000001 /* HelpPullFetch.png */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = image.png; path = HelpPullFetch.png; sourceTree = "<group>"; };
 		FF5000000000000000000002 /* HelpPullMerge.png */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = image.png; path = HelpPullMerge.png; sourceTree = "<group>"; };
 		FF5000000000000000000003 /* HelpPullMergeFastForward.png */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = image.png; path = HelpPullMergeFastForward.png; sourceTree = "<group>"; };
@@ -265,6 +272,7 @@
 				C00000000000000000000004 /* GitRepositoryMutations.swift */,
 				BB5000000000000000000001 /* GitRemoteManagement.swift */,
 				BB6000000000000000000001 /* GitPull.swift */,
+				BB6200000000000000000001 /* GitPush.swift */,
 			);
 			name = Git;
 			path = Git;
@@ -305,6 +313,7 @@
 				C00000000000000000000011 /* GitRepositoryBrowsingDataSourceTests.swift */,
 				C00000000000000000000012 /* GitRepositoryMutationTests.swift */,
 				BB6100000000000000000001 /* GitPullTests.swift */,
+				BB6400000000000000000001 /* GitPushTests.swift */,
 				620CB4F51F5EB568400FDC91 /* ContextMenuStateTests.swift */,
 			);
 			name = Tests;
@@ -349,6 +358,7 @@
 				BB4000000000000000000003 /* CommitWorkflowDialog.swift */,
 				BB4000000000000000000004 /* WorkflowManagementDialogs.swift */,
 				BB6000000000000000000002 /* PullDialog.swift */,
+				BB6300000000000000000001 /* PushDialog.swift */,
 				BB5000000000000000000002 /* RemoteManagementDialog.swift */,
 				E135854250EF778F4D3C7FD3 /* RepositoryOutlineViewController.swift */,
 				4A3AF3EF4274C3EE47F5BFC2 /* RevisionDiffViewController.swift */,
@@ -626,6 +636,8 @@
 				B00000000000000000000015 /* GitRepositoryBrowsingDataSourceTests.swift in Sources */,
 				B00000000000000000000017 /* GitRepositoryMutationTests.swift in Sources */,
 				AA6100000000000000000001 /* GitPullTests.swift in Sources */,
+				AA6200000000000000000002 /* GitPush.swift in Sources */,
+				AA6400000000000000000001 /* GitPushTests.swift in Sources */,
 				A102D2CBFE2A4EDBE423D9D1 /* RepositoryModels.swift in Sources */,
 				BC1066079E5693F97DE5212E /* RevisionGraphLayout.swift in Sources */,
 				8DEAE7DC09F8FD98BA14754C /* ContextMenuState.swift in Sources */,
@@ -644,6 +656,7 @@
 				B00000000000000000000004 /* GitRepositoryMutations.swift in Sources */,
 				AA5000000000000000000001 /* GitRemoteManagement.swift in Sources */,
 				AA6000000000000000000001 /* GitPull.swift in Sources */,
+				AA6200000000000000000001 /* GitPush.swift in Sources */,
 				C087A7DECAC7EE081ED36DFE /* GitExtensionsMacApp.swift in Sources */,
 				1D5C21DC7EA1BCED958BB331 /* ContextMenuState.swift in Sources */,
 				A4B464ED560B29A71D6D51A5 /* RepositoryModels.swift in Sources */,
@@ -663,6 +676,7 @@
 				AA4000000000000000000003 /* CommitWorkflowDialog.swift in Sources */,
 				AA4000000000000000000004 /* WorkflowManagementDialogs.swift in Sources */,
 				AA6000000000000000000003 /* PullDialog.swift in Sources */,
+				AA6300000000000000000001 /* PushDialog.swift in Sources */,
 				AA5000000000000000000003 /* RemoteManagementDialog.swift in Sources */,
 				19E4A06399B7A960739D9356 /* RepositoryOutlineViewController.swift in Sources */,
 				E16920BE316E863DDF3AE98F /* RevisionDiffViewController.swift in Sources */,

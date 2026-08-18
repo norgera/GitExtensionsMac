@@ -936,6 +936,7 @@ private final class SettingsViewController: NSViewController, NSOutlineViewDataS
 
     private let store: AppSettingsStore
     private var draft: AppPreferences
+    private var pushDraft: PushPreferences
     private lazy var roots: [SettingsNode] = [
         SettingsNode("application", "Git Extensions", [
             SettingsNode("general", "General"),
@@ -973,6 +974,7 @@ private final class SettingsViewController: NSViewController, NSOutlineViewDataS
     init(store: AppSettingsStore) {
         self.store = store
         draft = store.preferences
+        pushDraft = store.pushPreferences
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -1140,7 +1142,12 @@ private final class SettingsViewController: NSViewController, NSOutlineViewDataS
             content.addArrangedSubview(popup("Theme:", values: ApplicationTheme.allCases.map(\.rawValue), selected: draft.theme.rawValue) { value in
                 self.draft.theme = ApplicationTheme(rawValue: value) ?? .system
             })
-        case "browse", "detailed":
+        case "browse":
+            content.addArrangedSubview(toggle("Merge common-parent lanes", value: draft.mergeCommonParentLanes) { self.draft.mergeCommonParentLanes = $0 })
+            content.addArrangedSubview(toggle("Straighten graph diagonals", value: draft.straightenGraphDiagonals) { self.draft.straightenGraphDiagonals = $0 })
+            content.addArrangedSubview(stepper("Maximum recent repositories:", value: draft.maximumRecentRepositories, range: 1...100) { self.draft.maximumRecentRepositories = $0 })
+        case "detailed":
+            content.addArrangedSubview(toggle("Get remote branches directly from remote", value: pushDraft.loadRemoteBranchesDirectly) { self.pushDraft.loadRemoteBranchesDirectly = $0 })
             content.addArrangedSubview(toggle("Merge common-parent lanes", value: draft.mergeCommonParentLanes) { self.draft.mergeCommonParentLanes = $0 })
             content.addArrangedSubview(toggle("Straighten graph diagonals", value: draft.straightenGraphDiagonals) { self.draft.straightenGraphDiagonals = $0 })
             content.addArrangedSubview(stepper("Maximum recent repositories:", value: draft.maximumRecentRepositories, range: 1...100) { self.draft.maximumRecentRepositories = $0 })
@@ -1159,9 +1166,15 @@ private final class SettingsViewController: NSViewController, NSOutlineViewDataS
             content.addArrangedSubview(pathField("External diff tool:", value: draft.externalDiffToolPath) { self.draft.externalDiffToolPath = $0 })
             content.addArrangedSubview(pathField("External merge tool:", value: draft.externalMergeToolPath) { self.draft.externalMergeToolPath = $0 })
             content.addArrangedSubview(note("External tool execution is not implemented."))
-        case "advanced", "confirmations":
+        case "advanced":
+            content.addArrangedSubview(toggle("Always show advanced options", value: pushDraft.showAdvancedOptions) { self.pushDraft.showAdvancedOptions = $0 })
             content.addArrangedSubview(pathField("Signing key:", value: draft.signingKey) { self.draft.signingKey = $0 })
             content.addArrangedSubview(note("GPG signing is not implemented."))
+        case "confirmations":
+            content.addArrangedSubview(settingsGroup("Confirm actions — Branches", [
+                toggle("Push a new branch for the remote", value: pushDraft.confirmNewBranch) { self.pushDraft.confirmNewBranch = $0 },
+                toggle("Add a tracking reference for newly pushed branch", value: pushDraft.confirmAddTrackingReference) { self.pushDraft.confirmAddTrackingReference = $0 }
+            ]))
         case "scripts":
             content.addArrangedSubview(pathField("Shell:", value: draft.shellPath) { self.draft.shellPath = $0 })
             content.addArrangedSubview(pathField("Editor:", value: draft.editorPath) { self.draft.editorPath = $0 })
@@ -1268,10 +1281,12 @@ private final class SettingsViewController: NSViewController, NSOutlineViewDataS
     @objc private func applySettings() {
         guard validate() else { return }
         store.save(draft)
+        store.savePushPreferences(pushDraft)
     }
     @objc private func saveAndClose() {
         guard validate() else { return }
         store.save(draft)
+        store.savePushPreferences(pushDraft)
         finish(.OK)
     }
     @objc private func cancel() { finish(.cancel) }

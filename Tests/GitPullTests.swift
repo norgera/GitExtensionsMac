@@ -605,7 +605,7 @@ private actor CancellablePullRunner: GitCommandRunning {
     }
 }
 
-private final class PullGitFixture {
+final class PullGitFixture {
     let rootURL: URL
     let originURL: URL
     let upstreamURL: URL
@@ -719,7 +719,7 @@ private final class PullGitFixture {
     }
 }
 
-private struct PullFixtureError: LocalizedError {
+struct PullFixtureError: LocalizedError {
     let message: String
     init(_ message: String) { self.message = message }
     var errorDescription: String? { message }

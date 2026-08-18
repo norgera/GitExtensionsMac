@@ -478,6 +478,7 @@ enum RepositoryContextMenuBuilder {
                 command("repository.branch.rebase", "Rebase current branch on this branch…", enabled: canMoveHEAD),
                 command("repository.branch.create", "Create branch…", enabled: !isBareRepository),
                 command("repository.branch.reset", "Reset current branch to here…", enabled: canMoveHEAD),
+                command("repository.branch.push", "Push branch…"),
                 .separator,
                 command("repository.branch.rename", "Rename branch…"),
                 command("repository.branch.delete", "Delete branch…", enabled: canMoveHEAD)

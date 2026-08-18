@@ -49,6 +49,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
     private var pushWindowController: NSWindowController?
     private var fetchWindowController: NSWindowController?
     private var remoteWindowController: NSWindowController?
+    private var remoteBranchDeleteWindowController: NSWindowController?
     private var operationStateTask: Task<Void, Never>?
     private var preferencesObserver: NSObjectProtocol?
     private var pullPreferencesObserver: NSObjectProtocol?
@@ -234,7 +235,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         )
         rebuildPullMenu()
         stack.addArrangedSubview(pullPopUp)
-        configureDynamicToolbarButton(pushButton, imageName: "Push", tooltip: "Push", action: #selector(placeholderToolbarButton(_:)))
+        configureDynamicToolbarButton(pushButton, imageName: "Push", tooltip: "Push", action: #selector(pushToolbarButton(_:)))
         stack.addArrangedSubview(pushButton)
         let pushCommitGap = NSView()
         pushCommitGap.translatesAutoresizingMaskIntoConstraints = false
@@ -695,6 +696,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         kind: NetworkOperationKind,
         initialAction: NetworkDialogInitialAction,
         executeImmediately: Bool = false,
+        pushBranch: String? = nil,
         snapshot: RepositorySnapshot
     ) {
         let existing: NSWindowController? = switch kind {
@@ -714,7 +716,18 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             }
         }
         let controller: NSWindowController
-        if kind != .push, let pullSource = dataSource as? any RepositoryPullingDataSource {
+        if kind == .push, let pushSource = dataSource as? any RepositoryPushingDataSource {
+            controller = PushDialog.present(
+                source: pushSource,
+                snapshot: snapshot,
+                initialBranch: pushBranch,
+                executeImmediately: executeImmediately,
+                onSnapshot: { [weak self] updated, preferredCommitID in
+                    self?.apply(snapshot: updated, preferredCommitID: preferredCommitID ?? self?.selectedCommitID)
+                },
+                onClose: close
+            )
+        } else if kind != .push, let pullSource = dataSource as? any RepositoryPullingDataSource {
             controller = ApplicationShellDialogs.presentPullWindow(
                 initialAction: initialAction,
                 executeImmediately: executeImmediately,
@@ -1119,6 +1132,16 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         beginCommit(initialMode: .normal)
     }
 
+    @objc private func pushToolbarButton(_ sender: NSButton) {
+        guard let snapshot else { return }
+        presentNetworkWindow(
+            kind: .push,
+            initialAction: .merge,
+            executeImmediately: NSEvent.modifierFlags.contains(.shift),
+            snapshot: snapshot
+        )
+    }
+
     @objc private func placeholderToolbarButton(_ sender: NSButton) {
         let title = sender.toolTip ?? sender.title
         if title == "Push" || title == "Settings" {
@@ -1167,8 +1190,13 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         switch (identifier, node.kind) {
         case ("repository.branch.checkout", .branch(let branch)):
             beginCheckout(.local(branch))
+        case ("repository.branch.push", .branch(let branch)):
+            guard let snapshot else { return }
+            presentNetworkWindow(kind: .push, initialAction: .merge, pushBranch: branch.name, snapshot: snapshot)
         case ("repository.remoteBranch.checkout", .remoteBranch(let branch)):
             beginCheckout(.remote(branch))
+        case ("repository.remoteBranch.delete", .remoteBranch(let branch)):
+            presentRemoteBranchDeleteWindow(branch)
         case ("repository.tag.checkout", .tag(let tag)):
             guard let commit = snapshot?.commits.first(where: { $0.id == tag.commitID }) else { return }
             beginCheckout(.revision(commit))
@@ -1199,6 +1227,25 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         default:
             showPlaceholderStatus(for: identifier)
         }
+    }
+
+    private func presentRemoteBranchDeleteWindow(_ branch: Branch) {
+        guard let pushSource = dataSource as? any RepositoryPushingDataSource,
+              let remote = branch.remoteName
+        else { return }
+        if let remoteBranchDeleteWindowController {
+            remoteBranchDeleteWindowController.window?.makeKeyAndOrderFront(nil)
+            return
+        }
+        remoteBranchDeleteWindowController = RemoteBranchDeleteDialog.present(
+            source: pushSource,
+            initialRemote: remote,
+            initialBranch: branch.name,
+            onSnapshot: { [weak self] updated, preferredCommitID in
+                self?.apply(snapshot: updated, preferredCommitID: preferredCommitID ?? self?.selectedCommitID)
+            },
+            onClose: { [weak self] in self?.remoteBranchDeleteWindowController = nil }
+        )
     }
 
     private func performRevisionCommand(_ identifier: String, selected: [Commit], focused: Commit) {
@@ -1293,6 +1340,32 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             default:
                 break
             }
+            return
+        }
+        let pushPrefix = "revision.branch.push.ref."
+        if identifier.hasPrefix(pushPrefix) {
+            let referenceID = String(identifier.dropFirst(pushPrefix.count))
+            guard let reference = focused.references.first(where: { $0.id == referenceID }),
+                  (reference.kind == .currentBranch || reference.kind == .localBranch),
+                  let snapshot
+            else { return }
+            presentNetworkWindow(kind: .push, initialAction: .merge, pushBranch: reference.name, snapshot: snapshot)
+            return
+        }
+        let deletePrefix = "revision.branch.delete.ref."
+        if identifier.hasPrefix(deletePrefix) {
+            let referenceID = String(identifier.dropFirst(deletePrefix.count))
+            guard let reference = focused.references.first(where: { $0.id == referenceID }),
+                  reference.kind == .remoteBranch,
+                  let slash = reference.name.firstIndex(of: "/"),
+                  let snapshot
+            else { return }
+            let remote = String(reference.name[..<slash])
+            let name = String(reference.name[reference.name.index(after: slash)...])
+            guard let branch = snapshot.branches.first(where: {
+                $0.isRemote && $0.remoteName == remote && $0.name == name
+            }) else { return }
+            presentRemoteBranchDeleteWindow(branch)
             return
         }
         showPlaceholderStatus(for: identifier)

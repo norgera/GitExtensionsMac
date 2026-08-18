@@ -1029,7 +1029,7 @@ private final class PullDialogViewController: NSViewController, NSWindowDelegate
 }
 
 @MainActor
-private enum PullProcessDialog {
+enum PullProcessDialog {
     typealias Operation = @Sendable (@escaping GitOutputHandler) async throws -> RepositoryPullResult
 
     static func run(
@@ -1117,6 +1117,14 @@ private final class PullProcessViewController: NSViewController, NSWindowDelegat
         outputView.isEditable = false; outputView.isSelectable = true
         outputView.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
         outputView.textContainerInset = NSSize(width: 6, height: 6)
+        outputView.frame = NSRect(x: 0, y: 0, width: 676, height: 330)
+        outputView.minSize = .zero
+        outputView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        outputView.isVerticallyResizable = true
+        outputView.isHorizontallyResizable = true
+        outputView.autoresizingMask = [.width, .height]
+        outputView.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        outputView.textContainer?.widthTracksTextView = false
         let scroll = NSScrollView()
         scroll.documentView = outputView; scroll.hasVerticalScroller = true; scroll.hasHorizontalScroller = true; scroll.borderType = .bezelBorder
         keepOpen.state = AppSettingsStore.shared.pullPreferences.closeProcessOnSuccess ? .off : .on

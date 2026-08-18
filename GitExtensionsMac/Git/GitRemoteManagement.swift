@@ -8,6 +8,7 @@ struct RepositoryRemoteConfiguration: Identifiable, Hashable, Sendable {
     let puttyKeyFile: String?
     let color: String?
     let prefix: String?
+    let pushRefSpecs: [String]
     let isDisabled: Bool
 }
 
@@ -75,6 +76,7 @@ extension GitRepositoryBrowsingDataSource: RepositoryRemoteManagingDataSource {
                 puttyKeyFile: settings["puttykeyfile"]?.last,
                 color: settings["color"]?.last,
                 prefix: settings["prefix"]?.last,
+                pushRefSpecs: settings["push"] ?? [],
                 isDisabled: identity.disabled
             )
         }.sorted {

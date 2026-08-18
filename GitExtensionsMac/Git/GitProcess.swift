@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 struct GitCommandResult: Sendable {
@@ -235,7 +236,7 @@ private final class GitProcessExecution: @unchecked Sendable {
         lock.unlock()
 
         if runningProcess?.isRunning == true {
-            runningProcess?.terminate()
+            Self.terminateProcessTree(runningProcess!)
         }
     }
 
@@ -271,7 +272,7 @@ private final class GitProcessExecution: @unchecked Sendable {
         let cancelledImmediatelyAfterLaunch = isCancelled
         lock.unlock()
         if cancelledImmediatelyAfterLaunch, process.isRunning {
-            process.terminate()
+            Self.terminateProcessTree(process)
         }
 
         let outputGroup = DispatchGroup()
@@ -337,6 +338,38 @@ private final class GitProcessExecution: @unchecked Sendable {
         lock.lock()
         process = nil
         lock.unlock()
+    }
+
+    private static func terminateProcessTree(_ process: Process) {
+        let processID = process.processIdentifier
+        for child in descendantProcessIDs(of: processID).reversed() {
+            _ = Darwin.kill(child, SIGTERM)
+        }
+        if process.isRunning { process.terminate() }
+    }
+
+    private static func descendantProcessIDs(of root: pid_t) -> [pid_t] {
+        typealias ListChildren = @convention(c) (pid_t, UnsafeMutableRawPointer?, Int32) -> Int32
+        guard let library = dlopen("/usr/lib/libproc.dylib", RTLD_LAZY),
+              let symbol = dlsym(library, "proc_listchildpids")
+        else { return [] }
+        defer { dlclose(library) }
+        let listChildren = unsafeBitCast(symbol, to: ListChildren.self)
+        var descendants: [pid_t] = []
+        var pending = [root]
+        var visited = Set<pid_t>([root])
+        while let parent = pending.popLast() {
+            var children = [pid_t](repeating: 0, count: 256)
+            let returned = children.withUnsafeMutableBytes {
+                listChildren(parent, $0.baseAddress, Int32($0.count))
+            }
+            guard returned > 0 else { continue }
+            for child in children.prefix(min(Int(returned), children.count)) where child > 0 && visited.insert(child).inserted {
+                descendants.append(child)
+                pending.append(child)
+            }
+        }
+        return descendants
     }
 
     private static func read(

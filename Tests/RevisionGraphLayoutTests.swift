@@ -29,6 +29,7 @@ private enum RevisionGraphLayoutTests {
             try await GitRepositoryMutationTests.runRebase()
             try await GitRepositoryMutationTests.runRemoteManagement()
             try await GitPullTests.run()
+            try await GitPushTests.run()
             if let flagIndex = CommandLine.arguments.firstIndex(of: "--verify-mutations"),
                CommandLine.arguments.indices.contains(flagIndex + 1) {
                 try await GitRepositoryMutationTests.verifyDisposableClone(

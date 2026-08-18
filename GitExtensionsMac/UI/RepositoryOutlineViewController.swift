@@ -434,7 +434,9 @@ final class RepositoryOutlineViewController: NSViewController, NSOutlineViewData
         menuFocusedNode = node
         let mutationCommands: Set<String> = [
             "repository.branch.checkout",
+            "repository.branch.push",
             "repository.remoteBranch.checkout",
+            "repository.remoteBranch.delete",
             "repository.tag.checkout",
             "repository.branch.rebase",
             "repository.remoteBranch.rebase",

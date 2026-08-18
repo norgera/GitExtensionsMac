@@ -5,6 +5,7 @@ enum AppSettingsTests {
     static func run() {
         testPreferencesRoundTrip()
         testPullPreferencesRoundTrip()
+        testPushPreferencesRoundTrip()
         testRecentRepositories()
         print("AppSettingsTests: passed")
     }
@@ -59,6 +60,27 @@ enum AppSettingsTests {
             precondition(store.pullPreferences.recentURLs.first == "ssh://example/repository")
             precondition(store.pullPreferences.recentURLs.filter { $0 == "ssh://example/repository" }.count == 1)
         }
+    }
+
+    private static func testPushPreferencesRoundTrip() {
+        let suite = "GitExtensionsMacTests.push.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suite) else { preconditionFailure("Could not create defaults") }
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = AppSettingsStore(defaults: defaults)
+        var preferences = store.pushPreferences
+        preferences.recursiveSubmodules = .onDemand
+        preferences.showAdvancedOptions = true
+        preferences.confirmNewBranch = false
+        preferences.confirmAddTrackingReference = false
+        preferences.rejectedAction = .rebase
+        preferences.loadRemoteBranchesDirectly = true
+        store.savePushPreferences(preferences)
+        precondition(AppSettingsStore(defaults: defaults).pushPreferences == preferences)
+
+        store.recordPushURL("ssh://example/push-repository")
+        store.recordPushURL("ssh://example/push-repository")
+        precondition(store.pushPreferences.recentURLs.first == "ssh://example/push-repository")
+        precondition(store.pushPreferences.recentURLs.filter { $0 == "ssh://example/push-repository" }.count == 1)
     }
 
     private static func withStore(_ body: (AppSettingsStore, UserDefaults) -> Void) {
