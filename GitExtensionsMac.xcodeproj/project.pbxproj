@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		A77C0DE10000000000000001 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A77C0DE20000000000000001 /* Assets.xcassets */; };
 		AA0000000000000000000001 /* MutationDialogs.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000001 /* MutationDialogs.swift */; };
+		AA7000000000000000000001 /* CherryPickDialog.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB7000000000000000000001 /* CherryPickDialog.swift */; };
 		AA4000000000000000000001 /* AppSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB4000000000000000000001 /* AppSettings.swift */; };
 		AA4000000000000000000002 /* ApplicationShellDialogs.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB4000000000000000000002 /* ApplicationShellDialogs.swift */; };
 		AA4000000000000000000003 /* CommitWorkflowDialog.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB4000000000000000000003 /* CommitWorkflowDialog.swift */; };
@@ -226,6 +227,7 @@
 		AA2B71E02E8D15ABC2854D97 /* ShowOnlyFirstParent.png */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = image.png; path = ShowOnlyFirstParent.png; sourceTree = "<group>"; };
 		AACDBF250D361734280610CE /* FolderSubmodule.png */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = image.png; path = FolderSubmodule.png; sourceTree = "<group>"; };
 		ADB4DF41D3F4ED3B37F9F318 /* DetailTabsViewController.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DetailTabsViewController.swift; sourceTree = "<group>"; };
+		BB7000000000000000000001 /* CherryPickDialog.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CherryPickDialog.swift; sourceTree = "<group>"; };
 		C1EC223D3244B0A182AB06AB /* RepoStateClean.png */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = image.png; path = RepoStateClean.png; sourceTree = "<group>"; };
 		C340821061BD501D061646B0 /* RepositoryBrowsingDataSource.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = RepositoryBrowsingDataSource.swift; sourceTree = "<group>"; };
 		C49E5508949DA856172F8F09 /* Remotes.png */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = image.png; path = Remotes.png; sourceTree = "<group>"; };
@@ -351,6 +353,7 @@
 		5FDEEC39A75A8AB2ECC3B592 /* UI */ = {
 			isa = PBXGroup;
 			children = (
+				BB7000000000000000000001 /* CherryPickDialog.swift */,
 				CF33F0EB3F8DB1738220F2F0 /* CommitDetailViewController.swift */,
 				ADB4DF41D3F4ED3B37F9F318 /* DetailTabsViewController.swift */,
 				162693D4B6C7F5F8CFCDD4F0 /* RepositoryBrowserHost.swift */,
@@ -654,6 +657,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				AA7000000000000000000001 /* CherryPickDialog.swift in Sources */,
 				B00000000000000000000001 /* GitProcess.swift in Sources */,
 				B00000000000000000000002 /* GitParsers.swift in Sources */,
 				B00000000000000000000003 /* GitRepositoryBrowsingDataSource.swift in Sources */,

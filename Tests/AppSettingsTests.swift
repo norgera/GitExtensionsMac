@@ -6,6 +6,7 @@ enum AppSettingsTests {
         testPreferencesRoundTrip()
         testPullPreferencesRoundTrip()
         testRebasePreferencesRoundTrip()
+        testCherryPickPreferencesRoundTrip()
         testPushPreferencesRoundTrip()
         testCommitPreferencesRoundTrip()
         testFileStatusListPreferencesRoundTrip()
@@ -93,6 +94,17 @@ enum AppSettingsTests {
             preferences.helpExpanded = false
             store.saveRebasePreferences(preferences)
             precondition(AppSettingsStore(defaults: defaults).rebasePreferences == preferences)
+        }
+    }
+
+    private static func testCherryPickPreferencesRoundTrip() {
+        withStore { store, defaults in
+            let preferences = CherryPickPreferences(
+                automaticallyCommit: true,
+                addReference: true
+            )
+            store.saveCherryPickPreferences(preferences)
+            precondition(AppSettingsStore(defaults: defaults).cherryPickPreferences == preferences)
         }
     }
 

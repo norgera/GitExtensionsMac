@@ -1,5 +1,16 @@
 import AppKit
 
+enum ConflictSequencerAction: Equatable, Sendable {
+    case none
+    case continued
+    case aborted
+}
+
+struct ConflictResolutionResult: Sendable {
+    let snapshot: RepositorySnapshot?
+    let sequencerAction: ConflictSequencerAction
+}
+
 @MainActor
 enum WorkflowManagementDialogs {
     static func manageStashes(
@@ -28,6 +39,20 @@ enum WorkflowManagementDialogs {
         source: any RepositoryMutatingDataSource,
         window: NSWindow
     ) async -> RepositorySnapshot? {
+        await presentConflictResolver(source: source, window: window).snapshot
+    }
+
+    static func resolveCherryPickConflicts(
+        source: any RepositoryMutatingDataSource,
+        window: NSWindow
+    ) async -> ConflictResolutionResult {
+        await presentConflictResolver(source: source, window: window)
+    }
+
+    private static func presentConflictResolver(
+        source: any RepositoryMutatingDataSource,
+        window: NSWindow
+    ) async -> ConflictResolutionResult {
         let controller = ConflictResolverViewController(source: source)
         let panel = NSPanel(contentViewController: controller)
         panel.title = "Resolve merge conflicts"
@@ -37,9 +62,9 @@ enum WorkflowManagementDialogs {
         controller.panel = panel
         panel.delegate = controller
         return await withCheckedContinuation { continuation in
-            controller.onClose = { refreshed in
+            controller.onClose = { result in
                 window.endSheet(panel)
-                continuation.resume(returning: refreshed)
+                continuation.resume(returning: result)
             }
             window.beginSheet(panel)
         }
@@ -735,7 +760,7 @@ private final class StashManagerViewController: NSViewController, NSTableViewDat
 @MainActor
 private final class ConflictResolverViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSWindowDelegate {
     weak var panel: NSPanel?
-    var onClose: ((RepositorySnapshot?) -> Void)?
+    var onClose: ((ConflictResolutionResult) -> Void)?
     private let source: any RepositoryMutatingDataSource
     private let table = NSTableView()
     private let descriptionLabel = NSTextField(labelWithString: "Select a file")
@@ -752,6 +777,7 @@ private final class ConflictResolverViewController: NSViewController, NSTableVie
     private var commitWindowController: NSWindowController?
     private var task: Task<Void, Never>?
     private var didClose = false
+    private var sequencerAction = ConflictSequencerAction.none
 
     init(source: any RepositoryMutatingDataSource) { self.source = source; super.init(nibName: nil, bundle: nil) }
     required init?(coder: NSCoder) { nil }
@@ -862,8 +888,8 @@ private final class ConflictResolverViewController: NSViewController, NSTableVie
     }
     @objc private func continueOperation() {
         guard let state else { return }
-        if state.rebaseInProgress { run { try await $0.continueRebase() } }
-        else if state.cherryPickInProgress { run { try await $0.continueCherryPick() } }
+        if state.rebaseInProgress { run(sequencerAction: .continued) { try await $0.continueRebase() } }
+        else if state.cherryPickInProgress { run(sequencerAction: .continued) { try await $0.continueCherryPick() } }
         else if mergeInProgress { presentMergeCommit() }
     }
     @objc private func skipOperation() { run { try await $0.skipRebase() } }
@@ -872,13 +898,13 @@ private final class ConflictResolverViewController: NSViewController, NSTableVie
         task = Task { @MainActor [weak self] in
             guard let self else { return }
             if state.rebaseInProgress {
-                await execute { try await $0.abortRebase() }
+                await execute(sequencerAction: .aborted) { try await $0.abortRebase() }
             } else if state.cherryPickInProgress {
                 guard await MutationDialogs.confirmAbortCherryPick(window: panel) else { return }
-                await execute { try await $0.abortCherryPick() }
+                await execute(sequencerAction: .aborted) { try await $0.abortCherryPick() }
             } else if mergeInProgress {
                 guard await MutationDialogs.confirmAbortMerge(window: panel) else { return }
-                await execute { try await $0.abortMerge() }
+                await execute(sequencerAction: .aborted) { try await $0.abortMerge() }
             }
         }
     }
@@ -918,13 +944,25 @@ private final class ConflictResolverViewController: NSViewController, NSTableVie
             }
         }
     }
-    private func run(_ operation: @escaping @Sendable (any RepositoryMutatingDataSource) async throws -> RepositoryMutationResult) {
-        task?.cancel(); task = Task { @MainActor [weak self] in guard let self else { return }; await execute(operation) }
+    private func run(
+        sequencerAction: ConflictSequencerAction = .none,
+        _ operation: @escaping @Sendable (any RepositoryMutatingDataSource) async throws -> RepositoryMutationResult
+    ) {
+        task?.cancel()
+        task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await execute(sequencerAction: sequencerAction, operation)
+        }
     }
-    private func execute(_ operation: @escaping @Sendable (any RepositoryMutatingDataSource) async throws -> RepositoryMutationResult) async {
+    private func execute(
+        sequencerAction: ConflictSequencerAction = .none,
+        _ operation: @escaping @Sendable (any RepositoryMutatingDataSource) async throws -> RepositoryMutationResult
+    ) async {
         do {
             status.stringValue = "Updating repository…"
-            let result = try await operation(source); latestSnapshot = result.snapshot
+            let result = try await operation(source)
+            latestSnapshot = result.snapshot
+            if sequencerAction != .none { self.sequencerAction = sequencerAction }
             switch result.outcome {
             case .completed: status.stringValue = result.message
             case .conflicts(let values): status.stringValue = "\(values.count) conflicted path(s) remain."
@@ -939,6 +977,6 @@ private final class ConflictResolverViewController: NSViewController, NSTableVie
         guard !didClose else { return }
         didClose = true
         commitWindowController?.close()
-        onClose?(value)
+        onClose?(ConflictResolutionResult(snapshot: value, sequencerAction: sequencerAction))
     }
 }

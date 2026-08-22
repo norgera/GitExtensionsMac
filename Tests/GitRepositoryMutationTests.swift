@@ -54,10 +54,13 @@ enum GitRepositoryMutationTests {
         let fixture = try MutationGitFixture.make()
         defer { fixture.remove() }
 
+        try await testSingleCherryPickAndDetachedHead(fixture)
         try await testCherryPickOrderingAndOptions(fixture)
+        try await testCherryPickSequentialOptionsAndPartialCancel(fixture)
         try await testCherryPickMergeMainline(fixture)
         try await testCherryPickConflictContinue(fixture)
         try await testCherryPickConflictAbort(fixture)
+        try await testCherryPickNonConflictFailure(fixture)
         print("GitRepositoryMutationTests.cherryPick: passed")
     }
 
@@ -1276,6 +1279,94 @@ enum GitRepositoryMutationTests {
         try require(noCommit.selectedCommitID == "$index", "cherry-pick --no-commit: refreshed selection targets Commit index")
     }
 
+    private static func testSingleCherryPickAndDetachedHead(_ fixture: MutationGitFixture) async throws {
+        let repository = try fixture.clone(named: "Single cherry pick repo")
+        let topic = try fixture.git(["rev-parse", "origin/topic"], in: repository).trimmed
+        let before = try fixture.git(["rev-parse", "HEAD"], in: repository).trimmed
+        let source = GitRepositoryBrowsingDataSource(repositoryURL: repository)
+        _ = try await source.loadSnapshot()
+        let result = try await source.cherryPick(RepositoryCherryPickRequest(
+            items: [RepositoryCherryPickItem(commitID: topic, mainlineParent: nil)],
+            options: RepositoryCherryPickOptions(automaticallyCommit: true, addReference: false)
+        ))
+        let head = try fixture.git(["rev-parse", "HEAD"], in: repository).trimmed
+        try require(head != before, "single cherry-pick: HEAD advances")
+        try require(try fixture.git(["log", "-1", "--format=%s"], in: repository).trimmed == "Topic change", "single cherry-pick: source subject is retained")
+        try require(result.selectedCommitID == head && result.snapshot.commits.first(where: \.isHEAD)?.id == head, "single cherry-pick: snapshot and selection refresh to Git HEAD")
+        let state = try await source.loadMutationState()
+        try require(!state.cherryPickInProgress && state.conflictedPaths.isEmpty && !state.hasStagedChanges, "single cherry-pick: sequencer, index, and worktree are clean")
+
+        let detachedRepository = try fixture.clone(named: "Detached cherry pick repo")
+        let detachedTopic = try fixture.git(["rev-parse", "origin/topic"], in: detachedRepository).trimmed
+        try fixture.git(["checkout", "--detach", "HEAD"], in: detachedRepository)
+        let detachedSource = GitRepositoryBrowsingDataSource(repositoryURL: detachedRepository)
+        _ = try await detachedSource.loadSnapshot()
+        let detached = try await detachedSource.cherryPick(RepositoryCherryPickRequest(
+            items: [RepositoryCherryPickItem(commitID: detachedTopic, mainlineParent: nil)],
+            options: RepositoryCherryPickOptions(automaticallyCommit: true, addReference: false)
+        ))
+        let detachedHead = try fixture.git(["rev-parse", "HEAD"], in: detachedRepository).trimmed
+        let detachedState = try await detachedSource.loadMutationState()
+        try require(detachedState.currentBranch == nil, "detached cherry-pick: HEAD remains detached")
+        try require(detached.selectedCommitID == detachedHead, "detached cherry-pick: selection follows detached HEAD")
+    }
+
+    private static func testCherryPickSequentialOptionsAndPartialCancel(_ fixture: MutationGitFixture) async throws {
+        let repository = try fixture.clone(named: "Sequential dialog cherry pick repo")
+        try fixture.git(["checkout", "-b", "sequential-source"], in: repository)
+        try fixture.write("first dialog\n", to: repository.appendingPathComponent("dialog-first.txt"))
+        try fixture.git(["add", "--all", "--"], in: repository)
+        try fixture.git(["commit", "-m", "Dialog first"], in: repository)
+        let first = try fixture.git(["rev-parse", "HEAD"], in: repository).trimmed
+        try fixture.write("second dialog\n", to: repository.appendingPathComponent("dialog-second.txt"))
+        try fixture.git(["add", "--all", "--"], in: repository)
+        try fixture.git(["commit", "-m", "Dialog second"], in: repository)
+        let second = try fixture.git(["rev-parse", "HEAD"], in: repository).trimmed
+        try fixture.git(["checkout", "main"], in: repository)
+
+        let source = GitRepositoryBrowsingDataSource(repositoryURL: repository)
+        _ = try await source.loadSnapshot()
+        let propagatedOptions = RepositoryCherryPickOptions(automaticallyCommit: true, addReference: true)
+        _ = try await source.cherryPick(RepositoryCherryPickRequest(
+            items: [RepositoryCherryPickItem(commitID: first, mainlineParent: nil)],
+            options: propagatedOptions
+        ))
+        _ = try await source.cherryPick(RepositoryCherryPickRequest(
+            items: [RepositoryCherryPickItem(commitID: second, mainlineParent: nil)],
+            options: propagatedOptions
+        ))
+        let bodies = try fixture.git(["log", "-2", "--format=%b"], in: repository)
+        try require(bodies.contains("cherry picked from commit \(first)") && bodies.contains("cherry picked from commit \(second)"), "sequential dialogs: propagated -x option is applied to each accepted form")
+        let subjects = try fixture.git(["log", "-2", "--reverse", "--format=%s"], in: repository)
+            .split(separator: "\n").map(String.init)
+        try require(subjects == ["Dialog first", "Dialog second"], "sequential dialogs: individual backend requests retain oldest-to-newest order")
+
+        let cancelledRepository = try fixture.clone(named: "Partial cancel cherry pick repo")
+        try fixture.git(["checkout", "-b", "cancel-source"], in: cancelledRepository)
+        try fixture.write("first cancelled sequence dialog\n", to: cancelledRepository.appendingPathComponent("dialog-first.txt"))
+        try fixture.git(["add", "--all", "--"], in: cancelledRepository)
+        try fixture.git(["commit", "-m", "Dialog first"], in: cancelledRepository)
+        let cancelledFirst = try fixture.git(["rev-parse", "HEAD"], in: cancelledRepository).trimmed
+        try fixture.write("second cancelled sequence dialog\n", to: cancelledRepository.appendingPathComponent("dialog-second.txt"))
+        try fixture.git(["add", "--all", "--"], in: cancelledRepository)
+        try fixture.git(["commit", "-m", "Dialog second"], in: cancelledRepository)
+        try fixture.git(["checkout", "main"], in: cancelledRepository)
+        let cancelledSource = GitRepositoryBrowsingDataSource(repositoryURL: cancelledRepository)
+        _ = try await cancelledSource.loadSnapshot()
+        let beforePartial = try fixture.git(["rev-parse", "HEAD"], in: cancelledRepository).trimmed
+        let partial = try await cancelledSource.cherryPick(RepositoryCherryPickRequest(
+            items: [RepositoryCherryPickItem(commitID: cancelledFirst, mainlineParent: nil)],
+            options: RepositoryCherryPickOptions(automaticallyCommit: true, addReference: false)
+        ))
+        // Cancelling the next per-commit form performs no Git operation. The
+        // already accepted request must remain applied and no later item may run.
+        let partialHead = try fixture.git(["rev-parse", "HEAD"], in: cancelledRepository).trimmed
+        try require(partial.selectedCommitID == partialHead && partialHead != beforePartial, "partial cancel: the accepted commit remains as the refreshed target HEAD")
+        try require(FileManager.default.fileExists(atPath: cancelledRepository.appendingPathComponent("dialog-first.txt").path), "partial cancel: completed commit remains applied")
+        try require(!FileManager.default.fileExists(atPath: cancelledRepository.appendingPathComponent("dialog-second.txt").path), "partial cancel: remaining commit is not applied")
+        try require(try fixture.git(["log", "-1", "--format=%s"], in: cancelledRepository).trimmed == "Dialog first", "partial cancel: history stops after the last accepted form")
+    }
+
     private static func testCherryPickMergeMainline(_ fixture: MutationGitFixture) async throws {
         let repository = try fixture.clone(named: "Cherry pick merge repo")
         try fixture.write("main side\n", to: repository.appendingPathComponent("main-side.txt"))
@@ -1306,11 +1397,42 @@ enum GitRepositoryMutationTests {
             try require(parent == nil && count == 2, "cherry-pick: merge validation reports available parents")
         }
 
+        do {
+            _ = try await source.cherryPick(RepositoryCherryPickRequest(
+                items: [RepositoryCherryPickItem(commitID: merge, mainlineParent: 3)],
+                options: RepositoryCherryPickOptions(automaticallyCommit: true, addReference: false)
+            ))
+            throw MutationFixtureError("cherry-pick: invalid merge mainline was accepted")
+        } catch RepositoryMutationError.invalidMainline(_, let parent, let count) {
+            try require(parent == 3 && count == 2, "cherry-pick: out-of-range mainline reports the requested and available parents")
+        }
+
         _ = try await source.cherryPick(RepositoryCherryPickRequest(
             items: [RepositoryCherryPickItem(commitID: merge, mainlineParent: 1)],
             options: RepositoryCherryPickOptions(automaticallyCommit: true, addReference: false)
         ))
         try require(FileManager.default.fileExists(atPath: repository.appendingPathComponent("merge-topic.txt").path), "cherry-pick: selected merge mainline applies the other-parent change")
+
+        let secondParent = try fixture.git(["rev-parse", "\(merge)^2"], in: repository).trimmed
+        try fixture.git(["checkout", "-B", "merge-target-parent-two", secondParent], in: repository)
+        let parentTwoSource = GitRepositoryBrowsingDataSource(repositoryURL: repository)
+        _ = try await parentTwoSource.loadSnapshot()
+        _ = try await parentTwoSource.cherryPick(RepositoryCherryPickRequest(
+            items: [RepositoryCherryPickItem(commitID: merge, mainlineParent: 2)],
+            options: RepositoryCherryPickOptions(automaticallyCommit: true, addReference: false)
+        ))
+        try require(FileManager.default.fileExists(atPath: repository.appendingPathComponent("main-later.txt").path), "cherry-pick: second valid mainline applies the first-parent side")
+
+        let nonMerge = try fixture.git(["rev-parse", "\(merge)^1"], in: repository).trimmed
+        do {
+            _ = try await parentTwoSource.cherryPick(RepositoryCherryPickRequest(
+                items: [RepositoryCherryPickItem(commitID: nonMerge, mainlineParent: 1)],
+                options: RepositoryCherryPickOptions(automaticallyCommit: true, addReference: false)
+            ))
+            throw MutationFixtureError("cherry-pick: non-merge accepted a mainline")
+        } catch RepositoryMutationError.invalidMainline(_, let parent, let count) {
+            try require(parent == 1 && count == 1, "cherry-pick: non-merge mainline validation is explicit")
+        }
     }
 
     private static func testCherryPickConflictContinue(_ fixture: MutationGitFixture) async throws {
@@ -1383,6 +1505,43 @@ enum GitRepositoryMutationTests {
         try require(abortedState.conflictedPaths.isEmpty, "cherry-pick abort: conflict state is cleared")
         try require(aborted.selectedCommitID == before, "cherry-pick abort: selection returns to HEAD")
         try require(try String(contentsOf: repository.appendingPathComponent("shared.txt"), encoding: .utf8) == "abort current\n", "cherry-pick abort: original worktree content is restored")
+    }
+
+    private static func testCherryPickNonConflictFailure(_ fixture: MutationGitFixture) async throws {
+        let repository = try fixture.clone(named: "Cherry pick failure repo")
+        let topic = try fixture.git(["rev-parse", "origin/topic"], in: repository).trimmed
+        let before = try fixture.git(["rev-parse", "HEAD"], in: repository).trimmed
+        // The topic commit adds topic.txt. An untracked file at that path makes
+        // Git reject the operation before applying anything, while still using
+        // the real cherry-pick command and its diagnostic output.
+        try fixture.write("untracked local content\n", to: repository.appendingPathComponent("topic.txt"))
+
+        let source = GitRepositoryBrowsingDataSource(repositoryURL: repository)
+        _ = try await source.loadSnapshot()
+        do {
+            _ = try await source.cherryPick(RepositoryCherryPickRequest(
+                items: [RepositoryCherryPickItem(commitID: topic, mainlineParent: nil)],
+                options: RepositoryCherryPickOptions(automaticallyCommit: true, addReference: false)
+            ))
+            throw MutationFixtureError("cherry-pick failure: rejecting hook unexpectedly succeeded")
+        } catch GitError.commandFailed(let arguments, let status, let stderr) {
+            try require(arguments == ["cherry-pick", topic], "cherry-pick failure: typed argument array survives")
+            try require(
+                status != 0
+                    && stderr.contains("untracked working tree files would be overwritten")
+                    && stderr.contains("topic.txt"),
+                "cherry-pick failure: exit status and Git diagnostics survive"
+            )
+        }
+        try require(try fixture.git(["rev-parse", "HEAD"], in: repository).trimmed == before, "cherry-pick failure: HEAD does not advance")
+        try require(
+            try String(contentsOf: repository.appendingPathComponent("topic.txt"), encoding: .utf8) == "untracked local content\n",
+            "cherry-pick failure: rejected operation preserves the untracked file"
+        )
+        let state = try await source.loadMutationState()
+        if state.cherryPickInProgress {
+            _ = try await source.abortCherryPick()
+        }
     }
 
     private static func testOrdinaryRebaseAndAutoStash(_ fixture: MutationGitFixture) async throws {

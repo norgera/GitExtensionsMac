@@ -222,7 +222,11 @@ enum RevisionContextMenuBuilder {
             entries += [
                 command("revision.commit.checkout", "Checkout this commit…"),
                 command("revision.commit.revert", "Revert this commit…"),
-                command("revision.commit.cherryPick", "Cherry pick this commit…")
+                command(
+                    "revision.commit.cherryPick",
+                    "Cherry pick this commit…",
+                    enabled: !revision.isArtificial && selected.allSatisfy { !$0.isArtificial }
+                )
             ]
         }
         entries.append(command("revision.commit.archive", "Archive this commit…"))

@@ -6,6 +6,7 @@ enum ContextMenuStateTests {
         testCurrentRevisionRefCommands()
         testNonCurrentRevisionRefCommands()
         testMultipleRevisionSelection()
+        testArtificialRevisionCherryPickState()
         testSequencerCommands()
         testRevisionNavigation()
         testCurrentBranchTreeCommands()
@@ -84,6 +85,22 @@ enum ContextMenuStateTests {
         expect(menu.entry(id: "revision.branch.rebase.advanced")?.isEnabled == true, "revision: advanced rebase accepts two real revisions")
         expect(menu.entry(id: "revision.compare.selected")?.isEnabled == true, "revision: selected revisions can be compared")
         expect(menu.entry(id: "revision.commit.edit")?.isEnabled == false, "revision: edit is disabled for multi-selection")
+        expect(menu.entry(id: "revision.commit.cherryPick")?.isEnabled == true, "revision: real multi-selection can be cherry-picked")
+    }
+
+    private static func testArtificialRevisionCherryPickState() {
+        let worktree = commit("$working-directory", kind: .workingDirectory)
+        let menu = RevisionContextMenuBuilder.build(.init(
+            focusedCommit: worktree,
+            selectedCommits: [worktree],
+            history: [worktree, commit("head")],
+            currentBranchName: "main"
+        ))
+
+        expect(
+            menu.entry(id: "revision.commit.cherryPick")?.isEnabled == false,
+            "revision: artificial revisions cannot be cherry-picked"
+        )
     }
 
     private static func testSequencerCommands() {
@@ -238,7 +255,8 @@ enum ContextMenuStateTests {
     private static func commit(
         _ id: String,
         parents: [String] = [],
-        refs: [RevisionReference] = []
+        refs: [RevisionReference] = [],
+        kind: Commit.Kind = .revision
     ) -> Commit {
         Commit(
             id: id,
@@ -252,7 +270,8 @@ enum ContextMenuStateTests {
             committerEmail: "test@example.com",
             commitDate: Date(timeIntervalSince1970: 1),
             parentIDs: parents,
-            references: refs
+            references: refs,
+            kind: kind
         )
     }
 

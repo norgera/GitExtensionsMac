@@ -331,74 +331,6 @@ enum MutationDialogs {
         return await begin(alert: alert, for: window) == .alertFirstButtonReturn
     }
 
-    static func cherryPickRequest(
-        commits: [Commit],
-        history: [Commit],
-        window: NSWindow
-    ) async -> RepositoryCherryPickRequest? {
-        guard !commits.isEmpty else { return nil }
-        let alert = NSAlert()
-        alert.messageText = commits.count == 1 ? "Cherry pick commit" : "Cherry pick \(commits.count) commits"
-        alert.informativeText = "Commits will be applied from oldest to newest in the order shown."
-        alert.alertStyle = .informational
-        alert.addButton(withTitle: "Cherry pick")
-        alert.addButton(withTitle: "Cancel")
-
-        let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 6
-        var mainlineControls: [String: NSPopUpButton] = [:]
-        for (index, commit) in commits.enumerated() {
-            let row = label("\(index + 1). \(commit.shortID): \(commit.subject)")
-            row.lineBreakMode = .byTruncatingTail
-            row.widthAnchor.constraint(lessThanOrEqualToConstant: 510).isActive = true
-            stack.addArrangedSubview(row)
-            if commit.isMerge {
-                let parent = NSPopUpButton()
-                let titles = commit.parentIDs.enumerated().map { parentIndex, parentID in
-                    let parentCommit = history.first(where: { $0.id == parentID })
-                    let description = parentCommit.map { "\($0.shortID): \($0.subject)" } ?? String(parentID.prefix(8))
-                    return "Parent \(parentIndex + 1) — \(description)"
-                }
-                parent.addItems(withTitles: titles)
-                parent.controlSize = .small
-                stack.addArrangedSubview(labeledControl("Mainline:", parent))
-                mainlineControls[commit.id] = parent
-            }
-        }
-
-        let automaticallyCommit = checkbox("Automatically create a commit", state: false)
-        let addReference = checkbox("Add commit reference to commit message (-x)", state: false)
-        stack.addArrangedSubview(automaticallyCommit)
-        stack.addArrangedSubview(addReference)
-
-        let scroll = NSScrollView()
-        scroll.documentView = stack
-        scroll.hasVerticalScroller = true
-        scroll.borderType = .noBorder
-        scroll.translatesAutoresizingMaskIntoConstraints = false
-        scroll.widthAnchor.constraint(equalToConstant: 540).isActive = true
-        scroll.heightAnchor.constraint(equalToConstant: min(330, CGFloat(110 + commits.count * 31))).isActive = true
-        alert.accessoryView = scroll
-
-        let response = await begin(alert: alert, for: window)
-        guard response == .alertFirstButtonReturn else { return nil }
-        let items = commits.map { commit in
-            RepositoryCherryPickItem(
-                commitID: commit.id,
-                mainlineParent: mainlineControls[commit.id].map { $0.indexOfSelectedItem + 1 }
-            )
-        }
-        return RepositoryCherryPickRequest(
-            items: items,
-            options: RepositoryCherryPickOptions(
-                automaticallyCommit: automaticallyCommit.state == .on,
-                addReference: addReference.state == .on
-            )
-        )
-    }
-
     static func confirmAbortCherryPick(window: NSWindow) async -> Bool {
         let alert = NSAlert()
         alert.messageText = "Abort cherry-pick?"
@@ -406,6 +338,18 @@ enum MutationDialogs {
         alert.alertStyle = .warning
         alert.addButton(withTitle: "Abort")
         alert.addButton(withTitle: "Cancel")
+        return await begin(alert: alert, for: window) == .alertFirstButtonReturn
+    }
+
+    static func confirmResolveCherryPickConflicts(paths: [String], window: NSWindow) async -> Bool {
+        let alert = NSAlert()
+        alert.messageText = "Resolve merge conflicts?"
+        alert.informativeText = paths.isEmpty
+            ? "The cherry-pick stopped with conflicts."
+            : "The cherry-pick stopped with conflicts in \(paths.count) path(s)."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Resolve conflicts")
+        alert.addButton(withTitle: "Later")
         return await begin(alert: alert, for: window) == .alertFirstButtonReturn
     }
 

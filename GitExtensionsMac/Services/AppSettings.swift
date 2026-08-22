@@ -58,6 +58,11 @@ struct RebasePreferences: Codable, Equatable, Sendable {
     var helpExpanded = true
 }
 
+struct CherryPickPreferences: Codable, Equatable, Sendable {
+    var automaticallyCommit = false
+    var addReference = false
+}
+
 enum PushRejectedActionPreference: String, Codable, CaseIterable, Sendable {
     case ask
     case none
@@ -313,6 +318,7 @@ final class AppSettingsStore {
         static let commitPreferences = "GitExtensionsMac.commitPreferences.v1"
         static let fileStatusListPreferences = "GitExtensionsMac.fileStatusListPreferences.v1"
         static let rebasePreferences = "GitExtensionsMac.rebasePreferences.v1"
+        static let cherryPickPreferences = "GitExtensionsMac.cherryPickPreferences.v1"
     }
 
     private let defaults: UserDefaults
@@ -323,6 +329,7 @@ final class AppSettingsStore {
     private(set) var commitPreferences: CommitPreferences
     private(set) var fileStatusListPreferences: FileStatusListPreferences
     private(set) var rebasePreferences: RebasePreferences
+    private(set) var cherryPickPreferences: CherryPickPreferences
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -348,6 +355,9 @@ final class AppSettingsStore {
         rebasePreferences = defaults.data(forKey: Key.rebasePreferences)
             .flatMap { try? decoder.decode(RebasePreferences.self, from: $0) }
             ?? RebasePreferences()
+        cherryPickPreferences = defaults.data(forKey: Key.cherryPickPreferences)
+            .flatMap { try? decoder.decode(CherryPickPreferences.self, from: $0) }
+            ?? CherryPickPreferences()
         recentRepositories.removeAll { !FileManager.default.fileExists(atPath: $0.path) }
         applyAppearance()
     }
@@ -391,6 +401,11 @@ final class AppSettingsStore {
     func saveRebasePreferences(_ preferences: RebasePreferences) {
         rebasePreferences = preferences
         defaults.set(try? JSONEncoder().encode(preferences), forKey: Key.rebasePreferences)
+    }
+
+    func saveCherryPickPreferences(_ preferences: CherryPickPreferences) {
+        cherryPickPreferences = preferences
+        defaults.set(try? JSONEncoder().encode(preferences), forKey: Key.cherryPickPreferences)
     }
 
     func recordPullURL(_ value: String) {

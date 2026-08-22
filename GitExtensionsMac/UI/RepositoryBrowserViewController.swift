@@ -705,7 +705,11 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         case .manageStashes: beginManageStashes()
         case .solveMergeConflicts: beginResolveConflicts()
         case .cherryPick:
-            if let commit = snapshot?.commits.first(where: { $0.id == selectedCommitID }) { beginCherryPick([commit]) }
+            // FormBrowse's application Commands menu is a single-revision
+            // entry point. RevisionGrid's context menu owns multi-selection.
+            if let commit = snapshot?.commits.first(where: { $0.id == selectedCommitID && !$0.isArtificial }) {
+                beginCherryPick([commit])
+            }
         case .rebase:
             if let commit = snapshot?.commits.first(where: { $0.id == selectedCommitID && !$0.isArtificial }) {
                 beginRebase(on: commit, interactive: false, showAdvancedOptions: true)
@@ -1689,37 +1693,102 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         mutationTask?.cancel()
         mutationTask = Task { @MainActor [weak self, weak window] in
             guard let self, let window else { return }
-            guard let request = await MutationDialogs.cherryPickRequest(
-                commits: ordered,
-                history: snapshot.commits,
-                window: window
-            ) else {
-                statusLabel.stringValue = "Cherry-pick cancelled"
-                return
-            }
-            do {
-                statusLabel.stringValue = "Cherry-picking…"
-                revisionDetailsTask?.cancel()
-                let result = try await mutationSource.cherryPick(request)
+            var options = RepositoryCherryPickOptions(
+                automaticallyCommit: AppSettingsStore.shared.cherryPickPreferences.automaticallyCommit,
+                addReference: AppSettingsStore.shared.cherryPickPreferences.addReference
+            )
+            var completedCount = 0
+            var preferredCommitID = previousSelection
+
+            for proposedCommit in ordered {
                 guard !Task.isCancelled else { return }
-                apply(snapshot: result.snapshot, preferredCommitID: result.selectedCommitID ?? previousSelection)
-                switch result.outcome {
-                case .completed:
-                    statusLabel.stringValue = result.message
-                case .conflicts(let paths):
-                    statusLabel.stringValue = "\(result.message) Resolve and stage \(paths.count) path(s), then Continue or Abort from the revision menu."
-                case .paused(let reason):
-                    statusLabel.stringValue = reason
+                guard let selection = await CherryPickDialog.present(
+                    commit: proposedCommit,
+                    history: snapshot.commits,
+                    options: options,
+                    owner: window
+                ) else {
+                    statusLabel.stringValue = completedCount == 0
+                        ? "Cherry-pick cancelled."
+                        : "Cherry-picked \(completedCount) commit(s); remaining revisions were cancelled."
+                    refreshOperationIndicators()
+                    return
                 }
-            } catch is CancellationError {
-                return
-            } catch {
-                if let refreshed = try? await mutationSource.loadSnapshot(), !Task.isCancelled {
-                    apply(snapshot: refreshed, preferredCommitID: previousSelection)
+
+                options = selection.options
+                AppSettingsStore.shared.saveCherryPickPreferences(CherryPickPreferences(
+                    automaticallyCommit: options.automaticallyCommit,
+                    addReference: options.addReference
+                ))
+
+                do {
+                    statusLabel.stringValue = "Cherry-picking \(selection.commit.shortID)…"
+                    revisionDetailsTask?.cancel()
+                    let result = try await mutationSource.cherryPick(RepositoryCherryPickRequest(
+                        items: [RepositoryCherryPickItem(
+                            commitID: selection.commit.id,
+                            mainlineParent: selection.mainlineParent
+                        )],
+                        options: selection.options
+                    ))
+                    guard !Task.isCancelled else { return }
+                    preferredCommitID = result.selectedCommitID ?? preferredCommitID
+                    apply(snapshot: result.snapshot, preferredCommitID: preferredCommitID)
+
+                    switch result.outcome {
+                    case .completed:
+                        completedCount += 1
+                        statusLabel.stringValue = result.message
+                    case .conflicts(let paths):
+                        statusLabel.stringValue = "\(result.message) Resolve and stage \(paths.count) path(s), then Continue or Abort."
+                        refreshOperationIndicators()
+                        guard await MutationDialogs.confirmResolveCherryPickConflicts(paths: paths, window: window) else {
+                            return
+                        }
+                        let resolution = await WorkflowManagementDialogs.resolveCherryPickConflicts(
+                            source: mutationSource,
+                            window: window
+                        )
+                        if let refreshed = resolution.snapshot {
+                            preferredCommitID = refreshed.commits.first(where: \.isHEAD)?.id ?? preferredCommitID
+                            apply(snapshot: refreshed, preferredCommitID: preferredCommitID)
+                        }
+                        refreshOperationIndicators()
+                        switch resolution.sequencerAction {
+                        case .continued:
+                            completedCount += 1
+                            statusLabel.stringValue = "Cherry-pick continued."
+                        case .aborted:
+                            statusLabel.stringValue = completedCount == 0
+                                ? "Cherry-pick aborted."
+                                : "Cherry-pick aborted after \(completedCount) completed commit(s)."
+                            return
+                        case .none:
+                            statusLabel.stringValue = "Cherry-pick remains paused. Resolve all conflicts, then Continue or Abort."
+                            return
+                        }
+                    case .paused(let reason):
+                        statusLabel.stringValue = reason
+                        refreshOperationIndicators()
+                        return
+                    }
+                } catch is CancellationError {
+                    return
+                } catch {
+                    if let refreshed = try? await mutationSource.loadSnapshot(), !Task.isCancelled {
+                        apply(snapshot: refreshed, preferredCommitID: preferredCommitID)
+                    }
+                    statusLabel.stringValue = error.localizedDescription
+                    await MutationDialogs.showError(error, title: "Cherry-pick failed", window: window)
+                    refreshOperationIndicators()
+                    return
                 }
-                statusLabel.stringValue = error.localizedDescription
-                await MutationDialogs.showError(error, title: "Cherry-pick failed", window: window)
             }
+
+            statusLabel.stringValue = completedCount == 1
+                ? "Cherry-picked 1 commit."
+                : "Cherry-picked \(completedCount) commits."
+            refreshOperationIndicators()
         }
     }
 
