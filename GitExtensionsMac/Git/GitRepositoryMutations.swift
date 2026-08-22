@@ -162,12 +162,121 @@ struct RepositoryRebaseTodoItem: Hashable, Sendable {
 struct RepositoryRebaseRequest: Hashable, Sendable {
     let upstream: String
     let autoStash: Bool
+    let rebaseMerges: Bool
+    let updateRefs: Bool?
+    let ignoreDate: Bool
+    let committerDateIsAuthorDate: Bool
+    let onto: String?
+    let from: String?
+    let branch: String?
+
+    init(
+        upstream: String,
+        autoStash: Bool,
+        rebaseMerges: Bool = false,
+        updateRefs: Bool? = nil,
+        ignoreDate: Bool = false,
+        committerDateIsAuthorDate: Bool = false,
+        onto: String? = nil,
+        from: String? = nil,
+        branch: String? = nil
+    ) {
+        self.upstream = upstream
+        self.autoStash = autoStash
+        self.rebaseMerges = rebaseMerges
+        self.updateRefs = updateRefs
+        self.ignoreDate = ignoreDate
+        self.committerDateIsAuthorDate = committerDateIsAuthorDate
+        self.onto = onto
+        self.from = from
+        self.branch = branch
+    }
 }
 
 struct RepositoryInteractiveRebaseRequest: Hashable, Sendable {
     let upstream: String
     let items: [RepositoryRebaseTodoItem]
     let autoStash: Bool
+    let autoSquash: Bool
+    let rebaseMerges: Bool
+    let updateRefs: Bool?
+    let onto: String?
+    let from: String?
+    let branch: String?
+    let nativeTodo: String?
+
+    init(
+        upstream: String,
+        items: [RepositoryRebaseTodoItem],
+        autoStash: Bool,
+        autoSquash: Bool = false,
+        rebaseMerges: Bool = false,
+        updateRefs: Bool? = nil,
+        onto: String? = nil,
+        from: String? = nil,
+        branch: String? = nil,
+        nativeTodo: String? = nil
+    ) {
+        self.upstream = upstream
+        self.items = items
+        self.autoStash = autoStash
+        self.autoSquash = autoSquash
+        self.rebaseMerges = rebaseMerges
+        self.updateRefs = updateRefs
+        self.onto = onto
+        self.from = from
+        self.branch = branch
+        self.nativeTodo = nativeTodo
+    }
+}
+
+struct RepositoryInteractiveRebaseTodoRequest: Hashable, Sendable {
+    let upstream: String
+    let autoStash: Bool
+    let autoSquash: Bool
+    let rebaseMerges: Bool
+    let updateRefs: Bool?
+    let onto: String?
+    let from: String?
+    let branch: String?
+}
+
+enum RepositoryRebasePatchStatus: String, Hashable, Sendable {
+    case applied = "Applied"
+    case applying = "Applying…"
+    case pending = ""
+    case skipped = "Skipped"
+}
+
+struct RepositoryRebasePatch: Hashable, Sendable {
+    let action: String
+    let commitID: String
+    let subject: String
+    let author: String
+    let date: String
+    let status: RepositoryRebasePatchStatus
+}
+
+struct RepositoryRebaseState: Hashable, Sendable {
+    let inProgress: Bool
+    let hasConflicts: Bool
+    let currentBranch: String?
+    let currentCommitID: String?
+    let patches: [RepositoryRebasePatch]
+    let canEditTodo: Bool
+    let hasAutoStash: Bool
+}
+
+struct RepositoryRebaseConfiguration: Hashable, Sendable {
+    let autoSquash: Bool
+    let updateRefs: Bool
+    let supportsUpdateRefs: Bool
+    let isDirty: Bool
+}
+
+struct RepositoryMergeToolConfiguration: Hashable, Sendable {
+    let name: String
+    let usesGUISetting: Bool
 }
 
 struct RepositoryMutationState: Equatable, Sendable {
@@ -219,6 +328,7 @@ enum RepositoryMutationError: LocalizedError, Sendable {
     case invalidMainline(commitID: String, parent: Int?, parentCount: Int)
     case cherryPickNotInProgress
     case mergeNotInProgress
+    case mergeToolNotConfigured
     case operationInProgress(String)
     case rebaseNotInProgress
     case emptyRebasePlan
@@ -271,6 +381,8 @@ enum RepositoryMutationError: LocalizedError, Sendable {
             "No cherry-pick is currently in progress."
         case .mergeNotInProgress:
             "No merge is currently in progress."
+        case .mergeToolNotConfigured:
+            "There is no merge tool configured. Configure merge.guitool or merge.tool in Git settings."
         case .operationInProgress(let operation):
             "Cannot start this operation while \(operation) is in progress."
         case .rebaseNotInProgress:
@@ -308,9 +420,17 @@ protocol RepositoryMutatingDataSource: RepositoryBrowsingDataSource {
     func continueCherryPick() async throws -> RepositoryMutationResult
     func abortCherryPick() async throws -> RepositoryMutationResult
     func abortMerge() async throws -> RepositoryMutationResult
+    func loadMergeToolConfiguration() async throws -> RepositoryMergeToolConfiguration?
+    func runMergeTool(paths: [String]) async throws -> RepositoryMutationResult
     func loadInteractiveRebasePlan(upstream: String) async throws -> [RepositoryRebaseTodoItem]
+    func loadNativeInteractiveRebaseTodo(_ request: RepositoryInteractiveRebaseTodoRequest) async throws -> String
+    func loadRebaseConfiguration() async throws -> RepositoryRebaseConfiguration
+    func loadRebaseState() async throws -> RepositoryRebaseState
     func rebase(_ request: RepositoryRebaseRequest) async throws -> RepositoryMutationResult
     func interactiveRebase(_ request: RepositoryInteractiveRebaseRequest) async throws -> RepositoryMutationResult
+    func editRebaseTodo(_ items: [RepositoryRebaseTodoItem]) async throws -> RepositoryRebaseState
+    func loadRebaseTodoText() async throws -> String
+    func editRebaseTodoText(_ todo: String) async throws -> RepositoryRebaseState
     func continueRebase() async throws -> RepositoryMutationResult
     func skipRebase() async throws -> RepositoryMutationResult
     func abortRebase() async throws -> RepositoryMutationResult
@@ -889,6 +1009,41 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
         )
     }
 
+    func loadMergeToolConfiguration() async throws -> RepositoryMergeToolConfiguration? {
+        let repository = try mutationRepository()
+        let gui = try await rawMutation(["config", "--get", "merge.guitool"], in: repository)
+        let guiName = gui.standardOutputString.trimmingCharacters(in: .whitespacesAndNewlines)
+        if gui.succeeded, !guiName.isEmpty {
+            return RepositoryMergeToolConfiguration(name: guiName, usesGUISetting: true)
+        }
+        let standard = try await rawMutation(["config", "--get", "merge.tool"], in: repository)
+        let standardName = standard.standardOutputString.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard standard.succeeded, !standardName.isEmpty else { return nil }
+        return RepositoryMergeToolConfiguration(name: standardName, usesGUISetting: false)
+    }
+
+    func runMergeTool(paths: [String]) async throws -> RepositoryMutationResult {
+        let repository = try mutationRepository()
+        let paths = normalizedPaths(paths)
+        guard !paths.isEmpty else { throw RepositoryMutationError.noPaths }
+        let state = try await mutationState(in: repository)
+        let conflicts = Set(state.conflictedPaths)
+        guard paths.allSatisfy(conflicts.contains) else {
+            throw RepositoryMutationError.unresolvedConflicts(state.conflictedPaths)
+        }
+        guard let configuration = try await loadMergeToolConfiguration() else {
+            throw RepositoryMutationError.mergeToolNotConfigured
+        }
+        var arguments = ["mergetool"]
+        if configuration.usesGUISetting { arguments.append("--gui") }
+        arguments += ["--no-prompt", "--"] + paths
+        _ = try await checkedMutation(arguments, in: repository)
+        return try await refreshedMutationResult(
+            message: "Merge tool completed for \(paths.count) path(s).",
+            selectedCommitID: "$working-directory"
+        )
+    }
+
     func loadInteractiveRebasePlan(upstream: String) async throws -> [RepositoryRebaseTodoItem] {
         let repository = try mutationRepository()
         let resolvedUpstream = try await validateRevision(upstream, repository: repository)
@@ -907,15 +1062,174 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
         }
     }
 
+    func loadNativeInteractiveRebaseTodo(_ request: RepositoryInteractiveRebaseTodoRequest) async throws -> String {
+        let repository = try mutationRepository()
+        let state = try await mutationState(in: repository)
+        try validateCanStartRebase(state)
+        let upstream = try await validateRevision(request.upstream, repository: repository)
+        let arguments = try await rebaseArguments(
+            upstream: upstream,
+            interactive: true,
+            autoSquash: request.autoSquash,
+            autoStash: request.autoStash,
+            rebaseMerges: request.rebaseMerges,
+            updateRefs: request.updateRefs,
+            ignoreDate: false,
+            committerDateIsAuthorDate: false,
+            onto: request.onto,
+            from: request.from,
+            branch: request.branch,
+            repository: repository
+        )
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("GitExtensionsMac-RebaseTodo-\(UUID().uuidString)", isDirectory: true)
+        let editor = temporaryDirectory.appendingPathComponent("capture-todo.sh")
+        let capture = temporaryDirectory.appendingPathComponent("git-rebase-todo")
+        try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
+        let script = "#!/bin/sh\n/bin/cp \"$1\" \"$GIT_EXTENSIONS_MAC_TODO_CAPTURE\"\nexit 197\n"
+        try Data(script.utf8).write(to: editor, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: editor.path)
+        let result = try await git.run(
+            arguments: arguments,
+            in: repository.rootURL,
+            standardInput: nil,
+            environment: [
+                "GIT_SEQUENCE_EDITOR": editor.path,
+                "GIT_EDITOR": "true",
+                "GIT_EXTENSIONS_MAC_TODO_CAPTURE": capture.path
+            ]
+        )
+        let after = try await mutationState(in: repository)
+        if after.rebaseInProgress {
+            _ = try await rawMutation(["rebase", "--abort"], in: repository)
+        }
+        guard let data = FileManager.default.contents(atPath: capture.path),
+              let todo = String(data: data, encoding: .utf8),
+              !todo.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            throw commandError(from: result)
+        }
+        return todo
+    }
+
+    func loadRebaseConfiguration() async throws -> RepositoryRebaseConfiguration {
+        let repository = try mutationRepository()
+        let state = try await mutationState(in: repository)
+        async let autoSquashResult = rawMutation(["config", "--bool", "--get", "rebase.autosquash"], in: repository)
+        async let updateRefsResult = rawMutation(["config", "--bool", "--get", "rebase.updateRefs"], in: repository)
+        async let versionResult = rawMutation(["version"], in: repository)
+        let (autoSquash, updateRefs, version) = try await (autoSquashResult, updateRefsResult, versionResult)
+        return RepositoryRebaseConfiguration(
+            autoSquash: configuredBoolean(autoSquash),
+            updateRefs: configuredBoolean(updateRefs),
+            supportsUpdateRefs: gitVersionSupportsUpdateRefs(version.standardOutputString),
+            isDirty: state.isDirty
+        )
+    }
+
+    func loadRebaseState() async throws -> RepositoryRebaseState {
+        let repository = try mutationRepository()
+        let mutation = try await mutationState(in: repository)
+        let rebaseDirectory = rebaseDirectoryURL(repository)
+        guard mutation.rebaseInProgress, let rebaseDirectory else {
+            return RepositoryRebaseState(
+                inProgress: false,
+                hasConflicts: false,
+                currentBranch: mutation.currentBranch,
+                currentCommitID: nil,
+                patches: [],
+                canEditTodo: false,
+                hasAutoStash: false
+            )
+        }
+
+        let stopped = readRebaseFile("stopped-sha", directory: rebaseDirectory)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let done = parseRebaseTodo(readRebaseFile("done", directory: rebaseDirectory) ?? "")
+        let todo = parseRebaseTodo(readRebaseFile("git-rebase-todo", directory: rebaseDirectory) ?? "")
+        var patches = done.map { item in
+            let isCurrent = stopped.map { item.commitID.hasPrefix($0) || $0.hasPrefix(item.commitID) } ?? false
+            return RepositoryRebasePatch(
+                action: item.action,
+                commitID: item.commitID,
+                subject: item.subject,
+                author: "",
+                date: "",
+                status: isCurrent ? .applying : .applied
+            )
+        }
+        patches.append(contentsOf: todo.map { item in
+            let isCurrent = stopped.map { item.commitID.hasPrefix($0) || $0.hasPrefix(item.commitID) } ?? false
+            return RepositoryRebasePatch(
+                action: item.action,
+                commitID: item.commitID,
+                subject: item.subject,
+                author: "",
+                date: "",
+                status: isCurrent ? .applying : .pending
+            )
+        })
+        if patches.isEmpty {
+            patches = parseApplyRebasePatches(directory: rebaseDirectory)
+        }
+        if let stopped, !patches.contains(where: { $0.status == .applying }) {
+            patches.append(RepositoryRebasePatch(action: "pick", commitID: stopped, subject: "", author: "", date: "", status: .applying))
+        }
+        for index in patches.indices {
+            let metadata = try await rawMutation(
+                ["show", "-s", "--format=%an%x00%aI%x00%B", patches[index].commitID],
+                in: repository
+            )
+            guard metadata.succeeded else { continue }
+            let fields = metadata.standardOutputString.split(separator: "\0", maxSplits: 2, omittingEmptySubsequences: false)
+            guard fields.count == 3 else { continue }
+            let subject = patches[index].subject.isEmpty
+                ? String(fields[2]).split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
+                : patches[index].subject
+            patches[index] = RepositoryRebasePatch(
+                action: patches[index].action,
+                commitID: patches[index].commitID,
+                subject: subject,
+                author: String(fields[0]),
+                date: String(fields[1]),
+                status: patches[index].status
+            )
+        }
+        let recordedBranch = readRebaseFile("head-name", directory: rebaseDirectory)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "refs/heads/", with: "")
+        return RepositoryRebaseState(
+            inProgress: true,
+            hasConflicts: !mutation.conflictedPaths.isEmpty,
+            currentBranch: mutation.currentBranch ?? (recordedBranch?.isEmpty == false ? recordedBranch : nil),
+            currentCommitID: stopped,
+            patches: patches,
+            canEditTodo: FileManager.default.fileExists(atPath: rebaseDirectory.appendingPathComponent("git-rebase-todo").path),
+            hasAutoStash: FileManager.default.fileExists(atPath: rebaseDirectory.appendingPathComponent("autostash").path)
+        )
+    }
+
     func rebase(_ request: RepositoryRebaseRequest) async throws -> RepositoryMutationResult {
         let repository = try mutationRepository()
         let state = try await mutationState(in: repository)
         try validateCanStartRebase(state)
         let upstream = try await validateRevision(request.upstream, repository: repository)
         pendingRebaseActions = [:]
-        var arguments = ["rebase"]
-        if request.autoStash { arguments.append("--autostash") }
-        arguments.append(upstream)
+        let arguments = try await rebaseArguments(
+            upstream: upstream,
+            interactive: false,
+            autoSquash: false,
+            autoStash: request.autoStash,
+            rebaseMerges: request.rebaseMerges,
+            updateRefs: request.updateRefs,
+            ignoreDate: request.ignoreDate,
+            committerDateIsAuthorDate: request.committerDateIsAuthorDate,
+            onto: request.onto,
+            from: request.from,
+            branch: request.branch,
+            repository: repository
+        )
         let command = try await rawMutation(arguments, in: repository)
         return try await resolveRebaseExecution(
             command,
@@ -929,16 +1243,37 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
         let state = try await mutationState(in: repository)
         try validateCanStartRebase(state)
         let upstream = try await validateRevision(request.upstream, repository: repository)
-        let expected = try await loadInteractiveRebasePlan(upstream: upstream)
-        try validateInteractivePlan(request.items, expected: expected)
-
-        pendingRebaseActions = Dictionary(uniqueKeysWithValues: request.items.map { ($0.commitID, $0.action) })
-        let todo = request.items.map { item in
-            "\(rebaseTodoCommand(item.action)) \(item.commitID) \(sanitizeTodoSubject(item.subject))"
-        }.joined(separator: "\n") + "\n"
-        var arguments = ["rebase", "--interactive", "--no-autosquash"]
-        if request.autoStash { arguments.append("--autostash") }
-        arguments.append(upstream)
+        let todo: String
+        if let nativeTodo = request.nativeTodo {
+            let prepared = prepareNativeRebaseTodo(nativeTodo)
+            guard !prepared.todo.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw RepositoryMutationError.emptyRebasePlan
+            }
+            pendingRebaseActions = prepared.actions
+            todo = prepared.todo
+        } else {
+            let expected = try await loadInteractiveRebasePlan(upstream: upstream)
+            let effectiveItems = request.autoSquash ? autosquashed(request.items) : request.items
+            try validateInteractivePlan(effectiveItems, expected: expected)
+            pendingRebaseActions = Dictionary(uniqueKeysWithValues: effectiveItems.map { ($0.commitID, $0.action) })
+            todo = effectiveItems.map { item in
+                "\(rebaseTodoCommand(item.action)) \(item.commitID) \(sanitizeTodoSubject(item.subject))"
+            }.joined(separator: "\n") + "\n"
+        }
+        let arguments = try await rebaseArguments(
+            upstream: upstream,
+            interactive: true,
+            autoSquash: request.autoSquash,
+            autoStash: request.autoStash,
+            rebaseMerges: request.rebaseMerges,
+            updateRefs: request.updateRefs,
+            ignoreDate: false,
+            committerDateIsAuthorDate: false,
+            onto: request.onto,
+            from: request.from,
+            branch: request.branch,
+            repository: repository
+        )
         let command = try await git.run(
             arguments: arguments,
             in: repository.rootURL,
@@ -953,6 +1288,57 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
             repository: repository,
             completionMessage: "Interactive rebase completed."
         )
+    }
+
+    func editRebaseTodo(_ items: [RepositoryRebaseTodoItem]) async throws -> RepositoryRebaseState {
+        let repository = try mutationRepository()
+        let state = try await loadRebaseState()
+        guard state.inProgress, state.canEditTodo else { throw RepositoryMutationError.rebaseNotInProgress }
+        let pendingIDs = Set(state.patches.filter { $0.status == .pending }.map(\.commitID))
+        guard Set(items.map(\.commitID)) == pendingIDs, items.count == pendingIDs.count else {
+            throw RepositoryMutationError.invalidRebasePlan("the edited todo must contain every pending commit exactly once")
+        }
+        try validateInteractivePlan(items, expected: items.map {
+            RepositoryRebaseTodoItem(commitID: $0.commitID, subject: $0.subject, action: .pick)
+        })
+        pendingRebaseActions.merge(Dictionary(uniqueKeysWithValues: items.map { ($0.commitID, $0.action) })) { _, new in new }
+        let todo = items.map { "\(rebaseTodoCommand($0.action)) \($0.commitID) \(sanitizeTodoSubject($0.subject))" }.joined(separator: "\n") + "\n"
+        let result = try await git.run(
+            arguments: ["rebase", "--edit-todo"],
+            in: repository.rootURL,
+            standardInput: Data(todo.utf8),
+            environment: ["GIT_SEQUENCE_EDITOR": "/usr/bin/tee"]
+        )
+        guard result.succeeded else { throw commandError(from: result) }
+        return try await loadRebaseState()
+    }
+
+    func loadRebaseTodoText() async throws -> String {
+        let repository = try mutationRepository()
+        let state = try await loadRebaseState()
+        guard state.inProgress, state.canEditTodo,
+              let directory = rebaseDirectoryURL(repository),
+              let todo = readRebaseFile("git-rebase-todo", directory: directory)
+        else { throw RepositoryMutationError.rebaseNotInProgress }
+        return todo
+    }
+
+    func editRebaseTodoText(_ todo: String) async throws -> RepositoryRebaseState {
+        let repository = try mutationRepository()
+        _ = try await loadRebaseTodoText()
+        let prepared = prepareNativeRebaseTodo(todo)
+        guard !prepared.todo.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw RepositoryMutationError.emptyRebasePlan
+        }
+        pendingRebaseActions.merge(prepared.actions) { _, new in new }
+        let result = try await git.run(
+            arguments: ["rebase", "--edit-todo"],
+            in: repository.rootURL,
+            standardInput: Data(prepared.todo.utf8),
+            environment: ["GIT_SEQUENCE_EDITOR": "/usr/bin/tee"]
+        )
+        guard result.succeeded else { throw commandError(from: result) }
+        return try await loadRebaseState()
     }
 
     func continueRebase() async throws -> RepositoryMutationResult {
@@ -1113,6 +1499,191 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
         }
     }
 
+    private struct ParsedRebaseTodo {
+        let action: String
+        let commitID: String
+        let subject: String
+    }
+
+    private func rebaseDirectoryURL(_ repository: ResolvedGitRepository) -> URL? {
+        for name in ["rebase-merge", "rebase-apply", "rebase"] {
+            let candidate = repository.gitDirectoryURL.appendingPathComponent(name, isDirectory: true)
+            if FileManager.default.fileExists(atPath: candidate.path) { return candidate }
+        }
+        return nil
+    }
+
+    private func readRebaseFile(_ name: String, directory: URL) -> String? {
+        try? String(contentsOf: directory.appendingPathComponent(name), encoding: .utf8)
+    }
+
+    private func parseRebaseTodo(_ contents: String) -> [ParsedRebaseTodo] {
+        let commentCharacter = "#"
+        return contents.split(whereSeparator: \.isNewline).compactMap { rawLine in
+            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !line.isEmpty, !line.hasPrefix(commentCharacter) else { return nil }
+            let fields = line.split(maxSplits: 2, whereSeparator: \.isWhitespace)
+            guard fields.count >= 2 else { return nil }
+            let action = String(fields[0])
+            guard ["pick", "p", "reword", "r", "edit", "e", "squash", "s", "fixup", "f", "drop", "d"].contains(action) else {
+                return nil
+            }
+            return ParsedRebaseTodo(
+                action: action,
+                commitID: String(fields[1]),
+                subject: fields.count > 2 ? String(fields[2]) : ""
+            )
+        }
+    }
+
+    private func parseApplyRebasePatches(directory: URL) -> [RepositoryRebasePatch] {
+        let next = Int(readRebaseFile("next", directory: directory)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "") ?? 0
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
+        return names.compactMap { name -> (Int, RepositoryRebasePatch)? in
+            guard let number = Int(name) else { return nil }
+            let contents = readRebaseFile(name, directory: directory) ?? ""
+            var headers: [String: String] = [:]
+            var currentKey: String?
+            for rawLine in contents.split(separator: "\n", omittingEmptySubsequences: false) {
+                let value = String(rawLine).trimmingCharacters(in: .newlines)
+                if value.isEmpty { break }
+                if value.first?.isWhitespace == true, let currentKey {
+                    headers[currentKey, default: ""] += value.trimmingCharacters(in: .whitespacesAndNewlines)
+                    continue
+                }
+                guard let colon = value.firstIndex(of: ":") else { continue }
+                let key = String(value[..<colon]).lowercased()
+                guard key.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "-" }) else { continue }
+                currentKey = key
+                headers[key] = String(value[value.index(after: colon)...]).trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            let decodedAuthor = decodeMIMEHeader(headers["from"] ?? "")
+            let author = decodedAuthor.split(separator: "<", maxSplits: 1).first.map(String.init)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let date = decodeMIMEHeader(headers["date"] ?? "")
+            let subject = decodeMIMEHeader(headers["subject"] ?? "")
+            let status: RepositoryRebasePatchStatus = number < next ? .applied : (number == next ? .applying : .pending)
+            return (number, RepositoryRebasePatch(action: "pick", commitID: "", subject: subject, author: author, date: date, status: status))
+        }
+        .sorted { $0.0 < $1.0 }
+        .map(\.1)
+    }
+
+    private func decodeMIMEHeader(_ value: String) -> String {
+        guard let expression = try? NSRegularExpression(pattern: #"=\?([^?]+)\?([bBqQ])\?([^?]*)\?="#) else { return value }
+        let source = value as NSString
+        let matches = expression.matches(in: value, range: NSRange(location: 0, length: source.length))
+        guard !matches.isEmpty else { return value }
+        var decoded = value
+        for match in matches.reversed() {
+            guard match.numberOfRanges == 4,
+                  let full = Range(match.range(at: 0), in: value),
+                  let charsetRange = Range(match.range(at: 1), in: value),
+                  let encodingRange = Range(match.range(at: 2), in: value),
+                  let payloadRange = Range(match.range(at: 3), in: value)
+            else { continue }
+            let charset = String(value[charsetRange])
+            let encoding = value[encodingRange].lowercased()
+            let payload = String(value[payloadRange])
+            let data = encoding == "b" ? Data(base64Encoded: payload) : decodeQuotedPrintableWord(payload)
+            guard let data, let replacement = decode(data: data, charset: charset) else { continue }
+            decoded.replaceSubrange(full, with: replacement)
+        }
+        return decoded
+    }
+
+    private func decodeQuotedPrintableWord(_ payload: String) -> Data? {
+        let bytes = Array(payload.utf8)
+        var output: [UInt8] = []
+        var index = 0
+        while index < bytes.count {
+            if bytes[index] == 95 {
+                output.append(32); index += 1
+            } else if bytes[index] == 61, index + 2 < bytes.count,
+                      let high = hexadecimal(bytes[index + 1]), let low = hexadecimal(bytes[index + 2]) {
+                output.append((high << 4) | low); index += 3
+            } else {
+                output.append(bytes[index]); index += 1
+            }
+        }
+        return Data(output)
+    }
+
+    private func hexadecimal(_ byte: UInt8) -> UInt8? {
+        switch byte {
+        case 48...57: byte - 48
+        case 65...70: byte - 55
+        case 97...102: byte - 87
+        default: nil
+        }
+    }
+
+    private func decode(data: Data, charset: String) -> String? {
+        let cfEncoding = CFStringConvertIANACharSetNameToEncoding(charset as CFString)
+        if cfEncoding != kCFStringEncodingInvalidId {
+            let raw = CFStringConvertEncodingToNSStringEncoding(cfEncoding)
+            if let decoded = String(data: data, encoding: String.Encoding(rawValue: raw)) { return decoded }
+        }
+        return String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1)
+    }
+
+    private func configuredBoolean(_ result: GitCommandResult) -> Bool {
+        guard result.succeeded else { return false }
+        return ["true", "yes", "on", "1"].contains(result.standardOutputString.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
+    }
+
+    private func gitVersionSupportsUpdateRefs(_ output: String) -> Bool {
+        let components = output.split(whereSeparator: { !($0.isNumber || $0 == ".") })
+            .first(where: { $0.contains(".") })?
+            .split(separator: ".")
+            .compactMap { Int($0) } ?? []
+        guard components.count >= 2 else { return false }
+        return components[0] > 2 || (components[0] == 2 && components[1] >= 38)
+    }
+
+    private func rebaseArguments(
+        upstream: String,
+        interactive: Bool,
+        autoSquash: Bool,
+        autoStash: Bool,
+        rebaseMerges: Bool,
+        updateRefs: Bool?,
+        ignoreDate: Bool,
+        committerDateIsAuthorDate: Bool,
+        onto: String?,
+        from: String?,
+        branch: String?,
+        repository: ResolvedGitRepository
+    ) async throws -> [String] {
+        guard !(ignoreDate && committerDateIsAuthorDate) else {
+            throw RepositoryMutationError.invalidRebasePlan("the date options are mutually exclusive")
+        }
+        guard (onto == nil) == (from == nil) else {
+            throw RepositoryMutationError.invalidRebasePlan("From and Onto must both be supplied for a specific range")
+        }
+        var arguments = ["rebase"]
+        if ignoreDate { arguments.append("--ignore-date") }
+        else if committerDateIsAuthorDate { arguments.append("--committer-date-is-author-date") }
+        else {
+            if interactive {
+                arguments.append("--interactive")
+                arguments.append(autoSquash ? "--autosquash" : "--no-autosquash")
+            }
+            if rebaseMerges { arguments.append("--rebase-merges") }
+        }
+        if let updateRefs { arguments.append(updateRefs ? "--update-refs" : "--no-update-refs") }
+        if autoStash { arguments.append("--autostash") }
+        if let onto, let from {
+            let resolvedOnto = try await validateRevision(onto, repository: repository)
+            let resolvedFrom = try await validateRevision(from, repository: repository)
+            let resolvedBranch = try await validateRevision(branch ?? "HEAD", repository: repository)
+            arguments.append(contentsOf: ["--onto", resolvedOnto, resolvedFrom, resolvedBranch])
+        } else {
+            arguments.append(upstream)
+        }
+        return arguments
+    }
+
     private func validateRevision(
         _ revision: String,
         repository: ResolvedGitRepository
@@ -1180,6 +1751,32 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
             .replacingOccurrences(of: "\r", with: " ")
     }
 
+    private func autosquashed(_ items: [RepositoryRebaseTodoItem]) -> [RepositoryRebaseTodoItem] {
+        var result = items
+        var index = 0
+        while index < result.count {
+            let item = result[index]
+            let marker: (prefix: String, action: RepositoryRebaseTodoAction)?
+            if item.subject.hasPrefix("fixup! ") { marker = ("fixup! ", .fixup) }
+            else if item.subject.hasPrefix("squash! ") { marker = ("squash! ", .squash) }
+            else { marker = nil }
+            guard let marker, case .pick = item.action else { index += 1; continue }
+            let target = String(item.subject.dropFirst(marker.prefix.count))
+            let targetIndex = result[..<index].lastIndex {
+                $0.commitID.hasPrefix(target) || $0.subject == target
+            }
+            guard let targetIndex else { index += 1; continue }
+            result.remove(at: index)
+            let insertion = result.index(after: targetIndex)
+            result.insert(
+                RepositoryRebaseTodoItem(commitID: item.commitID, subject: item.subject, action: marker.action),
+                at: insertion
+            )
+            index = max(index, insertion + 1)
+        }
+        return result
+    }
+
     private func resolveRebaseExecution(
         _ command: GitCommandResult,
         repository: ResolvedGitRepository,
@@ -1209,7 +1806,10 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
                     message: "Rebase is waiting for user input."
                 )
             }
-            if case .reword(let message) = pendingRebaseActions[stoppedCommit] {
+            let stoppedAction = pendingRebaseActions.first {
+                $0.key.hasPrefix(stoppedCommit) || stoppedCommit.hasPrefix($0.key)
+            }?.value
+            if case .reword(let message) = stoppedAction {
                 var messageData = Data(message.utf8)
                 if messageData.last != 10 { messageData.append(10) }
                 let amend = try await git.run(
@@ -1245,11 +1845,16 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
         guard command.succeeded else { throw commandError(from: command) }
         pendingRebaseActions = [:]
         let snapshot = try await loadSnapshot()
+        let output = (command.standardOutputString + "\n" + command.standardErrorString)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let message = output.localizedCaseInsensitiveContains("up to date")
+            ? "Current branch is up to date. Nothing to rebase."
+            : completionMessage
         return RepositoryMutationResult(
             snapshot: snapshot,
             selectedCommitID: snapshot.commits.first(where: \.isHEAD)?.id,
             outcome: .completed,
-            message: completionMessage
+            message: message
         )
     }
 
@@ -1258,6 +1863,38 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
         guard result.succeeded else { return nil }
         let value = result.standardOutputString.trimmingCharacters(in: .whitespacesAndNewlines)
         return value.isEmpty ? nil : value
+    }
+
+    private func prepareNativeRebaseTodo(_ todo: String) -> (todo: String, actions: [String: RepositoryRebaseTodoAction]) {
+        var actions: [String: RepositoryRebaseTodoAction] = [:]
+        let hadTrailingNewline = todo.hasSuffix("\n")
+        let lines = todo.split(separator: "\n", omittingEmptySubsequences: false).map { raw -> String in
+            let line = String(raw)
+            let leading = line.prefix { $0 == " " || $0 == "\t" }
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard !trimmed.isEmpty, !trimmed.hasPrefix("#") else { return line }
+            let fields = trimmed.split(maxSplits: 2, whereSeparator: \.isWhitespace)
+            guard fields.count >= 2 else { return line }
+            let command = String(fields[0])
+            let commitID = String(fields[1])
+            let subject = fields.count > 2 ? String(fields[2]) : ""
+            switch command {
+            case "reword", "r":
+                let message = subject.trimmingCharacters(in: .whitespacesAndNewlines)
+                actions[commitID] = .reword(message)
+                return "\(leading)edit \(commitID) \(subject)"
+            case "edit", "e": actions[commitID] = .edit
+            case "squash", "s": actions[commitID] = .squash
+            case "fixup", "f": actions[commitID] = .fixup
+            case "drop", "d": actions[commitID] = .drop
+            case "pick", "p": actions[commitID] = .pick
+            default: break
+            }
+            return line
+        }
+        var prepared = lines.joined(separator: "\n")
+        if hadTrailingNewline, !prepared.hasSuffix("\n") { prepared.append("\n") }
+        return (prepared, actions)
     }
 
     private func runCherryPickItems(

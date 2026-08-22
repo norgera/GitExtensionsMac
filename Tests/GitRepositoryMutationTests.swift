@@ -66,11 +66,24 @@ enum GitRepositoryMutationTests {
         defer { fixture.remove() }
 
         try await testOrdinaryRebaseAndAutoStash(fixture)
+        try await testAlreadyUpToDateRebase(fixture)
+        try await testRebaseAdvancedOptions(fixture)
+        try await testRebaseMerges(fixture)
+        try await testRebaseDateModes(fixture)
+        try await testDetachedHeadAndInvalidRebase(fixture)
+        try await testInteractiveAutosquash(fixture)
+        try await testNativeInteractiveTodo(fixture)
+        try await testNativeInteractiveRebaseMerges(fixture)
+        try await testNativeInteractiveUpdateRefs(fixture)
         try await testInteractiveRebasePlan(fixture)
         try await testInteractiveRebaseEdit(fixture)
+        try await testEditActiveRebaseTodo(fixture)
+        try await testApplyBackendRebaseState(fixture)
         try await testRebaseConflictContinue(fixture)
+        try await testRebaseConflictMergeTool(fixture)
         try await testRebaseConflictSkip(fixture)
         try await testRebaseConflictAbort(fixture)
+        try await testRebaseCancellation(fixture)
         print("GitRepositoryMutationTests.rebase: passed")
     }
 
@@ -1451,6 +1464,17 @@ enum GitRepositoryMutationTests {
         try require(!FileManager.default.fileExists(atPath: repository.appendingPathComponent("d.txt").path), "interactive rebase: dropped commit tree is removed")
     }
 
+    private static func testAlreadyUpToDateRebase(_ fixture: MutationGitFixture) async throws {
+        let repository = try fixture.clone(named: "Up-to-date rebase repo")
+        let head = try fixture.git(["rev-parse", "HEAD"], in: repository).trimmed
+        let source = GitRepositoryBrowsingDataSource(repositoryURL: repository)
+        _ = try await source.loadSnapshot()
+        let result = try await source.rebase(RepositoryRebaseRequest(upstream: head, autoStash: false))
+        try require(result.outcome == .completed, "up-to-date rebase: operation completes")
+        try require(result.message == "Current branch is up to date. Nothing to rebase.", "up-to-date rebase: upstream completion message is preserved")
+        try require(try fixture.git(["rev-parse", "HEAD"], in: repository).trimmed == head, "up-to-date rebase: HEAD is unchanged")
+    }
+
     private static func testInteractiveRebaseEdit(_ fixture: MutationGitFixture) async throws {
         let repository = try fixture.clone(named: "Interactive edit repo")
         try fixture.git(["checkout", "-b", "edit-feature"], in: repository)
@@ -1470,6 +1494,9 @@ enum GitRepositoryMutationTests {
         guard case .paused = result.outcome else { throw MutationFixtureError("interactive edit: rebase did not pause") }
         let pausedState = try await source.loadMutationState()
         try require(pausedState.rebaseInProgress, "interactive edit: rebase state is visible while paused")
+        let progress = try await source.loadRebaseState()
+        try require(progress.inProgress && progress.canEditTodo, "interactive edit: live todo state is available")
+        try require(progress.patches.contains(where: { $0.status == .applying && $0.commitID == item.commitID }), "interactive edit: stopped revision is marked as applying")
         try fixture.write("edited during pause\n", to: repository.appendingPathComponent("edit.txt"))
         _ = try await source.stage(paths: ["edit.txt"])
         _ = try await source.commit(RepositoryCommitRequest(
@@ -1503,6 +1530,360 @@ enum GitRepositoryMutationTests {
         try require(try fixture.git(["log", "-1", "--format=%s"], in: setup.repository).trimmed == "Feature conflict", "rebase continue: original subject is preserved")
     }
 
+    private static func testRebaseConflictMergeTool(_ fixture: MutationGitFixture) async throws {
+        let setup = try makeRebaseConflictRepository(fixture, name: "Rebase merge tool repo")
+        try fixture.git(["config", "merge.tool", "fixture"], in: setup.repository)
+        try fixture.git([
+            "config", "mergetool.fixture.cmd",
+            "printf 'resolved by merge tool\\n' > \"$MERGED\""
+        ], in: setup.repository)
+        try fixture.git(["config", "mergetool.fixture.trustExitCode", "true"], in: setup.repository)
+        let source = GitRepositoryBrowsingDataSource(repositoryURL: setup.repository)
+        _ = try await source.loadSnapshot()
+
+        let configuration = try await source.loadMergeToolConfiguration()
+        try require(configuration == RepositoryMergeToolConfiguration(name: "fixture", usesGUISetting: false), "rebase mergetool: effective merge.tool is discovered")
+        let conflicted = try await source.rebase(RepositoryRebaseRequest(upstream: setup.target, autoStash: false))
+        guard case .conflicts(let paths) = conflicted.outcome else { throw MutationFixtureError("rebase mergetool: conflict was not reported") }
+
+        let resolved = try await source.runMergeTool(paths: paths)
+        try require(resolved.outcome == .completed, "rebase mergetool: successful tool clears conflict state")
+        try require(try String(contentsOf: setup.repository.appendingPathComponent("shared.txt"), encoding: .utf8) == "resolved by merge tool\n", "rebase mergetool: configured tool updates the merged file")
+        try require(try fixture.git(["diff", "--cached", "--name-only"], in: setup.repository).trimmed == "shared.txt", "rebase mergetool: trusted tool stages the resolved file")
+
+        let completed = try await source.continueRebase()
+        try require(completed.outcome == .completed, "rebase mergetool: resolved rebase continues")
+    }
+
+    private static func testRebaseAdvancedOptions(_ fixture: MutationGitFixture) async throws {
+        let repository = try fixture.clone(named: "Advanced rebase repo")
+        let base = try fixture.git(["rev-parse", "HEAD"], in: repository).trimmed
+        try fixture.git(["checkout", "-b", "advanced-feature"], in: repository)
+        try fixture.write("one\n", to: repository.appendingPathComponent("advanced-one.txt"))
+        try fixture.git(["add", "--all", "--"], in: repository)
+        try fixture.git(["commit", "-m", "Advanced one"], in: repository)
+        let first = try fixture.git(["rev-parse", "HEAD"], in: repository).trimmed
+        try fixture.git(["branch", "dependent", first], in: repository)
+        try fixture.write("two\n", to: repository.appendingPathComponent("advanced-two.txt"))
+        try fixture.git(["add", "--all", "--"], in: repository)
+        try fixture.git(["commit", "-m", "Advanced two"], in: repository)
+        try fixture.git(["checkout", "main"], in: repository)
+        try fixture.write("target\n", to: repository.appendingPathComponent("advanced-target.txt"))
+        try fixture.git(["add", "--all", "--"], in: repository)
+        try fixture.git(["commit", "-m", "Advanced target"], in: repository)
+        let target = try fixture.git(["rev-parse", "HEAD"], in: repository).trimmed
+        try fixture.git(["checkout", "advanced-feature"], in: repository)
+        let source = GitRepositoryBrowsingDataSource(repositoryURL: repository)
+        _ = try await source.loadSnapshot()
+        let result = try await source.rebase(RepositoryRebaseRequest(
+            upstream: target,
+            autoStash: false,
+            updateRefs: true,
+            onto: target,
+            from: base,
+            branch: "advanced-feature"
+        ))
+        try require(result.outcome == .completed, "advanced rebase: onto range completes")
+        try require(try fixture.git(["merge-base", "--is-ancestor", target, "HEAD"], in: repository).trimmed.isEmpty, "advanced rebase: target is an ancestor")
+        let updatedDependent = try fixture.git(["rev-parse", "dependent"], in: repository).trimmed
+        try require(updatedDependent != first, "advanced rebase: update-refs rewrites dependent branch")
+    }
+
+    private static func testInteractiveAutosquash(_ fixture: MutationGitFixture) async throws {
+        let repository = try fixture.clone(named: "Autosquash rebase repo")
+        let base = try fixture.git(["rev-parse", "HEAD"], in: repository).trimmed
+        try fixture.git(["checkout", "-b", "autosquash-feature"], in: repository)
+        try fixture.write("feature\n", to: repository.appendingPathComponent("autosquash.txt"))
+        try fixture.git(["add", "--all", "--"], in: repository)
+        try fixture.git(["commit", "-m", "Autosquash target"], in: repository)
+        try fixture.write("feature fixed\n", to: repository.appendingPathComponent("autosquash.txt"))
+        try fixture.git(["add", "--all", "--"], in: repository)
+        try fixture.git(["commit", "-m", "fixup! Autosquash target"], in: repository)
+        let source = GitRepositoryBrowsingDataSource(repositoryURL: repository)
+        _ = try await source.loadSnapshot()
+        let plan = try await source.loadInteractiveRebasePlan(upstream: base)
+        let result = try await source.interactiveRebase(RepositoryInteractiveRebaseRequest(
+            upstream: base,
+            items: plan,
+            autoStash: false,
+            autoSquash: true
+        ))
+        try require(result.outcome == .completed, "autosquash rebase: operation completes")
+        let count = try fixture.git(["rev-list", "--count", "\(base)..HEAD"], in: repository).trimmed
+        try require(count == "1", "autosquash rebase: fixup is folded into its target")
+        try require(try String(contentsOf: repository.appendingPathComponent("autosquash.txt"), encoding: .utf8) == "feature fixed\n", "autosquash rebase: fixup tree is retained")
+    }
+
+    private static func testDetachedHeadAndInvalidRebase(_ fixture: MutationGitFixture) async throws {
+        let repository = try fixture.clone(named: "Detached rebase repo")
+        try fixture.git(["checkout", "-b", "detached-feature"], in: repository)
+        try fixture.write("detached\n", to: repository.appendingPathComponent("detached-rebase.txt"))
+        try fixture.git(["add", "--all", "--"], in: repository)
+        try fixture.git(["commit", "-m", "Detached feature"], in: repository)
+        let feature = try fixture.git(["rev-parse", "HEAD"], in: repository).trimmed
+        try fixture.git(["checkout", "main"], in: repository)
+        try fixture.write("target\n", to: repository.appendingPathComponent("detached-target.txt"))
+        try fixture.git(["add", "--all", "--"], in: repository)
+        try fixture.git(["commit", "-m", "Detached target"], in: repository)
+        let target = try fixture.git(["rev-parse", "HEAD"], in: repository).trimmed
+        try fixture.git(["checkout", "--detach", feature], in: repository)
+        let source = GitRepositoryBrowsingDataSource(repositoryURL: repository)
+        _ = try await source.loadSnapshot()
+        do {
+            _ = try await source.rebase(RepositoryRebaseRequest(upstream: "missing/rebase-ref", autoStash: false))
+            throw MutationFixtureError("invalid rebase: missing revision was accepted")
+        } catch RepositoryMutationError.invalidRevision(let revision) {
+            try require(revision == "missing/rebase-ref", "invalid rebase: invalid ref is preserved in the error")
+        }
+        let result = try await source.rebase(RepositoryRebaseRequest(upstream: target, autoStash: false))
+        try require(result.outcome == .completed, "detached rebase: operation completes")
+        let state = try await source.loadMutationState()
+        try require(state.currentBranch == nil, "detached rebase: HEAD remains detached")
+        try require(try fixture.git(["merge-base", "--is-ancestor", target, "HEAD"], in: repository).trimmed.isEmpty, "detached rebase: target is an ancestor")
+    }
+
+    private static func testNativeInteractiveTodo(_ fixture: MutationGitFixture) async throws {
+        let repository = try fixture.clone(named: "Native interactive todo repo")
+        let base = try fixture.git(["rev-parse", "HEAD"], in: repository).trimmed
+        try fixture.git(["checkout", "-b", "native-todo-feature"], in: repository)
+        for name in ["Native A", "Native B", "Native C"] {
+            try fixture.write("\(name)\n", to: repository.appendingPathComponent("\(name.replacingOccurrences(of: " ", with: "-")).txt"))
+            try fixture.git(["add", "--all", "--"], in: repository)
+            try fixture.git(["commit", "-m", name], in: repository)
+        }
+        let source = GitRepositoryBrowsingDataSource(repositoryURL: repository)
+        _ = try await source.loadSnapshot()
+        let options = RepositoryInteractiveRebaseTodoRequest(
+            upstream: base,
+            autoStash: false,
+            autoSquash: false,
+            rebaseMerges: false,
+            updateRefs: nil,
+            onto: nil,
+            from: nil,
+            branch: nil
+        )
+        let todo = try await source.loadNativeInteractiveRebaseTodo(options)
+        var actionable = todo.split(separator: "\n", omittingEmptySubsequences: false).map(String.init).filter {
+            $0.hasPrefix("pick ")
+        }
+        try require(actionable.count == 3, "native todo: Git-generated todo contains every commit")
+        actionable.reverse()
+        actionable[1] = actionable[1].replacingOccurrences(of: "pick ", with: "drop ", options: .anchored)
+        let lastFields = actionable[2].split(maxSplits: 2, whereSeparator: \.isWhitespace)
+        actionable[2] = "reword \(lastFields[1]) Native A rewritten"
+        let nativeTodo = actionable.joined(separator: "\n") + "\n"
+        let result = try await source.interactiveRebase(RepositoryInteractiveRebaseRequest(
+            upstream: base,
+            items: [],
+            autoStash: false,
+            nativeTodo: nativeTodo
+        ))
+        try require(result.outcome == .completed, "native todo: reordered/reword/drop sequence completes")
+        let subjects = try fixture.git(["log", "--reverse", "--format=%s", "\(base)..HEAD"], in: repository)
+            .split(separator: "\n").map(String.init)
+        try require(subjects == ["Native C", "Native A rewritten"], "native todo: resulting history follows edited native todo")
+    }
+
+    private static func testNativeInteractiveRebaseMerges(_ fixture: MutationGitFixture) async throws {
+        let repository = try fixture.clone(named: "Native rebase merges repo")
+        try fixture.git(["checkout", "-b", "native-merge-feature"], in: repository)
+        try fixture.write("feature\n", to: repository.appendingPathComponent("native-merge-feature.txt"))
+        try fixture.git(["add", "--all", "--"], in: repository)
+        try fixture.git(["commit", "-m", "Native merge feature"], in: repository)
+        let featureBase = try fixture.git(["rev-parse", "HEAD"], in: repository).trimmed
+        try fixture.git(["checkout", "-b", "native-merge-side", featureBase], in: repository)
+        try fixture.write("side\n", to: repository.appendingPathComponent("native-merge-side.txt"))
+        try fixture.git(["add", "--all", "--"], in: repository)
+        try fixture.git(["commit", "-m", "Native merge side"], in: repository)
+        try fixture.git(["checkout", "native-merge-feature"], in: repository)
+        try fixture.write("mainline\n", to: repository.appendingPathComponent("native-merge-mainline.txt"))
+        try fixture.git(["add", "--all", "--"], in: repository)
+        try fixture.git(["commit", "-m", "Native merge mainline"], in: repository)
+        try fixture.git(["merge", "--no-ff", "native-merge-side", "-m", "Native feature merge"], in: repository)
+        try fixture.git(["checkout", "main"], in: repository)
+        try fixture.write("target\n", to: repository.appendingPathComponent("native-merge-target.txt"))
+        try fixture.git(["add", "--all", "--"], in: repository)
+        try fixture.git(["commit", "-m", "Native merge target"], in: repository)
+        let target = try fixture.git(["rev-parse", "HEAD"], in: repository).trimmed
+        try fixture.git(["checkout", "native-merge-feature"], in: repository)
+        let source = GitRepositoryBrowsingDataSource(repositoryURL: repository)
+        _ = try await source.loadSnapshot()
+        let options = RepositoryInteractiveRebaseTodoRequest(
+            upstream: target,
+            autoStash: false,
+            autoSquash: false,
+            rebaseMerges: true,
+            updateRefs: nil,
+            onto: nil,
+            from: nil,
+            branch: nil
+        )
+        var todo = try await source.loadNativeInteractiveRebaseTodo(options)
+        try require(todo.contains("label ") && todo.contains("merge "), "native rebase-merges: Git topology directives are exposed")
+        if let action = todo.range(of: "pick ") { todo.replaceSubrange(action, with: "edit ") }
+        let started = try await source.interactiveRebase(RepositoryInteractiveRebaseRequest(
+            upstream: target,
+            items: [],
+            autoStash: false,
+            rebaseMerges: true,
+            nativeTodo: todo
+        ))
+        guard case .paused = started.outcome else { throw MutationFixtureError("native rebase-merges: edit did not pause") }
+        let activeTodo = try await source.loadRebaseTodoText()
+        try require(activeTodo.contains("merge "), "native rebase-merges: active todo retains topology directives")
+        _ = try await source.editRebaseTodoText(activeTodo)
+        let result = try await source.continueRebase()
+        try require(result.outcome == .completed, "native rebase-merges: edited active todo completes")
+        let merges = try fixture.git(["rev-list", "--merges", "\(target)..HEAD"], in: repository).trimmed
+        try require(!merges.isEmpty, "native rebase-merges: interactive topology retains a merge")
+    }
+
+    private static func testNativeInteractiveUpdateRefs(_ fixture: MutationGitFixture) async throws {
+        let repository = try fixture.clone(named: "Native update refs repo")
+        try fixture.git(["checkout", "-b", "native-update-feature"], in: repository)
+        try fixture.write("one\n", to: repository.appendingPathComponent("native-update-one.txt"))
+        try fixture.git(["add", "--all", "--"], in: repository)
+        try fixture.git(["commit", "-m", "Native update one"], in: repository)
+        let dependentBefore = try fixture.git(["rev-parse", "HEAD"], in: repository).trimmed
+        try fixture.git(["branch", "native-dependent"], in: repository)
+        try fixture.write("two\n", to: repository.appendingPathComponent("native-update-two.txt"))
+        try fixture.git(["add", "--all", "--"], in: repository)
+        try fixture.git(["commit", "-m", "Native update two"], in: repository)
+        try fixture.git(["checkout", "main"], in: repository)
+        try fixture.write("target\n", to: repository.appendingPathComponent("native-update-target.txt"))
+        try fixture.git(["add", "--all", "--"], in: repository)
+        try fixture.git(["commit", "-m", "Native update target"], in: repository)
+        let target = try fixture.git(["rev-parse", "HEAD"], in: repository).trimmed
+        try fixture.git(["checkout", "native-update-feature"], in: repository)
+        try fixture.git(["config", "rebase.autosquash", "true"], in: repository)
+        try fixture.git(["config", "rebase.updateRefs", "true"], in: repository)
+        let source = GitRepositoryBrowsingDataSource(repositoryURL: repository)
+        _ = try await source.loadSnapshot()
+        let configuration = try await source.loadRebaseConfiguration()
+        try require(configuration.autoSquash && configuration.updateRefs, "rebase configuration: Git defaults are loaded")
+        let options = RepositoryInteractiveRebaseTodoRequest(
+            upstream: target,
+            autoStash: false,
+            autoSquash: true,
+            rebaseMerges: false,
+            updateRefs: true,
+            onto: nil,
+            from: nil,
+            branch: nil
+        )
+        let todo = try await source.loadNativeInteractiveRebaseTodo(options)
+        try require(todo.contains("update-ref refs/heads/native-dependent"), "native update-refs: dependent ref directive is retained")
+        let result = try await source.interactiveRebase(RepositoryInteractiveRebaseRequest(
+            upstream: target,
+            items: [],
+            autoStash: false,
+            autoSquash: true,
+            updateRefs: true,
+            nativeTodo: todo
+        ))
+        try require(result.outcome == .completed, "native update-refs: interactive operation completes")
+        let dependentAfter = try fixture.git(["rev-parse", "native-dependent"], in: repository).trimmed
+        try require(dependentAfter != dependentBefore, "native update-refs: dependent branch is rewritten")
+    }
+
+    private static func testRebaseMerges(_ fixture: MutationGitFixture) async throws {
+        let repository = try fixture.clone(named: "Rebase merges repo")
+        try fixture.git(["checkout", "-b", "merge-feature"], in: repository)
+        try fixture.write("feature\n", to: repository.appendingPathComponent("merge-feature.txt"))
+        try fixture.git(["add", "--all", "--"], in: repository)
+        try fixture.git(["commit", "-m", "Merge feature"], in: repository)
+        let featureBase = try fixture.git(["rev-parse", "HEAD"], in: repository).trimmed
+        try fixture.git(["checkout", "-b", "merge-side", featureBase], in: repository)
+        try fixture.write("side\n", to: repository.appendingPathComponent("merge-side.txt"))
+        try fixture.git(["add", "--all", "--"], in: repository)
+        try fixture.git(["commit", "-m", "Merge side"], in: repository)
+        try fixture.git(["checkout", "merge-feature"], in: repository)
+        try fixture.write("mainline\n", to: repository.appendingPathComponent("merge-mainline.txt"))
+        try fixture.git(["add", "--all", "--"], in: repository)
+        try fixture.git(["commit", "-m", "Merge mainline"], in: repository)
+        try fixture.git(["merge", "--no-ff", "merge-side", "-m", "Feature merge"], in: repository)
+        try fixture.git(["checkout", "main"], in: repository)
+        try fixture.write("new base\n", to: repository.appendingPathComponent("merge-target.txt"))
+        try fixture.git(["add", "--all", "--"], in: repository)
+        try fixture.git(["commit", "-m", "Merge target"], in: repository)
+        let target = try fixture.git(["rev-parse", "HEAD"], in: repository).trimmed
+        try fixture.git(["checkout", "merge-feature"], in: repository)
+        let source = GitRepositoryBrowsingDataSource(repositoryURL: repository)
+        _ = try await source.loadSnapshot()
+        let result = try await source.rebase(RepositoryRebaseRequest(upstream: target, autoStash: false, rebaseMerges: true))
+        try require(result.outcome == .completed, "rebase-merges: operation completes")
+        let merges = try fixture.git(["rev-list", "--merges", "\(target)..HEAD"], in: repository).trimmed
+        try require(!merges.isEmpty, "rebase-merges: topology retains a merge commit")
+    }
+
+    private static func testRebaseDateModes(_ fixture: MutationGitFixture) async throws {
+        for (name, ignoreDate, committerIsAuthor) in [("ignore", true, false), ("committer", false, true)] {
+            let repository = try fixture.clone(named: "Rebase date \(name) repo")
+            try fixture.git(["checkout", "-b", "date-\(name)-feature"], in: repository)
+            try fixture.write("date\n", to: repository.appendingPathComponent("date-\(name).txt"))
+            try fixture.git(["add", "--all", "--"], in: repository)
+            try fixture.git(
+                ["commit", "-m", "Date \(name)"],
+                in: repository,
+                environment: ["GIT_AUTHOR_DATE": "2001-02-03T04:05:06Z", "GIT_COMMITTER_DATE": "2002-03-04T05:06:07Z"]
+            )
+            let originalAuthorDate = try fixture.git(["show", "-s", "--format=%at", "HEAD"], in: repository).trimmed
+            try fixture.git(["checkout", "main"], in: repository)
+            try fixture.write("target\n", to: repository.appendingPathComponent("date-target-\(name).txt"))
+            try fixture.git(["add", "--all", "--"], in: repository)
+            try fixture.git(["commit", "-m", "Date target \(name)"], in: repository)
+            let target = try fixture.git(["rev-parse", "HEAD"], in: repository).trimmed
+            try fixture.git(["checkout", "date-\(name)-feature"], in: repository)
+            let source = GitRepositoryBrowsingDataSource(repositoryURL: repository)
+            _ = try await source.loadSnapshot()
+            let result = try await source.rebase(RepositoryRebaseRequest(
+                upstream: target,
+                autoStash: false,
+                ignoreDate: ignoreDate,
+                committerDateIsAuthorDate: committerIsAuthor
+            ))
+            try require(result.outcome == .completed, "rebase dates: \(name) operation completes")
+            let authorDate = try fixture.git(["show", "-s", "--format=%at", "HEAD"], in: repository).trimmed
+            let committerDate = try fixture.git(["show", "-s", "--format=%ct", "HEAD"], in: repository).trimmed
+            if ignoreDate { try require(authorDate != originalAuthorDate, "rebase dates: ignore-date resets author date") }
+            if committerIsAuthor { try require(committerDate == authorDate, "rebase dates: committer date matches author date") }
+        }
+    }
+
+    private static func testEditActiveRebaseTodo(_ fixture: MutationGitFixture) async throws {
+        let repository = try fixture.clone(named: "Edit active todo repo")
+        let base = try fixture.git(["rev-parse", "HEAD"], in: repository).trimmed
+        try fixture.git(["checkout", "-b", "edit-todo-feature"], in: repository)
+        for name in ["Todo A", "Todo B", "Todo C"] {
+            try fixture.write("\(name)\n", to: repository.appendingPathComponent("\(name.replacingOccurrences(of: " ", with: "-")).txt"))
+            try fixture.git(["add", "--all", "--"], in: repository)
+            try fixture.git(["commit", "-m", name], in: repository)
+        }
+        let source = GitRepositoryBrowsingDataSource(repositoryURL: repository)
+        _ = try await source.loadSnapshot()
+        let plan = try await source.loadInteractiveRebasePlan(upstream: base)
+        let started = try await source.interactiveRebase(RepositoryInteractiveRebaseRequest(
+            upstream: base,
+            items: [RepositoryRebaseTodoItem(commitID: plan[0].commitID, subject: plan[0].subject, action: .edit)] + Array(plan.dropFirst()),
+            autoStash: false
+        ))
+        guard case .paused = started.outcome else { throw MutationFixtureError("edit todo: rebase did not stop") }
+        let state = try await source.loadRebaseState()
+        let pending = state.patches.filter { $0.status == .pending }
+        try require(pending.map(\.subject) == ["Todo B", "Todo C"], "edit todo: pending rows are loaded from Git")
+        let edited = [
+            RepositoryRebaseTodoItem(commitID: pending[1].commitID, subject: pending[1].subject, action: .pick),
+            RepositoryRebaseTodoItem(commitID: pending[0].commitID, subject: pending[0].subject, action: .drop)
+        ]
+        let updated = try await source.editRebaseTodo(edited)
+        try require(updated.patches.filter { $0.status == .pending }.map(\.subject) == ["Todo C", "Todo B"], "edit todo: live todo order updates")
+        let completed = try await source.continueRebase()
+        try require(completed.outcome == .completed, "edit todo: continue completes edited sequence")
+        let subjects = try fixture.git(["log", "--reverse", "--format=%s", "\(base)..HEAD"], in: repository).split(separator: "\n").map(String.init)
+        try require(subjects == ["Todo A", "Todo C"], "edit todo: reordered and dropped rows affect resulting history")
+    }
+
     private static func testRebaseConflictSkip(_ fixture: MutationGitFixture) async throws {
         let setup = try makeRebaseConflictRepository(fixture, name: "Rebase skip repo")
         let source = GitRepositoryBrowsingDataSource(repositoryURL: setup.repository)
@@ -1513,6 +1894,18 @@ enum GitRepositoryMutationTests {
         try require(skipped.outcome == .completed, "rebase skip: operation completes")
         try require(try fixture.git(["rev-parse", "HEAD"], in: setup.repository).trimmed == setup.target, "rebase skip: conflicting commit is omitted")
         try require(try String(contentsOf: setup.repository.appendingPathComponent("shared.txt"), encoding: .utf8) == "target conflict\n", "rebase skip: target content remains")
+    }
+
+    private static func testApplyBackendRebaseState(_ fixture: MutationGitFixture) async throws {
+        let setup = try makeRebaseConflictRepository(fixture, name: "Apply backend rebase state repo")
+        let source = GitRepositoryBrowsingDataSource(repositoryURL: setup.repository)
+        _ = try await source.loadSnapshot()
+        let command = try await GitProcess().run(arguments: ["rebase", "--apply", setup.target], in: setup.repository)
+        try require(!command.succeeded, "apply backend state: conflict stops the operation")
+        let state = try await source.loadRebaseState()
+        try require(state.inProgress && state.hasConflicts, "apply backend state: active conflict is detected")
+        try require(state.patches.contains { $0.status == .applying && !$0.subject.isEmpty }, "apply backend state: numbered mail patch is parsed and selected")
+        _ = try await source.abortRebase()
     }
 
     private static func testRebaseConflictAbort(_ fixture: MutationGitFixture) async throws {
@@ -1528,6 +1921,30 @@ enum GitRepositoryMutationTests {
         try require(try String(contentsOf: setup.repository.appendingPathComponent("shared.txt"), encoding: .utf8) == "feature conflict\n", "rebase abort: original worktree is restored")
         let abortedState = try await source.loadMutationState()
         try require(!abortedState.rebaseInProgress, "rebase abort: state is cleared")
+    }
+
+    private static func testRebaseCancellation(_ fixture: MutationGitFixture) async throws {
+        let repository = try fixture.clone(named: "Rebase cancellation repo")
+        let target = try fixture.git(["rev-parse", "HEAD"], in: repository).trimmed
+        try fixture.git(["checkout", "-b", "cancel-rebase-feature"], in: repository)
+        try fixture.write("cancel rebase\n", to: repository.appendingPathComponent("cancel-rebase.txt"))
+        try fixture.git(["add", "--all", "--"], in: repository)
+        try fixture.git(["commit", "-m", "Cancel rebase feature"], in: repository)
+        let before = try fixture.git(["rev-parse", "HEAD"], in: repository).trimmed
+        let runner = CancellableRebaseGitRunner()
+        let source = GitRepositoryBrowsingDataSource(repositoryURL: repository, git: runner)
+        _ = try await source.loadSnapshot()
+        let task = Task { try await source.rebase(RepositoryRebaseRequest(upstream: target, autoStash: false)) }
+        for _ in 0..<100 where !runner.didBeginRebase { try await Task.sleep(nanoseconds: 5_000_000) }
+        try require(runner.didBeginRebase, "rebase cancellation: typed runner reached rebase")
+        task.cancel()
+        do {
+            _ = try await task.value
+            throw MutationFixtureError("rebase cancellation: cancelled operation completed")
+        } catch is CancellationError {
+            // Expected.
+        }
+        try require(try fixture.git(["rev-parse", "HEAD"], in: repository).trimmed == before, "rebase cancellation: HEAD is unchanged")
     }
 
     private static func makeRebaseConflictRepository(
@@ -1587,6 +2004,30 @@ private final class CancellableCommitGitRunner: GitCommandRunning, @unchecked Se
             )
         }
         lock.withLock { beganCommit = true }
+        while true {
+            try Task.checkCancellation()
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+    }
+}
+
+private final class CancellableRebaseGitRunner: GitCommandRunning, @unchecked Sendable {
+    private let base = GitProcess()
+    private let lock = NSLock()
+    private var beganRebase = false
+
+    var didBeginRebase: Bool { lock.withLock { beganRebase } }
+
+    func run(
+        arguments: [String],
+        in directory: URL,
+        standardInput: Data?,
+        environment: [String: String]
+    ) async throws -> GitCommandResult {
+        guard arguments.first == "rebase" else {
+            return try await base.run(arguments: arguments, in: directory, standardInput: standardInput, environment: environment)
+        }
+        lock.withLock { beganRebase = true }
         while true {
             try Task.checkCancellation()
             try await Task.sleep(nanoseconds: 10_000_000)

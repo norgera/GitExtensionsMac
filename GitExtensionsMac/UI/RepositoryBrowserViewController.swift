@@ -51,6 +51,11 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
     private var remoteWindowController: NSWindowController?
     private var remoteBranchDeleteWindowController: NSWindowController?
     private var operationStateTask: Task<Void, Never>?
+    private let rebaseBanner = NSView()
+    private let rebaseBannerLabel = NSTextField(labelWithString: "")
+    private let rebaseResolveButton = NSButton(title: "Resolve…", target: nil, action: nil)
+    private let rebaseContinueButton = NSButton(title: "Continue", target: nil, action: nil)
+    private var rebaseBannerHeightConstraint: NSLayoutConstraint?
     private var preferencesObserver: NSObjectProtocol?
     private var pullPreferencesObserver: NSObjectProtocol?
     private var selectedCommitID: String?
@@ -88,11 +93,12 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
 
         let root = NSView()
         let browserToolbar = makeBrowserToolbar()
+        let rebaseBanner = makeRebaseBanner()
         let statusBar = makeStatusBar()
 
         addChild(mainSplitController)
         let contentView = mainSplitController.view
-        [browserToolbar, contentView, statusBar].forEach {
+        [browserToolbar, rebaseBanner, contentView, statusBar].forEach {
             $0.translatesAutoresizingMaskIntoConstraints = false
             root.addSubview($0)
         }
@@ -101,13 +107,20 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         toolbarHeight.priority = .defaultHigh
         let statusHeight = statusBar.heightAnchor.constraint(equalToConstant: BrowserMetrics.statusHeight)
         statusHeight.priority = .defaultHigh
+        let rebaseHeight = rebaseBanner.heightAnchor.constraint(equalToConstant: 0)
+        rebaseBannerHeightConstraint = rebaseHeight
         NSLayoutConstraint.activate([
             browserToolbar.topAnchor.constraint(equalTo: root.topAnchor),
             browserToolbar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             browserToolbar.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             toolbarHeight,
 
-            contentView.topAnchor.constraint(equalTo: browserToolbar.bottomAnchor),
+            rebaseBanner.topAnchor.constraint(equalTo: browserToolbar.bottomAnchor),
+            rebaseBanner.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            rebaseBanner.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            rebaseHeight,
+
+            contentView.topAnchor.constraint(equalTo: rebaseBanner.bottomAnchor),
             contentView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             contentView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             contentView.bottomAnchor.constraint(equalTo: statusBar.topAnchor),
@@ -129,6 +142,30 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             self?.rebuildPullMenu()
         }
         loadSnapshot()
+    }
+
+    private func makeRebaseBanner() -> NSView {
+        rebaseBanner.wantsLayer = true
+        rebaseBanner.layer?.backgroundColor = NSColor.systemBlue.withAlphaComponent(0.22).cgColor
+        let icon = NSImageView(image: NSImage(systemSymbolName: "info.circle.fill", accessibilityDescription: "Rebase in progress") ?? NSImage())
+        rebaseBannerLabel.font = .systemFont(ofSize: 12)
+        let abort = NSButton(title: "Abort", target: self, action: #selector(abortRebaseFromBanner))
+        let more = NSButton(title: "More…", target: self, action: #selector(showRebaseManager))
+        rebaseContinueButton.target = self; rebaseContinueButton.action = #selector(continueRebaseFromBanner)
+        rebaseResolveButton.target = self; rebaseResolveButton.action = #selector(resolveRebaseFromBanner)
+        let spacer = NSView(); spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let stack = NSStackView(views: [icon, rebaseBannerLabel, spacer, rebaseResolveButton, rebaseContinueButton, abort, more])
+        stack.orientation = .horizontal; stack.alignment = .centerY; stack.spacing = 7; stack.translatesAutoresizingMaskIntoConstraints = false
+        rebaseBanner.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: rebaseBanner.leadingAnchor, constant: 8),
+            stack.trailingAnchor.constraint(equalTo: rebaseBanner.trailingAnchor, constant: -8),
+            stack.topAnchor.constraint(equalTo: rebaseBanner.topAnchor, constant: 3),
+            stack.bottomAnchor.constraint(equalTo: rebaseBanner.bottomAnchor, constant: -3),
+            icon.widthAnchor.constraint(equalToConstant: 22)
+        ])
+        rebaseBanner.isHidden = true
+        return rebaseBanner
     }
 
     private func applyPreferences() {
@@ -626,6 +663,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         guard let window = view.window else { return }
         switch title {
         case "Open repository": presentOpenRepositoryPanel()
+        case "Refresh": loadSnapshot()
         case "Commit": beginCommit(initialMode: .normal)
         case "Pull/Fetch":
             guard let snapshot else { return }
@@ -669,7 +707,9 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         case "Cherry pick":
             if let commit = snapshot?.commits.first(where: { $0.id == selectedCommitID }) { beginCherryPick([commit]) }
         case "Rebase":
-            if let commit = snapshot?.commits.first(where: { $0.id == selectedCommitID && !$0.isArtificial }) { beginRebase(on: commit, interactive: false) }
+            if let commit = snapshot?.commits.first(where: { $0.id == selectedCommitID && !$0.isArtificial }) {
+                beginRebase(on: commit, interactive: false, showAdvancedOptions: true)
+            }
         case "Settings":
             Task { await ApplicationShellDialogs.presentSettings(from: window) }
         default: showPlaceholderStatus(for: title)
@@ -1033,7 +1073,6 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
     }
 
     @objc private func refresh() {
-        BrowserCommandCenter.perform("Refresh")
         loadSnapshot()
     }
 
@@ -1278,6 +1317,12 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         if identifier == "revision.branch.rebase.interactive" {
             guard !focused.isArtificial else { return }
             beginRebase(on: focused, interactive: true)
+            return
+        }
+        if identifier == "revision.branch.rebase.advanced" {
+            guard !focused.isArtificial else { return }
+            let boundary = selected.first(where: { $0.id != focused.id && !$0.isArtificial })?.id
+            beginRebase(on: focused, interactive: false, advancedFrom: boundary, showAdvancedOptions: true)
             return
         }
         if identifier == "revision.commit.edit" || identifier == "revision.commit.reword" {
@@ -1708,7 +1753,9 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
     private func beginRebase(
         on target: Commit,
         interactive: Bool,
-        initialActions: [String: RepositoryRebaseTodoAction] = [:]
+        initialActions: [String: RepositoryRebaseTodoAction] = [:],
+        advancedFrom: String? = nil,
+        showAdvancedOptions: Bool = false
     ) {
         guard let mutationSource = dataSource as? any RepositoryMutatingDataSource,
               let window = view.window else {
@@ -1719,52 +1766,23 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         mutationTask?.cancel()
         mutationTask = Task { @MainActor [weak self, weak window] in
             guard let self, let window else { return }
-            do {
-                let result: RepositoryMutationResult
-                if interactive {
-                    statusLabel.stringValue = "Loading interactive rebase plan…"
-                    let plan = try await mutationSource.loadInteractiveRebasePlan(upstream: target.id)
-                    guard !plan.isEmpty else { throw RepositoryMutationError.emptyRebasePlan }
-                    guard let request = await MutationDialogs.interactiveRebaseRequest(
-                        target: target,
-                        plan: plan,
-                        initialActions: initialActions,
-                        window: window
-                    ) else {
-                        statusLabel.stringValue = "Rebase cancelled"
-                        return
-                    }
-                    statusLabel.stringValue = "Rebasing interactively…"
-                    revisionDetailsTask?.cancel()
-                    result = try await mutationSource.interactiveRebase(request)
-                } else {
-                    guard let request = await MutationDialogs.rebaseRequest(target: target, window: window) else {
-                        statusLabel.stringValue = "Rebase cancelled"
-                        return
-                    }
-                    statusLabel.stringValue = "Rebasing…"
-                    revisionDetailsTask?.cancel()
-                    result = try await mutationSource.rebase(request)
-                }
-                guard !Task.isCancelled else { return }
-                apply(snapshot: result.snapshot, preferredCommitID: result.selectedCommitID ?? previousSelection)
-                switch result.outcome {
-                case .completed:
-                    statusLabel.stringValue = result.message
-                case .conflicts(let paths):
-                    statusLabel.stringValue = "\(result.message) Resolve and stage \(paths.count) path(s), then Continue, Skip, or Abort from the revision menu."
-                case .paused(let reason):
-                    statusLabel.stringValue = reason
-                }
-            } catch is CancellationError {
-                return
-            } catch {
-                if let refreshed = try? await mutationSource.loadSnapshot(), !Task.isCancelled {
-                    apply(snapshot: refreshed, preferredCommitID: previousSelection)
-                }
-                statusLabel.stringValue = error.localizedDescription
-                await MutationDialogs.showError(error, title: "Rebase failed", window: window)
+            statusLabel.stringValue = "Opening Rebase…"
+            revisionDetailsTask?.cancel()
+            if let refreshed = await WorkflowManagementDialogs.startRebase(
+                source: mutationSource,
+                target: target,
+                interactive: interactive,
+                initialActions: initialActions,
+                advancedFrom: advancedFrom,
+                showAdvancedOptions: showAdvancedOptions,
+                window: window
+            ) {
+                apply(snapshot: refreshed, preferredCommitID: previousSelection)
+                statusLabel.stringValue = "Repository refreshed after Rebase."
+            } else {
+                statusLabel.stringValue = "Rebase closed."
             }
+            refreshOperationIndicators()
         }
     }
 
@@ -1778,10 +1796,6 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         mutationTask?.cancel()
         mutationTask = Task { @MainActor [weak self, weak window] in
             guard let self, let window else { return }
-            guard await MutationDialogs.confirmAbortRebase(window: window) else {
-                statusLabel.stringValue = "Abort rebase cancelled"
-                return
-            }
             do {
                 statusLabel.stringValue = "Aborting rebase…"
                 let result = try await mutationSource.abortRebase()
@@ -1805,6 +1819,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         guard let mutationSource = dataSource as? any RepositoryMutatingDataSource else {
             revisionGridController.setCherryPickInProgress(false, hasConflicts: false)
             revisionGridController.setRebaseInProgress(false, hasConflicts: false)
+            updateRebaseBanner(inProgress: false, hasConflicts: false)
             return
         }
         operationStateTask = Task { @MainActor [weak self] in
@@ -1819,6 +1834,52 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
                 state?.rebaseInProgress == true,
                 hasConflicts: !(state?.conflictedPaths.isEmpty ?? true)
             )
+            updateRebaseBanner(
+                inProgress: state?.rebaseInProgress == true,
+                hasConflicts: !(state?.conflictedPaths.isEmpty ?? true)
+            )
+        }
+    }
+
+    private func updateRebaseBanner(inProgress: Bool, hasConflicts: Bool) {
+        rebaseBanner.isHidden = !inProgress
+        rebaseBannerHeightConstraint?.constant = inProgress ? 34 : 0
+        rebaseBannerLabel.stringValue = hasConflicts
+            ? "Rebase is currently in progress with merge conflicts."
+            : "Rebase is currently in progress."
+        rebaseResolveButton.isHidden = !hasConflicts
+        rebaseContinueButton.isHidden = hasConflicts
+        rebaseBanner.layer?.backgroundColor = (hasConflicts ? NSColor.systemOrange : NSColor.systemBlue)
+            .withAlphaComponent(0.22).cgColor
+    }
+
+    @objc private func continueRebaseFromBanner() {
+        beginMutation(errorTitle: "Continue rebase failed") { try await $0.continueRebase() }
+    }
+
+    @objc private func abortRebaseFromBanner() { beginAbortRebase() }
+
+    @objc private func resolveRebaseFromBanner() {
+        guard let source = dataSource as? any RepositoryMutatingDataSource, let window = view.window else { return }
+        mutationTask?.cancel()
+        mutationTask = Task { @MainActor [weak self, weak window] in
+            guard let self, let window else { return }
+            if let refreshed = await WorkflowManagementDialogs.resolveConflicts(source: source, window: window) {
+                apply(snapshot: refreshed, preferredCommitID: selectedCommitID)
+            }
+            refreshOperationIndicators()
+        }
+    }
+
+    @objc private func showRebaseManager() {
+        guard let source = dataSource as? any RepositoryMutatingDataSource, let window = view.window else { return }
+        mutationTask?.cancel()
+        mutationTask = Task { @MainActor [weak self, weak window] in
+            guard let self, let window else { return }
+            if let refreshed = await WorkflowManagementDialogs.manageRebase(source: source, window: window) {
+                apply(snapshot: refreshed, preferredCommitID: selectedCommitID)
+            }
+            refreshOperationIndicators()
         }
     }
 

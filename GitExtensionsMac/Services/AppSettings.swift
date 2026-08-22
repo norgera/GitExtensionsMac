@@ -54,6 +54,10 @@ struct PullPreferences: Codable, Equatable, Sendable {
     var updateSubmodulesAfterPull: Bool? = nil
 }
 
+struct RebasePreferences: Codable, Equatable, Sendable {
+    var helpExpanded = true
+}
+
 enum PushRejectedActionPreference: String, Codable, CaseIterable, Sendable {
     case ask
     case none
@@ -308,6 +312,7 @@ final class AppSettingsStore {
         static let pushPreferences = "GitExtensionsMac.pushPreferences.v1"
         static let commitPreferences = "GitExtensionsMac.commitPreferences.v1"
         static let fileStatusListPreferences = "GitExtensionsMac.fileStatusListPreferences.v1"
+        static let rebasePreferences = "GitExtensionsMac.rebasePreferences.v1"
     }
 
     private let defaults: UserDefaults
@@ -317,6 +322,7 @@ final class AppSettingsStore {
     private(set) var pushPreferences: PushPreferences
     private(set) var commitPreferences: CommitPreferences
     private(set) var fileStatusListPreferences: FileStatusListPreferences
+    private(set) var rebasePreferences: RebasePreferences
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -339,6 +345,9 @@ final class AppSettingsStore {
         fileStatusListPreferences = defaults.data(forKey: Key.fileStatusListPreferences)
             .flatMap { try? decoder.decode(FileStatusListPreferences.self, from: $0) }
             ?? FileStatusListPreferences()
+        rebasePreferences = defaults.data(forKey: Key.rebasePreferences)
+            .flatMap { try? decoder.decode(RebasePreferences.self, from: $0) }
+            ?? RebasePreferences()
         recentRepositories.removeAll { !FileManager.default.fileExists(atPath: $0.path) }
         applyAppearance()
     }
@@ -377,6 +386,11 @@ final class AppSettingsStore {
         fileStatusListPreferences = preferences
         defaults.set(try? JSONEncoder().encode(preferences), forKey: Key.fileStatusListPreferences)
         NotificationCenter.default.post(name: .fileStatusListPreferencesDidChange, object: self)
+    }
+
+    func saveRebasePreferences(_ preferences: RebasePreferences) {
+        rebasePreferences = preferences
+        defaults.set(try? JSONEncoder().encode(preferences), forKey: Key.rebasePreferences)
     }
 
     func recordPullURL(_ value: String) {

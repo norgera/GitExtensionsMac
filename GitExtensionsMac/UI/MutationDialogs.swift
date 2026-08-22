@@ -11,6 +11,34 @@ struct CommitDialogDraft {
 }
 
 @MainActor
+private final class RebaseOptionCoordinator: NSObject {
+    let ignoreDate: NSButton
+    let committerDate: NSButton
+    let rebaseMerges: NSButton
+    let specificRange: NSButton
+    let from: NSTextField
+    let branch: NSTextField
+
+    init(ignoreDate: NSButton, committerDate: NSButton, rebaseMerges: NSButton, specificRange: NSButton, from: NSTextField, branch: NSTextField) {
+        self.ignoreDate = ignoreDate; self.committerDate = committerDate; self.rebaseMerges = rebaseMerges
+        self.specificRange = specificRange; self.from = from; self.branch = branch
+        super.init()
+        ignoreDate.target = self; ignoreDate.action = #selector(changed)
+        committerDate.target = self; committerDate.action = #selector(changed)
+        specificRange.target = self; specificRange.action = #selector(changed)
+        changed()
+    }
+
+    @objc private func changed() {
+        committerDate.isEnabled = ignoreDate.state != .on
+        ignoreDate.isEnabled = committerDate.state != .on
+        rebaseMerges.isEnabled = ignoreDate.state != .on && committerDate.state != .on
+        let enabled = specificRange.state == .on
+        from.isEnabled = enabled; branch.isEnabled = enabled
+    }
+}
+
+@MainActor
 enum MutationDialogs {
     static func checkoutRequest(
         target: CheckoutDialogTarget,
@@ -136,6 +164,15 @@ enum MutationDialogs {
         alert.messageText = title
         alert.informativeText = error.localizedDescription
         alert.alertStyle = .warning
+        alert.addButton(withTitle: "OK")
+        _ = await begin(alert: alert, for: window)
+    }
+
+    static func showInformation(_ message: String, title: String, window: NSWindow) async {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.alertStyle = .informational
         alert.addButton(withTitle: "OK")
         _ = await begin(alert: alert, for: window)
     }
@@ -382,7 +419,7 @@ enum MutationDialogs {
         return await begin(alert: alert, for: window) == .alertFirstButtonReturn
     }
 
-    static func rebaseRequest(target: Commit, window: NSWindow) async -> RepositoryRebaseRequest? {
+    static func rebaseRequest(target: Commit, fromRevision: String? = nil, window: NSWindow) async -> RepositoryRebaseRequest? {
         let alert = NSAlert()
         alert.messageText = "Rebase current branch?"
         alert.informativeText = "Rebase the current branch on \(target.shortID): \(target.subject). This rewrites commit history."
@@ -390,15 +427,63 @@ enum MutationDialogs {
         alert.addButton(withTitle: "Rebase")
         alert.addButton(withTitle: "Cancel")
         let autoStash = checkbox("Automatically stash and reapply local changes", state: AppSettingsStore.shared.preferences.autoStashDuringRebase)
-        alert.accessoryView = autoStash
+        let rebaseMerges = checkbox("Preserve merges (--rebase-merges)", state: false)
+        let updateRefs = checkbox("Update dependent refs", state: false)
+        let ignoreDate = checkbox("Ignore date", state: false)
+        let committerDate = checkbox("Committer date is author date", state: false)
+        let specificRange = checkbox("Specific range", state: fromRevision != nil)
+        let from = NSTextField(string: fromRevision ?? "")
+        from.placeholderString = "From (exclusive)"
+        from.widthAnchor.constraint(equalToConstant: 170).isActive = true
+        let branch = NSTextField(string: "HEAD")
+        branch.placeholderString = "Branch / To"
+        branch.widthAnchor.constraint(equalToConstant: 170).isActive = true
+        let range = NSStackView(views: [from, branch])
+        range.orientation = .horizontal
+        range.spacing = 6
+        let stack = NSStackView(views: [autoStash, rebaseMerges, updateRefs, ignoreDate, committerDate, specificRange, range])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 6
+        stack.widthAnchor.constraint(equalToConstant: 590).isActive = true
+        let coordinator = RebaseOptionCoordinator(
+            ignoreDate: ignoreDate,
+            committerDate: committerDate,
+            rebaseMerges: rebaseMerges,
+            specificRange: specificRange,
+            from: from,
+            branch: branch
+        )
+        alert.accessoryView = stack
         guard await begin(alert: alert, for: window) == .alertFirstButtonReturn else { return nil }
-        return RepositoryRebaseRequest(upstream: target.id, autoStash: autoStash.state == .on)
+        _ = coordinator
+        let useRange = specificRange.state == .on
+        return RepositoryRebaseRequest(
+            upstream: target.id,
+            autoStash: autoStash.state == .on,
+            rebaseMerges: rebaseMerges.state == .on,
+            updateRefs: updateRefs.state == .on ? true : nil,
+            ignoreDate: ignoreDate.state == .on,
+            committerDateIsAuthorDate: committerDate.state == .on,
+            onto: useRange ? target.id : nil,
+            from: useRange ? from.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) : nil,
+            branch: useRange ? branch.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) : nil
+        )
     }
 
     static func interactiveRebaseRequest(
         target: Commit,
         plan: [RepositoryRebaseTodoItem],
         initialActions: [String: RepositoryRebaseTodoAction] = [:],
+        upstream: String? = nil,
+        autoStashDefault: Bool? = nil,
+        autoSquashDefault: Bool = false,
+        rebaseMergesDefault: Bool = false,
+        updateRefsDefault: Bool? = nil,
+        onto: String? = nil,
+        from: String? = nil,
+        branch: String? = nil,
+        showOptions: Bool = true,
         window: NSWindow
     ) async -> RepositoryInteractiveRebaseRequest? {
         guard !plan.isEmpty else { return nil }
@@ -460,8 +545,16 @@ enum MutationDialogs {
             controls.append(RowControl(originalIndex: index, item: item, order: order, action: action, message: message))
         }
 
-        let autoStash = checkbox("Automatically stash and reapply local changes", state: AppSettingsStore.shared.preferences.autoStashDuringRebase)
-        stack.addArrangedSubview(autoStash)
+        let autoStash = checkbox("Automatically stash and reapply local changes", state: autoStashDefault ?? AppSettingsStore.shared.preferences.autoStashDuringRebase)
+        let autoSquash = checkbox("Autosquash", state: autoSquashDefault)
+        let rebaseMerges = checkbox("Preserve merges (--rebase-merges)", state: rebaseMergesDefault)
+        let updateRefs = checkbox("Update dependent refs", state: updateRefsDefault == true)
+        if showOptions {
+            stack.addArrangedSubview(autoStash)
+            stack.addArrangedSubview(autoSquash)
+            stack.addArrangedSubview(rebaseMerges)
+            stack.addArrangedSubview(updateRefs)
+        }
         let scroll = NSScrollView()
         scroll.documentView = stack
         scroll.hasVerticalScroller = true
@@ -496,26 +589,184 @@ enum MutationDialogs {
             )
         }
         return RepositoryInteractiveRebaseRequest(
-            upstream: target.id,
+            upstream: upstream ?? target.id,
             items: items,
-            autoStash: autoStash.state == .on
+            autoStash: autoStash.state == .on,
+            autoSquash: autoSquash.state == .on,
+            rebaseMerges: rebaseMerges.state == .on,
+            updateRefs: showOptions ? (updateRefs.state == .on ? true : nil) : updateRefsDefault,
+            onto: onto,
+            from: from,
+            branch: branch
         )
     }
 
-    static func confirmAbortRebase(window: NSWindow) async -> Bool {
+    static func nativeInteractiveRebaseRequest(
+        target: Commit,
+        upstream: String,
+        todo: String,
+        initialActions: [String: RepositoryRebaseTodoAction],
+        autoStash: Bool,
+        autoSquash: Bool,
+        rebaseMerges: Bool,
+        updateRefs: Bool?,
+        onto: String?,
+        from: String?,
+        branch: String?,
+        window: NSWindow
+    ) async -> RepositoryInteractiveRebaseRequest? {
+        let prepared = todo.split(separator: "\n", omittingEmptySubsequences: false).map { raw -> String in
+            let line = String(raw)
+            let fields = line.trimmingCharacters(in: .whitespaces).split(maxSplits: 2, whereSeparator: \.isWhitespace)
+            guard fields.count >= 2 else { return line }
+            let commitID = String(fields[1])
+            guard let action = initialActions.first(where: { key, _ in
+                key.hasPrefix(commitID) || commitID.hasPrefix(key)
+            })?.value else { return line }
+            let subject = fields.count > 2 ? String(fields[2]) : ""
+            let command: String
+            let rewrittenSubject: String
+            switch action {
+            case .pick: command = "pick"; rewrittenSubject = subject
+            case .reword(let message): command = "reword"; rewrittenSubject = message
+            case .edit: command = "edit"; rewrittenSubject = subject
+            case .squash: command = "squash"; rewrittenSubject = subject
+            case .fixup: command = "fixup"; rewrittenSubject = subject
+            case .drop: command = "drop"; rewrittenSubject = subject
+            }
+            return "\(command) \(commitID) \(rewrittenSubject.replacingOccurrences(of: "\n", with: " "))"
+        }.joined(separator: "\n")
+        let (scroll, textView) = nativeRebaseTodoEditor(prepared)
         let alert = NSAlert()
-        alert.messageText = "Abort rebase?"
-        alert.informativeText = "Git will restore the branch and working tree to their state before this rebase began."
+        alert.messageText = "Interactive rebase"
+        alert.informativeText = "Edit Git’s rebase todo for \(target.shortID): \(target.subject). Reorder lines or use pick, reword, edit, squash, fixup, and drop. For reword, replace the subject on that line with the new message."
         alert.alertStyle = .warning
-        alert.addButton(withTitle: "Abort")
+        alert.addButton(withTitle: "Start rebase")
         alert.addButton(withTitle: "Cancel")
-        return await begin(alert: alert, for: window) == .alertFirstButtonReturn
+        alert.accessoryView = scroll
+        guard await begin(alert: alert, for: window) == .alertFirstButtonReturn else { return nil }
+        return RepositoryInteractiveRebaseRequest(
+            upstream: upstream,
+            items: [],
+            autoStash: autoStash,
+            autoSquash: autoSquash,
+            rebaseMerges: rebaseMerges,
+            updateRefs: updateRefs,
+            onto: onto,
+            from: from,
+            branch: branch,
+            nativeTodo: textView.string
+        )
+    }
+
+    static func editRebaseTodoRequest(
+        patches: [RepositoryRebasePatch],
+        window: NSWindow
+    ) async -> [RepositoryRebaseTodoItem]? {
+        let pending = patches.filter { $0.status == .pending }
+        guard !pending.isEmpty else { return nil }
+        struct Row {
+            let index: Int
+            let patch: RepositoryRebasePatch
+            let order: NSTextField
+            let action: NSPopUpButton
+            let message: NSTextField
+        }
+        var rows: [Row] = []
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 5
+        for (index, patch) in pending.enumerated() {
+            let rowView = NSStackView()
+            rowView.orientation = .horizontal
+            rowView.spacing = 6
+            let order = NSTextField(string: String(index + 1))
+            order.widthAnchor.constraint(equalToConstant: 38).isActive = true
+            let action = NSPopUpButton()
+            action.addItems(withTitles: ["pick", "reword", "edit", "squash", "fixup", "drop"])
+            action.selectItem(withTitle: patch.action)
+            action.widthAnchor.constraint(equalToConstant: 86).isActive = true
+            let message = NSTextField(string: patch.subject)
+            message.widthAnchor.constraint(equalToConstant: 390).isActive = true
+            rowView.addArrangedSubview(order)
+            rowView.addArrangedSubview(action)
+            rowView.addArrangedSubview(message)
+            stack.addArrangedSubview(rowView)
+            rows.append(Row(index: index, patch: patch, order: order, action: action, message: message))
+        }
+        let scroll = NSScrollView()
+        scroll.documentView = stack
+        scroll.hasVerticalScroller = true
+        scroll.borderType = .bezelBorder
+        scroll.widthAnchor.constraint(equalToConstant: 540).isActive = true
+        scroll.heightAnchor.constraint(equalToConstant: min(360, CGFloat(45 + pending.count * 30))).isActive = true
+        let alert = NSAlert()
+        alert.messageText = "Edit rebase todo"
+        alert.informativeText = "Reorder or change the remaining commits. Squash and fixup require a preceding retained commit."
+        alert.addButton(withTitle: "Save todo")
+        alert.addButton(withTitle: "Cancel")
+        alert.accessoryView = scroll
+        guard await begin(alert: alert, for: window) == .alertFirstButtonReturn else { return nil }
+        return rows.sorted {
+            (Int($0.order.stringValue) ?? $0.index + 1, $0.index) <
+            (Int($1.order.stringValue) ?? $1.index + 1, $1.index)
+        }.map { row in
+            let action: RepositoryRebaseTodoAction = switch row.action.titleOfSelectedItem {
+            case "reword": .reword(row.message.stringValue)
+            case "edit": .edit
+            case "squash": .squash
+            case "fixup": .fixup
+            case "drop": .drop
+            default: .pick
+            }
+            return RepositoryRebaseTodoItem(commitID: row.patch.commitID, subject: row.patch.subject, action: action)
+        }
+    }
+
+    static func editNativeRebaseTodoRequest(todo: String, window: NSWindow) async -> String? {
+        let (scroll, textView) = nativeRebaseTodoEditor(todo)
+        let alert = NSAlert()
+        alert.messageText = "Edit rebase todo"
+        alert.informativeText = "Edit the remaining native Git todo. Merge labels, resets, merges, and update-ref directives are preserved."
+        alert.addButton(withTitle: "Save todo")
+        alert.addButton(withTitle: "Cancel")
+        alert.accessoryView = scroll
+        guard await begin(alert: alert, for: window) == .alertFirstButtonReturn else { return nil }
+        return textView.string
     }
 
     private static func begin(alert: NSAlert, for window: NSWindow) async -> NSApplication.ModalResponse {
         await withCheckedContinuation { continuation in
             alert.beginSheetModal(for: window) { continuation.resume(returning: $0) }
         }
+    }
+
+    private static func nativeRebaseTodoEditor(_ text: String) -> (NSScrollView, NSTextView) {
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 760, height: 430))
+        scroll.hasVerticalScroller = true
+        scroll.hasHorizontalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.borderType = .bezelBorder
+
+        let textView = NSTextView(frame: scroll.contentView.bounds)
+        textView.string = text
+        textView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        textView.isRichText = false
+        textView.isAutomaticQuoteSubstitutionEnabled = false
+        textView.isAutomaticDashSubstitutionEnabled = false
+        textView.isAutomaticTextReplacementEnabled = false
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = true
+        textView.minSize = NSSize(width: 0, height: scroll.contentSize.height)
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textView.textContainer?.containerSize = NSSize(
+            width: CGFloat.greatestFiniteMagnitude,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        textView.textContainer?.widthTracksTextView = false
+        scroll.documentView = textView
+        return (scroll, textView)
     }
 
     private static func label(_ text: String) -> NSTextField {

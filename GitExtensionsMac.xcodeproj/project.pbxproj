@@ -30,6 +30,7 @@
 		EE5000000000000000000002 /* HelpPullMerge.png in Resources */ = {isa = PBXBuildFile; fileRef = FF5000000000000000000002 /* HelpPullMerge.png */; };
 		EE5000000000000000000003 /* HelpPullMergeFastForward.png in Resources */ = {isa = PBXBuildFile; fileRef = FF5000000000000000000003 /* HelpPullMergeFastForward.png */; };
 		EE5000000000000000000004 /* HelpPullRebase.png in Resources */ = {isa = PBXBuildFile; fileRef = FF5000000000000000000004 /* HelpPullRebase.png */; };
+		EE500000000000000000000A /* HelpCommandRebase.png in Resources */ = {isa = PBXBuildFile; fileRef = FF500000000000000000000A /* HelpCommandRebase.png */; };
 		EE5000000000000000000005 /* RemoteAdd.png in Resources */ = {isa = PBXBuildFile; fileRef = FF5000000000000000000005 /* RemoteAdd.png */; };
 		EE5000000000000000000006 /* RemoteDelete.png in Resources */ = {isa = PBXBuildFile; fileRef = FF5000000000000000000006 /* RemoteDelete.png */; };
 		EE5000000000000000000007 /* RemoteEnableAndFetch.png in Resources */ = {isa = PBXBuildFile; fileRef = FF5000000000000000000007 /* RemoteEnableAndFetch.png */; };
@@ -150,6 +151,7 @@
 		FF5000000000000000000002 /* HelpPullMerge.png */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = image.png; path = HelpPullMerge.png; sourceTree = "<group>"; };
 		FF5000000000000000000003 /* HelpPullMergeFastForward.png */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = image.png; path = HelpPullMergeFastForward.png; sourceTree = "<group>"; };
 		FF5000000000000000000004 /* HelpPullRebase.png */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = image.png; path = HelpPullRebase.png; sourceTree = "<group>"; };
+		FF500000000000000000000A /* HelpCommandRebase.png */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = image.png; path = HelpCommandRebase.png; sourceTree = "<group>"; };
 		FF5000000000000000000005 /* RemoteAdd.png */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = image.png; path = RemoteAdd.png; sourceTree = "<group>"; };
 		FF5000000000000000000006 /* RemoteDelete.png */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = image.png; path = RemoteDelete.png; sourceTree = "<group>"; };
 		FF5000000000000000000007 /* RemoteEnableAndFetch.png */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = image.png; path = RemoteEnableAndFetch.png; sourceTree = "<group>"; };
@@ -403,6 +405,7 @@
 				FF5000000000000000000002 /* HelpPullMerge.png */,
 				FF5000000000000000000003 /* HelpPullMergeFastForward.png */,
 				FF5000000000000000000004 /* HelpPullRebase.png */,
+				FF500000000000000000000A /* HelpCommandRebase.png */,
 				497D0CD1BC2F6F2F3743AD99 /* LayoutFooter.png */,
 				31117DAF3496E7197DFA6B31 /* LayoutFooterTab.png */,
 				CA08AF52713A7090573C383A /* LayoutSidebarLeft.png */,
@@ -550,6 +553,7 @@
 				EE5000000000000000000002 /* HelpPullMerge.png in Resources */,
 				EE5000000000000000000003 /* HelpPullMergeFastForward.png in Resources */,
 				EE5000000000000000000004 /* HelpPullRebase.png in Resources */,
+				EE500000000000000000000A /* HelpCommandRebase.png in Resources */,
 				EE5000000000000000000008 /* Merge.png in Resources */,
 				EE5000000000000000000009 /* Rebase.png in Resources */,
 				EE5000000000000000000005 /* RemoteAdd.png in Resources */,

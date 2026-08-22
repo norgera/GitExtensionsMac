@@ -175,7 +175,11 @@ enum RevisionContextMenuBuilder {
                     command("revision.branch.rebase.selected", "Selected commit", enabled: selectedCount == 1),
                     command("revision.branch.rebase.interactive", "Selected commit interactively…", enabled: selectedCount == 1),
                     .separator,
-                    command("revision.branch.rebase.advanced", "Selected commit with advanced options…", enabled: false)
+                    command(
+                        "revision.branch.rebase.advanced",
+                        "Selected commit with advanced options…",
+                        enabled: (selectedCount == 1 || selectedCount == 2) && selected.allSatisfy { !$0.isArtificial }
+                    )
                 ]
             ))
         }

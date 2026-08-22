@@ -5,6 +5,7 @@ enum AppSettingsTests {
     static func run() {
         testPreferencesRoundTrip()
         testPullPreferencesRoundTrip()
+        testRebasePreferencesRoundTrip()
         testPushPreferencesRoundTrip()
         testCommitPreferencesRoundTrip()
         testFileStatusListPreferencesRoundTrip()
@@ -84,6 +85,15 @@ enum AppSettingsTests {
         store.recordPushURL("ssh://example/push-repository")
         precondition(store.pushPreferences.recentURLs.first == "ssh://example/push-repository")
         precondition(store.pushPreferences.recentURLs.filter { $0 == "ssh://example/push-repository" }.count == 1)
+    }
+
+    private static func testRebasePreferencesRoundTrip() {
+        withStore { store, defaults in
+            var preferences = store.rebasePreferences
+            preferences.helpExpanded = false
+            store.saveRebasePreferences(preferences)
+            precondition(AppSettingsStore(defaults: defaults).rebasePreferences == preferences)
+        }
     }
 
     private static func testCommitPreferencesRoundTrip() {

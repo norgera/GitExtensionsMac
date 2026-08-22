@@ -81,7 +81,7 @@ enum ContextMenuStateTests {
         ))
 
         expect(menu.entry(id: "revision.branch.rebase.selected")?.isEnabled == false, "revision: ordinary rebase requires one revision")
-        expect(menu.entry(id: "revision.branch.rebase.advanced")?.isEnabled == false, "revision: unimplemented advanced rebase remains visible but disabled")
+        expect(menu.entry(id: "revision.branch.rebase.advanced")?.isEnabled == true, "revision: advanced rebase accepts two real revisions")
         expect(menu.entry(id: "revision.compare.selected")?.isEnabled == true, "revision: selected revisions can be compared")
         expect(menu.entry(id: "revision.commit.edit")?.isEnabled == false, "revision: edit is disabled for multi-selection")
     }
