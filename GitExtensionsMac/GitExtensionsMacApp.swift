@@ -43,123 +43,123 @@ struct GitExtensionsMacApp: App {
 }
 
 private struct GitExtensionsMenuCommands: Commands {
-    private func perform(_ title: String) {
-        BrowserCommandCenter.perform(title)
+    private func perform(_ command: BrowserCommand) {
+        BrowserCommandCenter.perform(command)
     }
 
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
-            Button("New repository…") { perform("New repository") }
-            Button("Open repository…") { perform("Open repository") }
+            Button("New repository…") { perform(.unavailable("New repository")) }
+            Button("Open repository…") { perform(.openRepository) }
                 .keyboardShortcut("o", modifiers: .command)
-            Button("Clone repository…") { perform("Clone repository") }
+            Button("Clone repository…") { perform(.cloneRepository) }
 
             Menu("Recent repositories") {
                 ForEach(AppSettingsStore.shared.recentRepositories.prefix(10), id: \.path) { repository in
                     Button(URL(fileURLWithPath: repository.path).lastPathComponent) {
-                        perform("Open recent repository: \(repository.path)")
+                        perform(.openRecentRepository(URL(fileURLWithPath: repository.path, isDirectory: true)))
                     }
                 }
                 Divider()
-                Button("Clear recent repositories") { perform("Clear recent repositories") }
+                Button("Clear recent repositories") { perform(.clearRecentRepositories) }
             }
 
             Divider()
-            Button("Close (go to Dashboard)") { perform("Close (go to Dashboard)") }
+            Button("Close (go to Dashboard)") { perform(.closeToDashboard) }
                 .keyboardShortcut("w", modifiers: [.command, .shift])
         }
 
         CommandMenu("Dashboard") {
-            Button("Refresh") { perform("Refresh Dashboard") }
+            Button("Refresh") { perform(.unavailable("Refresh Dashboard")) }
                 .keyboardShortcut("r", modifiers: [.command, .option])
         }
 
         CommandMenu("Repository") {
-            Button("Refresh") { perform("Refresh") }
+            Button("Refresh") { perform(.refresh) }
                 .keyboardShortcut("r", modifiers: .command)
-            Button("File Explorer") { perform("File Explorer") }
+            Button("File Explorer") { perform(.unavailable("File Explorer")) }
                 .keyboardShortcut("o", modifiers: [.command, .shift])
             Divider()
-            Button("Remote repositories…") { perform("Remote repositories") }
+            Button("Remote repositories…") { perform(.remoteRepositories) }
             Divider()
-            Button("Manage submodules…") { perform("Manage submodules") }
-            Button("Update all submodules") { perform("Update all submodules") }
-            Button("Synchronize all submodules") { perform("Synchronize all submodules") }
+            Button("Manage submodules…") { perform(.unavailable("Manage submodules")) }
+            Button("Update all submodules") { perform(.unavailable("Update all submodules")) }
+            Button("Synchronize all submodules") { perform(.unavailable("Synchronize all submodules")) }
             Divider()
-            Button("Manage worktrees…") { perform("Manage worktrees") }
+            Button("Manage worktrees…") { perform(.unavailable("Manage worktrees")) }
             Divider()
-            Button("Edit .gitignore") { perform("Edit .gitignore") }
-            Button("Edit .git/info/exclude") { perform("Edit .git/info/exclude") }
-            Button("Edit .gitattributes") { perform("Edit .gitattributes") }
-            Button("Edit .mailmap") { perform("Edit .mailmap") }
-            Button("Sparse Working Copy") { perform("Sparse Working Copy") }
+            Button("Edit .gitignore") { perform(.unavailable("Edit .gitignore")) }
+            Button("Edit .git/info/exclude") { perform(.unavailable("Edit .git/info/exclude")) }
+            Button("Edit .gitattributes") { perform(.unavailable("Edit .gitattributes")) }
+            Button("Edit .mailmap") { perform(.unavailable("Edit .mailmap")) }
+            Button("Sparse Working Copy") { perform(.unavailable("Sparse Working Copy")) }
             Divider()
             Menu("Git maintenance") {
-                Button("Compress git database") { perform("Compress git database") }
-                Button("Recover lost objects…") { perform("Recover lost objects") }
-                Button("Delete index.lock") { perform("Delete index.lock") }
-                Button("Edit .git/config") { perform("Edit .git/config") }
+                Button("Compress git database") { perform(.unavailable("Compress git database")) }
+                Button("Recover lost objects…") { perform(.unavailable("Recover lost objects")) }
+                Button("Delete index.lock") { perform(.unavailable("Delete index.lock")) }
+                Button("Edit .git/config") { perform(.unavailable("Edit .git/config")) }
             }
-            Button("Repository settings…") { perform("Repository settings") }
+            Button("Repository settings…") { perform(.unavailable("Repository settings")) }
         }
 
         CommandMenu("Commands") {
-            Button("Commit…") { perform("Commit") }
+            Button("Commit…") { perform(.commit) }
                 .keyboardShortcut(.return, modifiers: [.command, .shift])
-            Button("Undo last commit…") { perform("Undo last commit") }
-            Button("Pull/Fetch…") { perform("Pull/Fetch") }
-            Button("Push…") { perform("Push") }
+            Button("Undo last commit…") { perform(.unavailable("Undo last commit")) }
+            Button("Pull/Fetch…") { perform(.pullFetch) }
+            Button("Push…") { perform(.push) }
             Divider()
-            Button("Manage stashes…") { perform("Manage stashes") }
-            Button("Reset changes…") { perform("Reset changes") }
-            Button("Clean working directory…") { perform("Clean working directory") }
+            Button("Manage stashes…") { perform(.manageStashes) }
+            Button("Reset changes…") { perform(.unavailable("Reset changes")) }
+            Button("Clean working directory…") { perform(.unavailable("Clean working directory")) }
             Divider()
-            Button("Create branch…") { perform("Create branch") }
-            Button("Delete branch…") { perform("Delete branch") }
-            Button("Checkout branch…") { perform("Checkout branch") }
-            Button("Merge branches…") { perform("Merge branches") }
-            Button("Rebase…") { perform("Rebase") }
-            Button("Solve merge conflicts…") { perform("Solve merge conflicts") }
+            Button("Create branch…") { perform(.unavailable("Create branch")) }
+            Button("Delete branch…") { perform(.unavailable("Delete branch")) }
+            Button("Checkout branch…") { perform(.unavailable("Checkout branch")) }
+            Button("Merge branches…") { perform(.mergeBranches) }
+            Button("Rebase…") { perform(.rebase) }
+            Button("Solve merge conflicts…") { perform(.solveMergeConflicts) }
             Divider()
-            Button("Create tag…") { perform("Create tag") }
-            Button("Delete tag…") { perform("Delete tag") }
+            Button("Create tag…") { perform(.unavailable("Create tag")) }
+            Button("Delete tag…") { perform(.unavailable("Delete tag")) }
             Divider()
-            Button("Cherry pick…") { perform("Cherry pick") }
-            Button("Archive revision…") { perform("Archive revision") }
-            Button("Checkout revision…") { perform("Checkout revision") }
-            Button("Bisect…") { perform("Bisect") }
-            Button("Show reflog…") { perform("Show reflog") }
+            Button("Cherry pick…") { perform(.cherryPick) }
+            Button("Archive revision…") { perform(.unavailable("Archive revision")) }
+            Button("Checkout revision…") { perform(.unavailable("Checkout revision")) }
+            Button("Bisect…") { perform(.unavailable("Bisect")) }
+            Button("Show reflog…") { perform(.unavailable("Show reflog")) }
             Divider()
-            Button("Format patch…") { perform("Format patch") }
-            Button("Apply patch…") { perform("Apply patch") }
-            Button("View patch file…") { perform("View patch file") }
+            Button("Format patch…") { perform(.unavailable("Format patch")) }
+            Button("Apply patch…") { perform(.unavailable("Apply patch")) }
+            Button("View patch file…") { perform(.unavailable("View patch file")) }
         }
 
         CommandMenu("Repository hosts") {
-            Button("Fork/Clone repository…") { perform("Fork/Clone repository") }
-            Button("View pull requests…") { perform("View pull requests") }
-            Button("Create pull request…") { perform("Create pull request") }
-            Button("Add upstream remote") { perform("Add upstream remote") }
+            Button("Fork/Clone repository…") { perform(.unavailable("Fork/Clone repository")) }
+            Button("View pull requests…") { perform(.unavailable("View pull requests")) }
+            Button("Create pull request…") { perform(.unavailable("Create pull request")) }
+            Button("Add upstream remote") { perform(.unavailable("Add upstream remote")) }
         }
 
         CommandMenu("Plugins") {
-            Button("Plugin manager…") { perform("Plugin manager") }
-            Button("Plugin settings…") { perform("Plugin settings") }
+            Button("Plugin manager…") { perform(.unavailable("Plugin manager")) }
+            Button("Plugin settings…") { perform(.unavailable("Plugin settings")) }
         }
 
         CommandMenu("Tools") {
-            Button("Git command log") { perform("Git command log") }
-            Button("Settings…") { perform("Settings") }
+            Button("Git command log") { perform(.unavailable("Git command log")) }
+            Button("Settings…") { perform(.settings) }
                 .keyboardShortcut(",", modifiers: .command)
             Divider()
-            Button("Translation") { perform("Translation") }
-            Button("Check for updates") { perform("Check for updates") }
+            Button("Translation") { perform(.unavailable("Translation")) }
+            Button("Check for updates") { perform(.unavailable("Check for updates")) }
         }
 
         CommandGroup(replacing: .help) {
-            Button("Git Extensions manual") { perform("Git Extensions manual") }
-            Button("Keyboard shortcuts") { perform("Keyboard shortcuts") }
-            Button("Report an issue") { perform("Report an issue") }
+            Button("Git Extensions manual") { perform(.unavailable("Git Extensions manual")) }
+            Button("Keyboard shortcuts") { perform(.unavailable("Keyboard shortcuts")) }
+            Button("Report an issue") { perform(.unavailable("Report an issue")) }
         }
     }
 }

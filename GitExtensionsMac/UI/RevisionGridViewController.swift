@@ -303,7 +303,7 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
     @objc private func openSelectedCommit() {
         let row = tableView.clickedRow >= 0 ? tableView.clickedRow : tableView.selectedRow
         guard row >= 0, row < commits.count else { return }
-        BrowserCommandCenter.perform("Open commit \(commits[row].shortID)")
+        BrowserCommandCenter.perform(.unavailable("Open commit \(commits[row].shortID)"))
     }
 
     private func copySelectedCommitIDs() {
@@ -1020,7 +1020,7 @@ final class RevisionMessageCellView: NSTableCellView {
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
         if event.type == .leftMouseDown, let badge = badges.first(where: { $0.contains(point) }) {
-            BrowserCommandCenter.perform("Go to \(badge.reference.name)")
+            BrowserCommandCenter.perform(.unavailable("Go to \(badge.reference.name)"))
             return
         }
         super.mouseDown(with: event)

@@ -50,14 +50,14 @@ final class ApplicationHostViewController: NSViewController {
         ])
         view = root
         commandObserver = NotificationCenter.default.addObserver(
-            forName: .browserPlaceholderAction,
+            forName: .browserCommand,
             object: nil,
             queue: .main
         ) { [weak self] notification in
-            guard let title = notification.userInfo?["title"] as? String else { return }
+            guard let command = BrowserCommandCenter.command(from: notification) else { return }
             Task { @MainActor [weak self] in
                 guard let self, !(self.activeController is RepositoryBrowserViewController) else { return }
-                self.performApplicationCommand(title)
+                self.performApplicationCommand(command)
             }
         }
 
@@ -79,18 +79,17 @@ final class ApplicationHostViewController: NSViewController {
         }
     }
 
-    private func performApplicationCommand(_ title: String) {
-        switch title {
-        case "Open repository": presentOpenRepositoryPanel()
-        case "Close (go to Dashboard)": showDashboard()
-        case "Clone repository": presentCloneShell()
-        case "Settings": presentSettings()
-        case "Clear recent repositories":
+    private func performApplicationCommand(_ command: BrowserCommand) {
+        switch command {
+        case .openRepository: presentOpenRepositoryPanel()
+        case .closeToDashboard: showDashboard()
+        case .cloneRepository: presentCloneShell()
+        case .settings: presentSettings()
+        case .clearRecentRepositories:
             store.clearRecentRepositories()
             (activeController as? RepositoryStartupViewController)?.reloadRecents()
-        case let value where value.hasPrefix("Open recent repository: "):
-            let path = String(value.dropFirst("Open recent repository: ".count))
-            openRepository(URL(fileURLWithPath: path, isDirectory: true))
+        case .openRecentRepository(let url):
+            openRepository(url)
         default: break
         }
     }
@@ -112,15 +111,14 @@ final class ApplicationHostViewController: NSViewController {
         controller.onApplicationCommand = { [weak self] command in
             guard let self else { return false }
             switch command {
-            case "Open repository": self.presentOpenRepositoryPanel()
-            case "Close (go to Dashboard)": self.showDashboard()
-            case "Clone repository": self.presentCloneShell()
-            case "Settings": self.presentSettings()
-            case "Clear recent repositories":
+            case .openRepository: self.presentOpenRepositoryPanel()
+            case .closeToDashboard: self.showDashboard()
+            case .cloneRepository: self.presentCloneShell()
+            case .settings: self.presentSettings()
+            case .clearRecentRepositories:
                 self.store.clearRecentRepositories()
-            case let value where value.hasPrefix("Open recent repository: "):
-                let path = String(value.dropFirst("Open recent repository: ".count))
-                self.openRepository(URL(fileURLWithPath: path, isDirectory: true))
+            case .openRecentRepository(let url):
+                self.openRepository(url)
             default: return false
             }
             return true

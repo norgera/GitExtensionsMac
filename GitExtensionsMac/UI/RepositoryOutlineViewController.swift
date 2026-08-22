@@ -253,7 +253,7 @@ final class RepositoryOutlineViewController: NSViewController, NSOutlineViewData
 
     @objc private func collapseAll() {
         outlineView.collapseItem(nil, collapseChildren: true)
-        BrowserCommandCenter.perform("Collapse all repository objects")
+        BrowserCommandCenter.perform(.showStatus("Collapsed repository objects"))
     }
 
     @objc private func toggleRootVisibility(_ sender: NSButton) {

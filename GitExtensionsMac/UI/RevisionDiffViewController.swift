@@ -66,7 +66,7 @@ final class RevisionDiffViewController: RetainingSplitViewController {
                 } catch {
                     guard !Task.isCancelled, self.selectedFileID == file.id else { return }
                     self.diffController.apply(file: file, diff: nil)
-                    BrowserCommandCenter.perform(error.localizedDescription)
+                    BrowserCommandCenter.perform(.showStatus(error.localizedDescription))
                 }
             }
         }
@@ -334,7 +334,7 @@ final class ChangedFilesViewController: NSViewController, NSOutlineViewDelegate,
     }
 
     @objc private func placeholder(_ sender: NSButton) {
-        BrowserCommandCenter.perform(sender.toolTip ?? "File list option")
+        BrowserCommandCenter.perform(.unavailable(sender.toolTip ?? "File list option"))
     }
 
     @objc private func toggleTreeMode() {
@@ -390,7 +390,7 @@ final class ChangedFilesViewController: NSViewController, NSOutlineViewDelegate,
         let row = outlineView.clickedRow
         guard row >= 0, let node = outlineView.item(atRow: row) as? ChangedFileNode else { return }
         if let file = node.file {
-            BrowserCommandCenter.perform("Open \(file.path)")
+            BrowserCommandCenter.perform(.unavailable("Open \(file.path)"))
         } else if outlineView.isItemExpanded(node) {
             outlineView.collapseItem(node)
         } else {
@@ -870,7 +870,7 @@ final class DiffContentViewController: NSViewController, NSTableViewDataSource, 
             showsSyntaxHighlighting = state == .on
             reloadRenderedLines()
         default:
-            BrowserCommandCenter.perform(action)
+            BrowserCommandCenter.perform(.unavailable(action))
         }
     }
 
@@ -925,7 +925,7 @@ final class DiffContentViewController: NSViewController, NSTableViewDataSource, 
     }
 
     @objc private func placeholder(_ sender: NSButton) {
-        BrowserCommandCenter.perform(sender.toolTip ?? "Diff option")
+        BrowserCommandCenter.perform(.unavailable(sender.toolTip ?? "Diff option"))
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
@@ -1599,7 +1599,7 @@ private final class RevisionFileTreeOutlineViewController: NSViewController, NSO
         if item.node.kind == .folder {
             outlineView.isItemExpanded(item) ? outlineView.collapseItem(item) : outlineView.expandItem(item)
         } else {
-            BrowserCommandCenter.perform("Open \(item.node.path)")
+            BrowserCommandCenter.perform(.unavailable("Open \(item.node.path)"))
         }
     }
 

@@ -1,16 +1,65 @@
 import AppKit
 
 extension Notification.Name {
-    static let browserPlaceholderAction = Notification.Name("GitExtensionsMac.browserPlaceholderAction")
+    static let browserCommand = Notification.Name("GitExtensionsMac.browserCommand")
+}
+
+enum BrowserCommand: Equatable, Sendable {
+    case openRepository
+    case closeToDashboard
+    case cloneRepository
+    case settings
+    case clearRecentRepositories
+    case openRecentRepository(URL)
+
+    case refresh
+    case commit
+    case pullFetch
+    case pull
+    case openPullDialog
+    case pullMerge
+    case pullRebase
+    case push
+    case fetch
+    case fetchAll
+    case fetchAndPruneAll
+    case remoteRepositories
+    case mergeBranches
+    case manageStashes
+    case solveMergeConflicts
+    case cherryPick
+    case rebase
+
+    case showStatus(String)
+    case unavailable(String)
+}
+
+private final class BrowserCommandPayload: NSObject {
+    let command: BrowserCommand
+
+    init(_ command: BrowserCommand) {
+        self.command = command
+    }
 }
 
 enum BrowserCommandCenter {
-    static func perform(_ title: String) {
+    static func perform(_ command: BrowserCommand) {
         NotificationCenter.default.post(
-            name: .browserPlaceholderAction,
-            object: nil,
-            userInfo: ["title": title]
+            name: .browserCommand,
+            object: BrowserCommandPayload(command)
         )
+    }
+
+    static func command(from notification: Notification) -> BrowserCommand? {
+        (notification.object as? BrowserCommandPayload)?.command
+    }
+
+    static func assign(_ command: BrowserCommand, to menuItem: NSMenuItem) {
+        menuItem.representedObject = BrowserCommandPayload(command)
+    }
+
+    static func command(from menuItem: NSMenuItem?) -> BrowserCommand? {
+        (menuItem?.representedObject as? BrowserCommandPayload)?.command
     }
 }
 
@@ -18,7 +67,9 @@ final class PlaceholderMenuTarget: NSObject {
     static let shared = PlaceholderMenuTarget()
 
     @objc func perform(_ sender: NSMenuItem) {
-        BrowserCommandCenter.perform(sender.title.replacingOccurrences(of: "…", with: ""))
+        BrowserCommandCenter.perform(
+            .unavailable(sender.title.replacingOccurrences(of: "…", with: ""))
+        )
     }
 }
 

@@ -1,3 +1,24 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Xcode user and local build state
+xcuserdata/
+*.xcuserstate
+*.xcuserdatad/
+DerivedData/
+build/
+*.moved-aside
+*.xccheckout
+*.xcscmblueprint
+
+# Swift/Xcode build products
+.build/
+.swiftpm/
+
+# Local editor and private parity-working notes
 .vscode/
 .build/
 .dev/

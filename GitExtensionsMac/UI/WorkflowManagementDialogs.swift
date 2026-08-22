@@ -816,9 +816,13 @@ private final class ConflictResolverViewController: NSViewController, NSTableVie
                 self.state = state
                 mergeToolConfiguration = mergeTool
                 mergeInProgress = pullState?.mergeInProgress ?? false
-                let selectedPaths = Set(table.selectedRowIndexes.compactMap { $0 < paths.count ? paths[$0] : nil })
+                let selectedPaths = Set(self.table.selectedRowIndexes.compactMap {
+                    $0 < self.paths.count ? self.paths[$0] : nil
+                })
                 latestSnapshot = refreshed; paths = state.conflictedPaths; table.reloadData()
-                let restoredSelection = IndexSet(paths.indices.filter { selectedPaths.contains(paths[$0]) })
+                let restoredSelection = IndexSet(self.paths.indices.filter {
+                    selectedPaths.contains(self.paths[$0])
+                })
                 if !restoredSelection.isEmpty {
                     table.selectRowIndexes(restoredSelection, byExtendingSelection: false)
                 } else if !paths.isEmpty {

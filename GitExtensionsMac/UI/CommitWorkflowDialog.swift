@@ -2493,7 +2493,7 @@ private final class CommitDiffView: NSView, NSTableViewDataSource, NSTableViewDe
             showsSyntaxHighlighting = state == .on
             reloadRenderedLines()
         default:
-            BrowserCommandCenter.perform(action)
+            BrowserCommandCenter.perform(.unavailable(action))
         }
     }
 

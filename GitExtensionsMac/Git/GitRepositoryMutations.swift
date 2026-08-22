@@ -397,31 +397,52 @@ enum RepositoryMutationError: LocalizedError, Sendable {
     }
 }
 
-protocol RepositoryMutatingDataSource: RepositoryBrowsingDataSource {
+protocol RepositoryMutationStateDataSource: RepositoryBrowsingDataSource {
     func loadMutationState() async throws -> RepositoryMutationState
+}
+
+protocol RepositoryCheckoutDataSource: RepositoryMutationStateDataSource {
     func checkout(_ request: RepositoryCheckoutRequest) async throws -> RepositoryMutationResult
+    func createBranch(named name: String) async throws -> RepositoryMutationResult
+}
+
+protocol RepositoryStagingDataSource: RepositoryMutationStateDataSource {
     func stage(paths: [String]) async throws -> RepositoryMutationResult
     func unstage(paths: [String]) async throws -> RepositoryMutationResult
     func stageAll() async throws -> RepositoryMutationResult
     func unstageAll() async throws -> RepositoryMutationResult
     func applyHunk(_ selection: RepositoryHunkSelection) async throws -> RepositoryMutationResult
     func applyLines(_ selection: RepositoryLineSelection) async throws -> RepositoryMutationResult
+    func resetChanges(_ request: RepositoryResetChangesRequest) async throws -> RepositoryMutationResult
+}
+
+protocol RepositoryCommitDataSource: RepositoryStagingDataSource {
     func loadCommitState(historyLimit: Int, showOnlyMyMessages: Bool, rememberAmend: Bool) async throws -> RepositoryCommitState
     func saveCommitDraft(message: String, amend: Bool, rememberAmend: Bool, encoding: String?) async throws
     func commit(_ request: RepositoryCommitRequest) async throws -> RepositoryMutationResult
-    func resetChanges(_ request: RepositoryResetChangesRequest) async throws -> RepositoryMutationResult
     func resetSoftToParent() async throws -> RepositoryMutationResult
-    func createBranch(named name: String) async throws -> RepositoryMutationResult
+}
+
+protocol RepositoryStashDataSource: RepositoryMutationStateDataSource {
     func createStash(_ request: RepositoryStashCreateRequest) async throws -> RepositoryMutationResult
     func applyStash(_ stash: Stash) async throws -> RepositoryMutationResult
     func popStash(_ stash: Stash?) async throws -> RepositoryMutationResult
     func dropStash(_ stash: Stash) async throws -> RepositoryMutationResult
-    func cherryPick(_ request: RepositoryCherryPickRequest) async throws -> RepositoryMutationResult
-    func continueCherryPick() async throws -> RepositoryMutationResult
-    func abortCherryPick() async throws -> RepositoryMutationResult
+}
+
+protocol RepositoryConflictDataSource: RepositoryMutationStateDataSource {
     func abortMerge() async throws -> RepositoryMutationResult
     func loadMergeToolConfiguration() async throws -> RepositoryMergeToolConfiguration?
     func runMergeTool(paths: [String]) async throws -> RepositoryMutationResult
+}
+
+protocol RepositoryCherryPickDataSource: RepositoryConflictDataSource {
+    func cherryPick(_ request: RepositoryCherryPickRequest) async throws -> RepositoryMutationResult
+    func continueCherryPick() async throws -> RepositoryMutationResult
+    func abortCherryPick() async throws -> RepositoryMutationResult
+}
+
+protocol RepositoryRebaseDataSource: RepositoryConflictDataSource {
     func loadInteractiveRebasePlan(upstream: String) async throws -> [RepositoryRebaseTodoItem]
     func loadNativeInteractiveRebaseTodo(_ request: RepositoryInteractiveRebaseTodoRequest) async throws -> String
     func loadRebaseConfiguration() async throws -> RepositoryRebaseConfiguration
@@ -435,6 +456,16 @@ protocol RepositoryMutatingDataSource: RepositoryBrowsingDataSource {
     func skipRebase() async throws -> RepositoryMutationResult
     func abortRebase() async throws -> RepositoryMutationResult
 }
+
+// Compatibility composition for the already-closed mutation workflows. New
+// features should add and consume a focused capability instead of growing this
+// aggregate protocol.
+protocol RepositoryMutatingDataSource:
+    RepositoryCheckoutDataSource,
+    RepositoryCommitDataSource,
+    RepositoryStashDataSource,
+    RepositoryCherryPickDataSource,
+    RepositoryRebaseDataSource {}
 
 extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
     func loadMutationState() async throws -> RepositoryMutationState {

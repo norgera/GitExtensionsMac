@@ -1,7 +1,7 @@
 import AppKit
 
 final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelegate {
-    var onApplicationCommand: ((String) -> Bool)?
+    var onApplicationCommand: ((BrowserCommand) -> Bool)?
     private static let collapsedPaneThickness: CGFloat = 1
     private static let collapsedMainContentThickness: CGFloat = 1
     private static let minimumWindowWidth: CGFloat = 120
@@ -297,7 +297,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         stack.addArrangedSubview(AppKitFactory.separator())
         stack.addArrangedSubview(AppKitFactory.resourceButton("BrowseFileExplorer", tooltip: "File Explorer", target: self, action: #selector(placeholderToolbarButton(_:))))
         stack.addArrangedSubview(AppKitFactory.resourceButton("GitForWindows", tooltip: "Git bash", target: self, action: #selector(placeholderToolbarButton(_:))))
-        stack.addArrangedSubview(AppKitFactory.resourceButton("Settings", tooltip: "Settings", target: self, action: #selector(placeholderToolbarButton(_:))))
+        stack.addArrangedSubview(AppKitFactory.resourceButton("Settings", tooltip: "Settings", target: self, action: #selector(settingsToolbarButton(_:))))
 
         let toolbarGap = NSView()
         toolbarGap.translatesAutoresizingMaskIntoConstraints = false
@@ -543,22 +543,22 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
 
         let primary = NSMenuItem(title: "Pull", action: #selector(pullMenuCommand(_:)), keyEquivalent: "")
         primary.target = self
-        primary.representedObject = "Pull"
+        BrowserCommandCenter.assign(.pull, to: primary)
         menu.addItem(primary)
         menu.addItem(.separator())
 
-        let actions: [(String, PullActionPreference, String)] = [
-            ("Open pull dialog…", .openDialog, "Pull"),
-            ("Pull - merge", .merge, "PullMerge"),
-            ("Pull - rebase", .rebase, "PullRebase"),
-            ("Fetch", .fetch, "PullFetch"),
-            ("Fetch all", .fetchAll, "PullFetchAll"),
-            ("Fetch and prune all", .fetchPruneAll, "PullFetchPruneAll")
+        let actions: [(String, PullActionPreference, String, BrowserCommand)] = [
+            ("Open pull dialog…", .openDialog, "Pull", .openPullDialog),
+            ("Pull - merge", .merge, "PullMerge", .pullMerge),
+            ("Pull - rebase", .rebase, "PullRebase", .pullRebase),
+            ("Fetch", .fetch, "PullFetch", .fetch),
+            ("Fetch all", .fetchAll, "PullFetchAll", .fetchAll),
+            ("Fetch and prune all", .fetchPruneAll, "PullFetchPruneAll", .fetchAndPruneAll)
         ]
-        for (title, action, imageName) in actions where action != .fetchAll || hasMultipleRemotes {
+        for (title, action, imageName, command) in actions where action != .fetchAll || hasMultipleRemotes {
             let item = NSMenuItem(title: title, action: #selector(pullMenuCommand(_:)), keyEquivalent: "")
             item.target = self
-            item.representedObject = title
+            BrowserCommandCenter.assign(command, to: item)
             item.image = AppKitFactory.resourceImage(imageName, accessibilityDescription: title)
             menu.addItem(item)
         }
@@ -566,7 +566,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         menu.addItem(.separator())
         let defaultItem = NSMenuItem(title: "Set default Pull button action", action: nil, keyEquivalent: "")
         let defaultMenu = NSMenu(title: defaultItem.title)
-        for (title, action, imageName) in actions where action != .fetchAll || hasMultipleRemotes {
+        for (title, action, imageName, _) in actions where action != .fetchAll || hasMultipleRemotes {
             let item = NSMenuItem(title: title.replacingOccurrences(of: "…", with: ""), action: #selector(setDefaultPullAction(_:)), keyEquivalent: "")
             item.target = self
             item.representedObject = action.rawValue
@@ -648,27 +648,27 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
 
     private func observePlaceholderActions() {
         placeholderObserver = NotificationCenter.default.addObserver(
-            forName: .browserPlaceholderAction,
+            forName: .browserCommand,
             object: nil,
             queue: .main
         ) { [weak self] notification in
-            guard let title = notification.userInfo?["title"] as? String else { return }
+            guard let command = BrowserCommandCenter.command(from: notification) else { return }
             guard let self else { return }
-            if self.onApplicationCommand?(title) == true { return }
-            self.performTopLevelCommand(title)
+            if self.onApplicationCommand?(command) == true { return }
+            self.performTopLevelCommand(command)
         }
     }
 
-    private func performTopLevelCommand(_ title: String) {
+    private func performTopLevelCommand(_ command: BrowserCommand) {
         guard let window = view.window else { return }
-        switch title {
-        case "Open repository": presentOpenRepositoryPanel()
-        case "Refresh": loadSnapshot()
-        case "Commit": beginCommit(initialMode: .normal)
-        case "Pull/Fetch":
+        switch command {
+        case .openRepository: presentOpenRepositoryPanel()
+        case .refresh: loadSnapshot()
+        case .commit: beginCommit(initialMode: .normal)
+        case .pullFetch:
             guard let snapshot else { return }
             presentPullAction(AppSettingsStore.shared.pullPreferences.formAction, immediately: false, snapshot: snapshot)
-        case "Pull":
+        case .pull:
             guard let snapshot else { return }
             let preferences = AppSettingsStore.shared.pullPreferences
             if preferences.defaultAction == .openDialog {
@@ -676,43 +676,48 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             } else {
                 presentPullAction(preferences.defaultAction, immediately: true, snapshot: snapshot)
             }
-        case "Open pull dialog…":
+        case .openPullDialog:
             guard let snapshot else { return }
             presentPullAction(AppSettingsStore.shared.pullPreferences.formAction, immediately: false, snapshot: snapshot)
-        case "Pull - merge":
+        case .pullMerge:
             guard let snapshot else { return }
             presentPullAction(.merge, immediately: true, snapshot: snapshot)
-        case "Pull - rebase":
+        case .pullRebase:
             guard let snapshot else { return }
             presentPullAction(.rebase, immediately: true, snapshot: snapshot)
-        case "Push":
+        case .push:
             guard let snapshot else { return }
             presentNetworkWindow(kind: .push, initialAction: .merge, snapshot: snapshot)
-        case "Fetch":
+        case .fetch:
             guard let snapshot else { return }
             presentPullAction(.fetch, immediately: true, snapshot: snapshot)
-        case "Fetch all":
+        case .fetchAll:
             guard let snapshot else { return }
             presentPullAction(.fetchAll, immediately: true, snapshot: snapshot)
-        case "Fetch and prune all":
+        case .fetchAndPruneAll:
             guard let snapshot else { return }
             presentPullAction(.fetchPruneAll, immediately: true, snapshot: snapshot)
-        case "Remote repositories", "Manage remotes":
+        case .remoteRepositories:
             presentRemoteWindow(selectedRemote: nil)
-        case "Merge branches":
+        case .mergeBranches:
             guard let snapshot else { return }
             Task { await ApplicationShellDialogs.mergeShell(snapshot: snapshot, window: window) }
-        case "Manage stashes": beginManageStashes()
-        case "Solve merge conflicts": beginResolveConflicts()
-        case "Cherry pick":
+        case .manageStashes: beginManageStashes()
+        case .solveMergeConflicts: beginResolveConflicts()
+        case .cherryPick:
             if let commit = snapshot?.commits.first(where: { $0.id == selectedCommitID }) { beginCherryPick([commit]) }
-        case "Rebase":
+        case .rebase:
             if let commit = snapshot?.commits.first(where: { $0.id == selectedCommitID && !$0.isArtificial }) {
                 beginRebase(on: commit, interactive: false, showAdvancedOptions: true)
             }
-        case "Settings":
+        case .settings:
             Task { await ApplicationShellDialogs.presentSettings(from: window) }
-        default: showPlaceholderStatus(for: title)
+        case .showStatus(let message):
+            statusLabel.stringValue = message
+        case .unavailable(let title):
+            showPlaceholderStatus(for: title)
+        default:
+            break
         }
     }
 
@@ -1127,14 +1132,14 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
     }
 
     @objc private func selectPullAction() {
-        let title = pullPopUp.titleOfSelectedItem ?? "Pull"
+        let command = BrowserCommandCenter.command(from: pullPopUp.selectedItem) ?? .pull
         pullPopUp.selectItem(at: 0)
-        performTopLevelCommand(title)
+        performTopLevelCommand(command)
     }
 
     @objc private func pullMenuCommand(_ sender: NSMenuItem) {
         pullPopUp.selectItem(at: 0)
-        performTopLevelCommand((sender.representedObject as? String) ?? sender.title)
+        performTopLevelCommand(BrowserCommandCenter.command(from: sender) ?? .pull)
     }
 
     @objc private func setDefaultPullAction(_ sender: NSMenuItem) {
@@ -1188,11 +1193,11 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
 
     @objc private func placeholderToolbarButton(_ sender: NSButton) {
         let title = sender.toolTip ?? sender.title
-        if title == "Push" || title == "Settings" {
-            performTopLevelCommand(title)
-        } else {
-            BrowserCommandCenter.perform(title)
-        }
+        BrowserCommandCenter.perform(.unavailable(title))
+    }
+
+    @objc private func settingsToolbarButton(_ sender: NSButton) {
+        performTopLevelCommand(.settings)
     }
 
     @objc private func placeholderPopUp(_ sender: NSPopUpButton) {
