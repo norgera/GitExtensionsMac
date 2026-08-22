@@ -17,6 +17,10 @@ enum GitRepositoryMutationTests {
 
         try await testFileStaging(fixture)
         try await testHunkStaging(fixture)
+        try await testSelectedLineStaging(fixture)
+        try await testSelectedLineDeletion(fixture)
+        try await testSelectedLineRenamedFile(fixture)
+        try await testSelectedLineNoNewlineHandling(fixture)
         print("GitRepositoryMutationTests.staging: passed")
     }
 
@@ -27,6 +31,12 @@ enum GitRepositoryMutationTests {
         try await testNormalCommit(fixture)
         try await testCommitValidation(fixture)
         try await testAmendModes(fixture)
+        try await testCommitOptionsAndState(fixture)
+        try await testCommitHooksAndSigning(fixture)
+        try await testCommitDetachedConflictAndReset(fixture)
+        try await testCommitValidationFailuresAndConflict(fixture)
+        try await testCommitCancellation(fixture)
+        try await testCommitAndPushIntegration(fixture)
         print("GitRepositoryMutationTests.commit: passed")
     }
 
@@ -420,6 +430,189 @@ enum GitRepositoryMutationTests {
         try require(refreshed.files.contains { $0.path == "hunks.txt" }, "hunks: worktree detail reloads after unstage")
     }
 
+    private static func testSelectedLineStaging(_ fixture: MutationGitFixture) async throws {
+        let repository = try fixture.clone(named: "Selected line staging repo")
+        var lines = (1...20).map { "line \($0)" }
+        lines.insert("selected insertion", at: 4)
+        lines.insert("remaining insertion", at: 7)
+        try fixture.write(lines.joined(separator: "\n") + "\n", to: repository.appendingPathComponent("hunks.txt"))
+        let source = GitRepositoryBrowsingDataSource(repositoryURL: repository)
+        var snapshot = try await source.loadSnapshot()
+        let worktree = try required(snapshot.commits.first(where: { $0.kind == .workingDirectory }), "lines: worktree revision exists")
+        var details = try await source.loadRevisionDetails(for: worktree)
+        var file = try required(details.files.first(where: { $0.path == "hunks.txt" }), "lines: modified file exists")
+        var diff = try required(try await source.loadDiff(for: worktree, file: file), "lines: worktree patch loads")
+        let selected = try required(diff.lines.first(where: { $0.kind == .addition && $0.text == "selected insertion" }), "lines: first inserted line exists")
+        let remaining = try required(diff.lines.first(where: { $0.kind == .addition && $0.text == "remaining insertion" }), "lines: second inserted line exists")
+        let selectedHunk = diff.lines.lastIndex(where: { line in
+            line.kind == .hunk && diff.lines.firstIndex(where: { $0.id == selected.id }).map { diff.lines.firstIndex(where: { $0.id == line.id })! <= $0 } == true
+        })
+        let remainingHunk = diff.lines.lastIndex(where: { line in
+            line.kind == .hunk && diff.lines.firstIndex(where: { $0.id == remaining.id }).map { diff.lines.firstIndex(where: { $0.id == line.id })! <= $0 } == true
+        })
+        try require(selectedHunk == remainingHunk, "lines: both additions are in one Git hunk")
+
+        var result = try await source.applyLines(RepositoryLineSelection(
+            file: file,
+            diff: diff,
+            lineIDs: [selected.id],
+            direction: .stage
+        ))
+        var cached = try fixture.git(["diff", "--cached", "--", "hunks.txt"], in: repository)
+        var unstaged = try fixture.git(["diff", "--", "hunks.txt"], in: repository)
+        try require(cached.contains("\n+selected insertion") && !cached.contains("\n+remaining insertion"), "lines: only selected addition is staged")
+        try require(!unstaged.contains("\n+selected insertion") && unstaged.contains("\n+remaining insertion"), "lines: unselected addition remains unstaged; cached=\(cached) unstaged=\(unstaged)")
+
+        snapshot = result.snapshot
+        let index = try required(snapshot.commits.first(where: { $0.kind == .index }), "lines: index revision exists")
+        details = try await source.loadRevisionDetails(for: index)
+        file = try required(details.files.first(where: { $0.path == "hunks.txt" }), "lines: staged file exists")
+        diff = try required(try await source.loadDiff(for: index, file: file), "lines: staged patch loads")
+        let stagedLine = try required(diff.lines.first(where: { $0.kind == .addition && $0.text == "selected insertion" }), "lines: staged addition exists")
+        result = try await source.applyLines(RepositoryLineSelection(
+            file: file,
+            diff: diff,
+            lineIDs: [stagedLine.id],
+            direction: .unstage
+        ))
+        cached = try fixture.git(["diff", "--cached", "--", "hunks.txt"], in: repository)
+        unstaged = try fixture.git(["diff", "--", "hunks.txt"], in: repository)
+        try require(cached.trimmed.isEmpty, "lines: selected staged line is unstaged")
+        try require(unstaged.contains("\n+selected insertion") && unstaged.contains("\n+remaining insertion"), "lines: both additions return to worktree")
+        try require(result.snapshot.commits.contains { $0.kind == .workingDirectory }, "lines: refreshed worktree remains available")
+
+        try fixture.write("first new line\nselected new line\nlast new line\n", to: repository.appendingPathComponent("new-lines.txt"))
+        snapshot = try await source.loadSnapshot()
+        let newWorktree = try required(snapshot.commits.first(where: { $0.kind == .workingDirectory }), "lines: worktree revision exists for a newly added file")
+        details = try await source.loadRevisionDetails(for: newWorktree)
+        file = try required(details.files.first(where: { $0.path == "new-lines.txt" }), "lines: newly added worktree file exists")
+        diff = try required(try await source.loadDiff(for: newWorktree, file: file), "lines: newly added worktree patch loads")
+        var selectedNewLine = try required(diff.lines.first(where: { $0.kind == .addition && $0.text == "selected new line" }), "lines: untracked-file line is selectable")
+        _ = try await source.applyLines(RepositoryLineSelection(
+            file: file,
+            diff: diff,
+            lineIDs: [selectedNewLine.id],
+            direction: .stage
+        ))
+        cached = try fixture.git(["show", ":new-lines.txt"], in: repository)
+        try require(cached == "selected new line\n", "lines: selected-line stage creates a partial index entry for an untracked file")
+
+        result = try await source.stage(paths: ["new-lines.txt"])
+        let newIndex = try required(result.snapshot.commits.first(where: { $0.kind == .index }), "lines: index revision exists for a newly added file")
+        details = try await source.loadRevisionDetails(for: newIndex)
+        file = try required(details.files.first(where: { $0.path == "new-lines.txt" }), "lines: newly added staged file exists")
+        diff = try required(try await source.loadDiff(for: newIndex, file: file), "lines: newly added file patch loads")
+        selectedNewLine = try required(diff.lines.first(where: { $0.kind == .addition && $0.text == "selected new line" }), "lines: added-file line is selectable")
+        result = try await source.applyLines(RepositoryLineSelection(
+            file: file,
+            diff: diff,
+            lineIDs: [selectedNewLine.id],
+            direction: .unstage
+        ))
+        cached = try fixture.git(["show", ":new-lines.txt"], in: repository)
+        try require(cached == "first new line\nlast new line\n", "lines: selected-line unstage rewrites a new-file patch without dropping its other indexed lines")
+        try require(try String(contentsOf: repository.appendingPathComponent("new-lines.txt"), encoding: .utf8) == "first new line\nselected new line\nlast new line\n", "lines: selected-line unstage leaves the worktree copy intact")
+    }
+
+    private static func testSelectedLineNoNewlineHandling(_ fixture: MutationGitFixture) async throws {
+        let repository = try fixture.clone(named: "Selected line newline repo")
+        let path = "line-ending.txt"
+        try fixture.write("base\n", to: repository.appendingPathComponent(path))
+        try fixture.git(["add", "--", path], in: repository)
+        try fixture.git(["commit", "-m", "Add line ending fixture"], in: repository)
+        try fixture.write("base\nselected line\nremaining line", to: repository.appendingPathComponent(path))
+
+        let source = GitRepositoryBrowsingDataSource(repositoryURL: repository)
+        let snapshot = try await source.loadSnapshot()
+        let worktree = try required(snapshot.commits.first(where: { $0.kind == .workingDirectory }), "line endings: worktree revision exists")
+        let details = try await source.loadRevisionDetails(for: worktree)
+        let file = try required(details.files.first(where: { $0.path == path }), "line endings: changed file exists")
+        let diff = try required(try await source.loadDiff(for: worktree, file: file), "line endings: worktree patch loads")
+        let selected = try required(diff.lines.first(where: { $0.kind == .addition && $0.text == "selected line" }), "line endings: non-final addition is selectable")
+        _ = try await source.applyLines(RepositoryLineSelection(
+            file: file,
+            diff: diff,
+            lineIDs: [selected.id],
+            direction: .stage
+        ))
+        let indexed = try fixture.git(["show", ":\(path)"], in: repository)
+        try require(indexed == "base\nselected line\n", "line endings: staging a non-final line does not inherit the worktree EOF no-newline marker")
+        try require(try String(contentsOf: repository.appendingPathComponent(path), encoding: .utf8) == "base\nselected line\nremaining line", "line endings: partial stage preserves the no-newline worktree")
+    }
+
+    private static func testSelectedLineDeletion(_ fixture: MutationGitFixture) async throws {
+        let repository = try fixture.clone(named: "Selected line deletion repo")
+        let path = "hunks.txt"
+        var worktreeLines = (1...20).map { "line \($0)" }
+        worktreeLines[5] = "replacement line 6"
+        try fixture.write(worktreeLines.joined(separator: "\n") + "\n", to: repository.appendingPathComponent(path))
+
+        let source = GitRepositoryBrowsingDataSource(repositoryURL: repository)
+        var snapshot = try await source.loadSnapshot()
+        var worktree = try required(snapshot.commits.first(where: { $0.kind == .workingDirectory }), "line deletion: worktree revision exists")
+        var details = try await source.loadRevisionDetails(for: worktree)
+        var file = try required(details.files.first(where: { $0.path == path }), "line deletion: changed file exists")
+        var diff = try required(try await source.loadDiff(for: worktree, file: file), "line deletion: worktree patch loads")
+        let deletion = try required(diff.lines.first(where: { $0.kind == .deletion && $0.text == "line 6" }), "line deletion: removed side is selectable")
+        var result = try await source.applyLines(RepositoryLineSelection(
+            file: file,
+            diff: diff,
+            lineIDs: [deletion.id],
+            direction: .stage
+        ))
+        let expectedIndex = ((1...20).filter { $0 != 6 }.map { "line \($0)" }).joined(separator: "\n") + "\n"
+        try require(try fixture.git(["show", ":\(path)"], in: repository) == expectedIndex, "line deletion: staging only a deletion omits its unselected replacement")
+        try require(try String(contentsOf: repository.appendingPathComponent(path), encoding: .utf8) == worktreeLines.joined(separator: "\n") + "\n", "line deletion: partial stage preserves the replacement in the worktree")
+
+        snapshot = result.snapshot
+        let index = try required(snapshot.commits.first(where: { $0.kind == .index }), "line deletion: refreshed index revision exists")
+        details = try await source.loadRevisionDetails(for: index)
+        file = try required(details.files.first(where: { $0.path == path }), "line deletion: staged file exists")
+        diff = try required(try await source.loadDiff(for: index, file: file), "line deletion: staged patch loads")
+        let stagedDeletion = try required(diff.lines.first(where: { $0.kind == .deletion && $0.text == "line 6" }), "line deletion: staged deletion is selectable")
+        result = try await source.applyLines(RepositoryLineSelection(
+            file: file,
+            diff: diff,
+            lineIDs: [stagedDeletion.id],
+            direction: .unstage
+        ))
+        try require(try fixture.git(["diff", "--cached", "--", path], in: repository).trimmed.isEmpty, "line deletion: selected deletion unstages cleanly")
+        worktree = try required(result.snapshot.commits.first(where: { $0.kind == .workingDirectory }), "line deletion: worktree remains after unstage")
+        let worktreeDetails = try await source.loadRevisionDetails(for: worktree)
+        try require(worktreeDetails.files.contains { $0.path == path }, "line deletion: replacement remains an unstaged worktree change")
+    }
+
+    private static func testSelectedLineRenamedFile(_ fixture: MutationGitFixture) async throws {
+        let repository = try fixture.clone(named: "Selected line rename repo")
+        let oldPath = "hunks.txt"
+        let newPath = "renamed-hunks.txt"
+        try fixture.git(["mv", "--", oldPath, newPath], in: repository)
+        var renamedLines = (1...20).map { "line \($0)" }
+        renamedLines[5] = "renamed replacement line 6"
+        try fixture.write(renamedLines.joined(separator: "\n") + "\n", to: repository.appendingPathComponent(newPath))
+
+        let source = GitRepositoryBrowsingDataSource(repositoryURL: repository)
+        _ = try await source.loadSnapshot()
+        let staged = try await source.stage(paths: [oldPath, newPath])
+        let index = try required(staged.snapshot.commits.first(where: { $0.kind == .index }), "line rename: index revision exists")
+        let details = try await source.loadRevisionDetails(for: index)
+        let file = try required(details.files.first(where: { $0.path == newPath && $0.changeType == .renamed }), "line rename: staged rename is detected")
+        let diff = try required(try await source.loadDiff(for: index, file: file), "line rename: staged rename patch loads")
+        let deletion = try required(diff.lines.first(where: { $0.kind == .deletion && $0.text == "line 6" }), "line rename: original line is selectable")
+        let addition = try required(diff.lines.first(where: { $0.kind == .addition && $0.text == "renamed replacement line 6" }), "line rename: replacement line is selectable")
+
+        _ = try await source.applyLines(RepositoryLineSelection(
+            file: file,
+            diff: diff,
+            lineIDs: [deletion.id, addition.id],
+            direction: .unstage
+        ))
+        let nameStatus = try fixture.git(["diff", "--cached", "--name-status", "-M"], in: repository)
+        try require(nameStatus.contains("R100\t\(oldPath)\t\(newPath)"), "line rename: partial unstage preserves the staged rename")
+        try require(try fixture.git(["show", ":\(newPath)"], in: repository) == (1...20).map { "line \($0)" }.joined(separator: "\n") + "\n", "line rename: selected replacement is removed from the renamed index entry")
+        try require(try String(contentsOf: repository.appendingPathComponent(newPath), encoding: .utf8) == renamedLines.joined(separator: "\n") + "\n", "line rename: worktree content is not modified")
+    }
+
     private static func testNormalCommit(_ fixture: MutationGitFixture) async throws {
         let repository = try fixture.clone(named: "Normal commit repo")
         let source = GitRepositoryBrowsingDataSource(repositoryURL: repository)
@@ -533,6 +726,403 @@ enum GitRepositoryMutationTests {
         try require(try fixture.git(["rev-parse", "HEAD^{tree}"], in: repository).trimmed == treeBeforeMessageOnly, "amend message only: HEAD tree is unchanged")
         try require(try fixture.git(["diff", "--cached", "--name-only"], in: repository).trimmed == "shared.txt", "amend message only: staged changes remain staged")
         try require(try fixture.git(["log", "-1", "--format=%s"], in: repository).trimmed == "Message-only amend", "amend message only: commit message is updated")
+    }
+
+    private static func testCommitOptionsAndState(_ fixture: MutationGitFixture) async throws {
+        let commandRequest = RepositoryCommitRequest(
+            message: "Command builder",
+            mode: .amend,
+            stageAllBeforeCommit: false,
+            allowEmpty: true,
+            signOff: true,
+            author: "Command Tester <command@example.com>",
+            resetAuthor: true,
+            noVerify: true,
+            gpgSigning: .signSpecificKey("ABC123")
+        )
+        try require(
+            GitCommitCommandBuilder.arguments(
+                request: commandRequest,
+                messageFile: "/tmp/commit message",
+                hasStagedChanges: true
+            ) == [
+                "commit", "--amend", "--no-verify", "--signoff",
+                "--author", "Command Tester <command@example.com>",
+                "--gpg-sign=ABC123", "-F", "/tmp/commit message",
+                "--allow-empty", "--reset-author"
+            ],
+            "commit command: upstream option ordering and separate message-file argument are preserved"
+        )
+        let messageOnlyRequest = RepositoryCommitRequest(
+            message: "Message only",
+            mode: .amendMessageOnly,
+            stageAllBeforeCommit: false,
+            allowEmpty: false,
+            signOff: false,
+            author: nil,
+            resetAuthor: false,
+            gpgSigning: .doNotSign
+        )
+        try require(
+            GitCommitCommandBuilder.arguments(
+                request: messageOnlyRequest,
+                messageFile: "/tmp/message",
+                hasStagedChanges: true
+            ) == ["commit", "--amend", "--no-gpg-sign", "-F", "/tmp/message", "--only", "--allow-empty"],
+            "commit command: message-only amend preserves the index and explicit no-sign state"
+        )
+
+        let repository = try fixture.clone(named: "Commit options repo")
+        let source = GitRepositoryBrowsingDataSource(repositoryURL: repository)
+        _ = try await source.loadSnapshot()
+        let before = try fixture.git(["rev-parse", "HEAD"], in: repository).trimmed
+
+        _ = try await source.commit(RepositoryCommitRequest(
+            message: "Empty commit",
+            mode: .normal,
+            stageAllBeforeCommit: false,
+            allowEmpty: true,
+            signOff: false,
+            author: nil,
+            resetAuthor: false
+        ))
+        try require(try fixture.git(["rev-parse", "HEAD^{tree}"], in: repository).trimmed == fixture.git(["rev-parse", "\(before)^{tree}"], in: repository).trimmed, "commit options: allow-empty preserves the tree")
+
+        try fixture.write("stage all content\n", to: repository.appendingPathComponent("stage-all.txt"))
+        _ = try await source.commit(RepositoryCommitRequest(
+            message: "Stage all commit",
+            mode: .normal,
+            stageAllBeforeCommit: true,
+            allowEmpty: false,
+            signOff: false,
+            author: nil,
+            resetAuthor: false
+        ))
+        try require(try fixture.git(["show", "HEAD:stage-all.txt"], in: repository) == "stage all content\n", "commit options: Stage All records untracked content")
+
+        _ = try await source.commit(RepositoryCommitRequest(
+            message: "Other author's history message",
+            mode: .normal,
+            stageAllBeforeCommit: false,
+            allowEmpty: true,
+            signOff: false,
+            author: "Another Author <another@example.com>",
+            resetAuthor: false
+        ))
+        let allHistory = try await source.loadCommitState(historyLimit: 6, showOnlyMyMessages: false, rememberAmend: true)
+        let ownHistory = try await source.loadCommitState(historyLimit: 6, showOnlyMyMessages: true, rememberAmend: true)
+        try require(allHistory.previousMessages.contains { $0.contains("Other author's history message") }, "commit history: general history includes commits from another author")
+        try require(!ownHistory.previousMessages.contains { $0.contains("Other author's history message") }, "commit history: author filtering excludes commits from another author")
+
+        let templateURL = repository.appendingPathComponent("commit-template.txt")
+        let templateBytes = Data([0x23, 0x20, 0x68, 0x65, 0x6c, 0x70, 0x0a, 0x63, 0x61, 0x66, 0xe9, 0x20, 0x74, 0x65, 0x6d, 0x70, 0x6c, 0x61, 0x74, 0x65, 0x0a, 0x62, 0x6f, 0x64, 0x79, 0x0a])
+        try templateBytes.write(to: templateURL)
+        try fixture.git(["config", "i18n.commitEncoding", "ISO-8859-1"], in: repository)
+        try fixture.git(["config", "commit.template", templateURL.path], in: repository)
+        let state = try await source.loadCommitState(historyLimit: 6, showOnlyMyMessages: true, rememberAmend: true)
+        try require(state.commitEncoding.caseInsensitiveCompare("ISO-8859-1") == .orderedSame, "commit state: configured encoding loads")
+        try require(state.message.contains("café template") && state.loadedTemplate == state.message, "commit state: configured template loads in commit encoding")
+        try require(state.committer == "Mutation Fixture <mutation@example.com>" && !state.previousMessages.isEmpty, "commit state: committer and history load")
+
+        _ = try await source.commit(RepositoryCommitRequest(
+            message: state.message,
+            mode: .normal,
+            stageAllBeforeCommit: false,
+            allowEmpty: true,
+            signOff: false,
+            author: nil,
+            resetAuthor: false,
+            messageEncoding: state.commitEncoding,
+            usingTemplate: true,
+            ensureSecondLineEmpty: true
+        ))
+        let raw = try fixture.git(["cat-file", "commit", "HEAD"], in: repository)
+        try require(raw.contains("encoding ISO-8859-1"), "commit encoding: Git records the legacy encoding header")
+        let decoded = try fixture.git(["log", "-1", "--encoding=UTF-8", "--format=%B"], in: repository)
+        try require(decoded.hasPrefix("café template\n\nbody") && !decoded.contains("# help"), "commit template: comments are stripped and second line is inserted")
+
+        try await source.saveCommitDraft(message: "draft café", amend: true, rememberAmend: true, encoding: "ISO-8859-1")
+        let restored = try await source.loadCommitState(historyLimit: 2, showOnlyMyMessages: false, rememberAmend: true)
+        try require(restored.message == "draft café" && restored.rememberedAmend, "commit draft: encoded message and amend state round-trip")
+    }
+
+    private static func testCommitHooksAndSigning(_ fixture: MutationGitFixture) async throws {
+        let repository = try fixture.clone(named: "Commit hooks repo")
+        let source = GitRepositoryBrowsingDataSource(repositoryURL: repository)
+        _ = try await source.loadSnapshot()
+        try fixture.write("hook content\n", to: repository.appendingPathComponent("hook.txt"))
+        _ = try await source.stage(paths: ["hook.txt"])
+        let hookURL = repository.appendingPathComponent(".git/hooks/pre-commit")
+        try fixture.write("#!/bin/sh\necho deterministic-hook-output\necho deterministic-hook-rejection >&2\nexit 37\n", to: hookURL)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: hookURL.path)
+        let before = try fixture.git(["rev-parse", "HEAD"], in: repository).trimmed
+        do {
+            _ = try await source.commit(RepositoryCommitRequest(
+                message: "Hook must reject",
+                mode: .normal,
+                stageAllBeforeCommit: false,
+                allowEmpty: false,
+                signOff: false,
+                author: nil,
+                resetAuthor: false
+            ))
+            throw MutationFixtureError("hooks: rejecting pre-commit hook was ignored")
+        } catch GitError.commandFailed(let arguments, let status, let stderr) {
+            try require(
+                arguments.contains("commit") && status == 1
+                    && stderr.contains("deterministic-hook-output")
+                    && stderr.contains("deterministic-hook-rejection"),
+                "hooks: status, command, stdout, and stderr survive failure"
+            )
+        }
+        try require(try fixture.git(["rev-parse", "HEAD"], in: repository).trimmed == before, "hooks: failed commit preserves HEAD")
+        try require(FileManager.default.fileExists(atPath: repository.appendingPathComponent(".git/COMMITMESSAGE").path), "hooks: failed commit preserves prepared message")
+
+        _ = try await source.commit(RepositoryCommitRequest(
+            message: "Bypass hook",
+            mode: .normal,
+            stageAllBeforeCommit: false,
+            allowEmpty: false,
+            signOff: false,
+            author: nil,
+            resetAuthor: false,
+            noVerify: true
+        ))
+        try require(try fixture.git(["log", "-1", "--format=%s"], in: repository).trimmed == "Bypass hook", "hooks: --no-verify bypasses the native hook")
+        try require(!FileManager.default.fileExists(atPath: repository.appendingPathComponent(".git/COMMITMESSAGE").path), "hooks: success clears prepared message")
+
+        try FileManager.default.removeItem(at: hookURL)
+        try fixture.git(["config", "commit.gpgSign", "true"], in: repository)
+        try fixture.git(["config", "gpg.program", "/definitely/missing/gpg-program"], in: repository)
+        _ = try await source.commit(RepositoryCommitRequest(
+            message: "Explicitly unsigned",
+            mode: .normal,
+            stageAllBeforeCommit: false,
+            allowEmpty: true,
+            signOff: false,
+            author: nil,
+            resetAuthor: false,
+            gpgSigning: .doNotSign
+        ))
+        do {
+            _ = try await source.commit(RepositoryCommitRequest(
+                message: "Signing fails visibly",
+                mode: .normal,
+                stageAllBeforeCommit: false,
+                allowEmpty: true,
+                signOff: false,
+                author: nil,
+                resetAuthor: false,
+                gpgSigning: .signDefault
+            ))
+            throw MutationFixtureError("GPG: missing signing program unexpectedly succeeded")
+        } catch GitError.commandFailed(let arguments, let status, let stderr) {
+            try require(arguments.contains("--gpg-sign") && status != 0 && !stderr.isEmpty, "GPG: sign mode and failure status/stderr survive")
+        }
+    }
+
+    private static func testCommitDetachedConflictAndReset(_ fixture: MutationGitFixture) async throws {
+        let repository = try fixture.clone(named: "Commit state edge repo")
+        let source = GitRepositoryBrowsingDataSource(repositoryURL: repository)
+        _ = try await source.loadSnapshot()
+        try fixture.git(["checkout", "--detach", "HEAD"], in: repository)
+        let detached = try await source.commit(RepositoryCommitRequest(
+            message: "Detached empty commit",
+            mode: .normal,
+            stageAllBeforeCommit: false,
+            allowEmpty: true,
+            signOff: false,
+            author: nil,
+            resetAuthor: false
+        ))
+        let detachedState = try await source.loadMutationState()
+        try require(detachedState.currentBranch == nil && detached.selectedCommitID != nil, "detached commit: typed backend commits and refreshes detached HEAD")
+
+        _ = try await source.createBranch(named: "commit-edge")
+        try require(try fixture.git(["branch", "--show-current"], in: repository).trimmed == "commit-edge", "create branch: visible Commit control checks out a valid branch")
+        try fixture.write("staged reset\n", to: repository.appendingPathComponent("main.txt"))
+        _ = try await source.stage(paths: ["main.txt"])
+        try fixture.write("unstaged reset\n", to: repository.appendingPathComponent("shared.txt"))
+        try fixture.write("delete me\n", to: repository.appendingPathComponent("untracked-reset.txt"))
+        _ = try await source.resetChanges(RepositoryResetChangesRequest(scope: .worktree, deleteUntracked: false))
+        try require(try String(contentsOf: repository.appendingPathComponent("shared.txt"), encoding: .utf8) == fixture.git(["show", "HEAD:shared.txt"], in: repository), "reset unstaged: tracked worktree content returns to index")
+        try require(FileManager.default.fileExists(atPath: repository.appendingPathComponent("untracked-reset.txt").path), "reset unstaged: untracked file remains unless deletion chosen")
+        _ = try await source.resetChanges(RepositoryResetChangesRequest(scope: .all, deleteUntracked: true))
+        try require(try fixture.git(["diff", "--cached", "--name-only"], in: repository).trimmed.isEmpty, "reset all: index returns to HEAD")
+        try require(!FileManager.default.fileExists(atPath: repository.appendingPathComponent("untracked-reset.txt").path), "reset all: confirmed clean removes untracked file")
+
+        try fixture.write("soft reset payload\n", to: repository.appendingPathComponent("soft-reset.txt"))
+        _ = try await source.stage(paths: ["soft-reset.txt"])
+        _ = try await source.commit(RepositoryCommitRequest(
+            message: "Commit to reset softly",
+            mode: .normal,
+            stageAllBeforeCommit: false,
+            allowEmpty: false,
+            signOff: false,
+            author: nil,
+            resetAuthor: false
+        ))
+        let beforeSoft = try fixture.git(["rev-parse", "HEAD"], in: repository).trimmed
+        _ = try await source.resetSoftToParent()
+        try require(try fixture.git(["rev-parse", "HEAD"], in: repository).trimmed == fixture.git(["rev-parse", "\(beforeSoft)^"], in: repository).trimmed, "reset soft: HEAD moves to parent")
+        try require(!(try fixture.git(["diff", "--cached", "--name-only"], in: repository).trimmed.isEmpty), "reset soft: removed commit tree remains staged")
+    }
+
+    private static func testCommitValidationFailuresAndConflict(_ fixture: MutationGitFixture) async throws {
+        let repository = try fixture.clone(named: "Commit validation failures repo")
+        let source = GitRepositoryBrowsingDataSource(repositoryURL: repository)
+        _ = try await source.loadSnapshot()
+        try fixture.write("validation payload\n", to: repository.appendingPathComponent("validation.txt"))
+        _ = try await source.stage(paths: ["validation.txt"])
+
+        do {
+            _ = try await source.commit(RepositoryCommitRequest(
+                message: "Invalid author",
+                mode: .normal,
+                stageAllBeforeCommit: false,
+                allowEmpty: false,
+                signOff: false,
+                author: "Missing email",
+                resetAuthor: false
+            ))
+            throw MutationFixtureError("commit validation: invalid author was accepted")
+        } catch RepositoryMutationError.invalidAuthor(let author) {
+            try require(author == "Missing email", "commit validation: invalid author value survives")
+        }
+        do {
+            _ = try await source.commit(RepositoryCommitRequest(
+                message: "Invalid encoding",
+                mode: .normal,
+                stageAllBeforeCommit: false,
+                allowEmpty: false,
+                signOff: false,
+                author: nil,
+                resetAuthor: false,
+                messageEncoding: "definitely-not-an-encoding"
+            ))
+            throw MutationFixtureError("commit validation: invalid encoding was accepted")
+        } catch RepositoryMutationError.invalidCommitEncoding(let encoding) {
+            try require(encoding == "definitely-not-an-encoding", "commit validation: invalid encoding value survives")
+        }
+        do {
+            _ = try await source.commit(RepositoryCommitRequest(
+                message: "Snowman ☃",
+                mode: .normal,
+                stageAllBeforeCommit: false,
+                allowEmpty: false,
+                signOff: false,
+                author: nil,
+                resetAuthor: false,
+                messageEncoding: "US-ASCII"
+            ))
+            throw MutationFixtureError("commit validation: unrepresentable message was accepted")
+        } catch RepositoryMutationError.commitMessageNotRepresentable(let encoding) {
+            try require(encoding == "US-ASCII", "commit validation: unrepresentable encoding survives")
+        }
+        try fixture.git(["config", "commit.template", "missing-template.txt"], in: repository)
+        let missingTemplateState = try await source.loadCommitState(historyLimit: 6, showOnlyMyMessages: false, rememberAmend: true)
+        try require(
+            missingTemplateState.message.isEmpty
+                && missingTemplateState.messageLoadError?.contains("missing-template.txt") == true,
+            "commit template: missing configured path is reported without disabling the workflow"
+        )
+
+        let conflictRepository = try fixture.clone(named: "Commit unresolved conflict repo")
+        try fixture.git(["checkout", "-b", "conflict-side"], in: conflictRepository)
+        try fixture.write("side\n", to: conflictRepository.appendingPathComponent("shared.txt"))
+        try fixture.git(["add", "--all", "--"], in: conflictRepository)
+        try fixture.git(["commit", "-m", "Conflict side"], in: conflictRepository)
+        try fixture.git(["checkout", "main"], in: conflictRepository)
+        try fixture.write("main conflict\n", to: conflictRepository.appendingPathComponent("shared.txt"))
+        try fixture.git(["add", "--all", "--"], in: conflictRepository)
+        try fixture.git(["commit", "-m", "Main conflict"], in: conflictRepository)
+        let merge = try await GitProcess().run(arguments: ["merge", "conflict-side"], in: conflictRepository)
+        try require(!merge.succeeded, "conflict fixture: merge creates an unresolved path")
+        let conflictSource = GitRepositoryBrowsingDataSource(repositoryURL: conflictRepository)
+        _ = try await conflictSource.loadSnapshot()
+        do {
+            _ = try await conflictSource.commit(RepositoryCommitRequest(
+                message: "Must not commit conflict",
+                mode: .normal,
+                stageAllBeforeCommit: false,
+                allowEmpty: true,
+                signOff: false,
+                author: nil,
+                resetAuthor: false
+            ))
+            throw MutationFixtureError("conflicts: unresolved merge was committed")
+        } catch RepositoryMutationError.unresolvedConflicts(let paths) {
+            try require(paths == ["shared.txt"], "conflicts: unresolved path survives validation")
+        }
+    }
+
+    private static func testCommitCancellation(_ fixture: MutationGitFixture) async throws {
+        let repository = try fixture.clone(named: "Commit cancellation repo")
+        let runner = CancellableCommitGitRunner()
+        let source = GitRepositoryBrowsingDataSource(repositoryURL: repository, git: runner)
+        _ = try await source.loadSnapshot()
+        try fixture.write("cancel payload\n", to: repository.appendingPathComponent("cancel.txt"))
+        _ = try await source.stage(paths: ["cancel.txt"])
+        let before = try fixture.git(["rev-parse", "HEAD"], in: repository).trimmed
+        let task = Task {
+            try await source.commit(RepositoryCommitRequest(
+                message: "Cancelled commit",
+                mode: .normal,
+                stageAllBeforeCommit: false,
+                allowEmpty: false,
+                signOff: false,
+                author: nil,
+                resetAuthor: false
+            ))
+        }
+        for _ in 0..<100 where !runner.didBeginCommit {
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        try require(runner.didBeginCommit, "cancellation: typed runner reached commit")
+        task.cancel()
+        do {
+            _ = try await task.value
+            throw MutationFixtureError("cancellation: cancelled commit completed")
+        } catch is CancellationError {
+            // Expected.
+        }
+        try require(try fixture.git(["rev-parse", "HEAD"], in: repository).trimmed == before, "cancellation: HEAD is unchanged")
+        try require(try fixture.git(["diff", "--cached", "--name-only"], in: repository).trimmed == "cancel.txt", "cancellation: index is preserved")
+        try require(FileManager.default.fileExists(atPath: repository.appendingPathComponent(".git/COMMITMESSAGE").path), "cancellation: prepared message is preserved")
+    }
+
+    private static func testCommitAndPushIntegration(_ fixture: MutationGitFixture) async throws {
+        let repository = try fixture.clone(named: "Commit and push repo")
+        let remote = fixture.rootURL.appendingPathComponent("Commit and push remote.git", isDirectory: true)
+        try fixture.git(["init", "--bare", "--initial-branch=main", remote.path], in: fixture.rootURL)
+        try fixture.git(["remote", "add", "publish", remote.path], in: repository)
+        let source = GitRepositoryBrowsingDataSource(repositoryURL: repository)
+        _ = try await source.loadSnapshot()
+        try fixture.write("commit and push\n", to: repository.appendingPathComponent("commit-and-push.txt"))
+        _ = try await source.stage(paths: ["commit-and-push.txt"])
+        let committed = try await source.commit(RepositoryCommitRequest(
+            message: "Commit and push integration",
+            mode: .normal,
+            stageAllBeforeCommit: false,
+            allowEmpty: false,
+            signOff: false,
+            author: nil,
+            resetAuthor: false
+        ))
+        let pushed = try await source.performPush(
+            RepositoryPushRequest(
+                destination: .remote("publish"),
+                operation: .branch(source: "refs/heads/main", destination: "main"),
+                setUpstream: true,
+                recursiveSubmodules: .none
+            ),
+            output: { _ in }
+        )
+        let remoteHead = try fixture.git(["rev-parse", "refs/heads/main"], in: remote).trimmed
+        try require(pushed.outcome == .completed && remoteHead == committed.selectedCommitID, "commit and push: resulting remote ref is the committed HEAD")
+        let state = try await source.loadPushState()
+        let main = try required(state.localBranches.first(where: { $0.name == "main" }), "commit and push: main branch reloads")
+        try require(main.trackingRemote == "publish" && main.ahead == 0 && main.behind == 0, "commit and push: upstream and ahead/behind state refresh")
     }
 
     private static func testStashCreationOptions(_ fixture: MutationGitFixture) async throws {
@@ -973,6 +1563,35 @@ struct MutationFixtureError: LocalizedError {
     let message: String
     init(_ message: String) { self.message = message }
     var errorDescription: String? { message }
+}
+
+private final class CancellableCommitGitRunner: GitCommandRunning, @unchecked Sendable {
+    private let base = GitProcess()
+    private let lock = NSLock()
+    private var beganCommit = false
+
+    var didBeginCommit: Bool { lock.withLock { beganCommit } }
+
+    func run(
+        arguments: [String],
+        in directory: URL,
+        standardInput: Data?,
+        environment: [String: String]
+    ) async throws -> GitCommandResult {
+        guard arguments.first == "commit" else {
+            return try await base.run(
+                arguments: arguments,
+                in: directory,
+                standardInput: standardInput,
+                environment: environment
+            )
+        }
+        lock.withLock { beganCommit = true }
+        while true {
+            try Task.checkCancellation()
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+    }
 }
 
 final class MutationGitFixture {

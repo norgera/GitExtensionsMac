@@ -105,25 +105,22 @@ final class ChangedFilesViewController: NSViewController, NSOutlineViewDelegate,
     var onSelection: ((ChangedFile) -> Void)?
     var onMutation: ((String, [ChangedFile], ChangedFileSelectionScope) -> Void)?
 
-    private enum Grouping: Int, Hashable {
-        case path
-        case fileExtension
-        case status
-    }
-
     private let outlineView = NSOutlineView()
     private let filterField = NSTextField()
     private let treeModeButton = NSButton()
-    private var groupingButtons: [Grouping: NSButton] = [:]
+    private weak var showUntrackedMenuItem: NSMenuItem?
+    private var groupingButtons: [FileStatusGrouping: NSButton] = [:]
     private var allFiles: [ChangedFile] = []
     private var files: [ChangedFile] = []
     private var rootNodes: [ChangedFileNode] = []
     private var selectionScope: ChangedFileSelectionScope = .revision
     private var comparisonTitle = "Diff with parent"
-    private var isTreeMode = true
-    private var grouping: Grouping = .path
-    private var usesDenseTree = true
-    private var showsGroupNodesInFlatList = false
+    private var isTreeMode = AppSettingsStore.shared.fileStatusListPreferences.isTreeMode
+    private var grouping = AppSettingsStore.shared.fileStatusListPreferences.grouping
+    private var usesDenseTree = AppSettingsStore.shared.fileStatusListPreferences.usesDenseTree
+    private var showsGroupNodesInFlatList = AppSettingsStore.shared.fileStatusListPreferences.showsGroupNodesInFlatList
+    private var showsUntrackedFiles = AppSettingsStore.shared.fileStatusListPreferences.showsUntrackedFiles
+    private weak var viewModeMenu: NSMenu?
 
     override func loadView() {
         let root = NSView()
@@ -150,7 +147,7 @@ final class ChangedFilesViewController: NSViewController, NSOutlineViewDelegate,
         treeModeButton.imagePosition = .imageOnly
         treeModeButton.isBordered = false
         treeModeButton.setButtonType(.pushOnPushOff)
-        treeModeButton.state = .on
+        treeModeButton.state = isTreeMode ? .on : .off
         treeModeButton.toolTip = "Toggle flat list / tree"
         treeModeButton.target = self
         treeModeButton.action = #selector(toggleTreeMode)
@@ -162,9 +159,9 @@ final class ChangedFilesViewController: NSViewController, NSOutlineViewDelegate,
         stack.addArrangedSubview(viewMode)
         stack.addArrangedSubview(AppKitFactory.separator())
 
-        stack.addArrangedSubview(makeGroupingButton(.path, image: "FolderClosed", tooltip: "Group by file path"))
-        stack.addArrangedSubview(makeGroupingButton(.fileExtension, image: "File", tooltip: "Group by file type (extension)"))
-        stack.addArrangedSubview(makeGroupingButton(.status, image: "FileStatusModified", tooltip: "Group by diff status"))
+        stack.addArrangedSubview(makeGroupingButton(.path, tag: 0, image: "FolderClosed", tooltip: "Group by file path"))
+        stack.addArrangedSubview(makeGroupingButton(.fileExtension, tag: 1, image: "File", tooltip: "Group by file type (extension)"))
+        stack.addArrangedSubview(makeGroupingButton(.status, tag: 2, image: "FileStatusModified", tooltip: "Group by diff status"))
         stack.addArrangedSubview(AppKitFactory.separator())
         stack.addArrangedSubview(makeFindMenu())
         stack.addArrangedSubview(AppKitFactory.separator())
@@ -240,6 +237,7 @@ final class ChangedFilesViewController: NSViewController, NSOutlineViewDelegate,
         let selectedIDs = selectedFileIDs()
         allFiles = files
         selectionScope = scope
+        showUntrackedMenuItem?.isEnabled = scope == .workingTree
         self.comparisonTitle = comparisonTitle
         reloadFilteredFiles(preferredIDs: selectedIDs)
     }
@@ -267,6 +265,9 @@ final class ChangedFilesViewController: NSViewController, NSOutlineViewDelegate,
             filterField.backgroundColor = NSColor.systemRed.withAlphaComponent(0.16)
             filterField.toolTip = "The file filter is not a valid regular expression."
         }
+        if selectionScope == .workingTree, !showsUntrackedFiles {
+            files.removeAll { $0.changeType == .added }
+        }
 
         rootNodes = makeRootNodes()
         outlineView.reloadData()
@@ -289,44 +290,17 @@ final class ChangedFilesViewController: NSViewController, NSOutlineViewDelegate,
     }
 
     private func makeRootNodes() -> [ChangedFileNode] {
-        let leaves: [ChangedFileNode]
-        if !isTreeMode {
-            leaves = files.sorted { $0.path.localizedCaseInsensitiveCompare($1.path) == .orderedAscending }.map {
-                ChangedFileNode.file($0, title: $0.path)
-            }
-            if showsGroupNodesInFlatList, grouping != .path, !leaves.isEmpty {
-                return groupedNodes(wrapping: leaves)
-            }
-            return leaves
-        }
-
-        switch grouping {
-        case .path:
-            leaves = ChangedFilePathTreeBuilder.build(files: files, dense: usesDenseTree)
-        case .fileExtension, .status:
-            leaves = groupedNodes(wrapping: files.map { ChangedFileNode.file($0, title: $0.path) })
-        }
+        let leaves = ChangedFileListTreeBuilder.build(
+            files: files,
+            grouping: grouping,
+            isTreeMode: isTreeMode,
+            usesDenseTree: usesDenseTree,
+            showsGroupNodesInFlatList: showsGroupNodesInFlatList
+        )
+        guard isTreeMode else { return leaves }
         guard !leaves.isEmpty else { return [] }
         let title = "(\(files.count)) \(comparisonTitle)"
         return [ChangedFileNode(id: "diff-root", title: title, imageName: "Diff", children: leaves)]
-    }
-
-    private func groupedNodes(wrapping leaves: [ChangedFileNode]) -> [ChangedFileNode] {
-        let groups = Dictionary(grouping: leaves) { node -> String in
-            guard let file = node.file else { return "" }
-            switch grouping {
-            case .path: return "Files"
-            case .fileExtension:
-                let value = (file.path as NSString).pathExtension
-                return value.isEmpty ? "(no extension)" : ".\(value.lowercased())"
-            case .status: return file.changeType.description
-            }
-        }
-        return groups.keys.sorted().map { key in
-            let children = (groups[key] ?? []).sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
-            let imageName = grouping == .status ? children.first?.imageName ?? "FileStatusModified" : "File"
-            return ChangedFileNode(id: "group:\(grouping.rawValue):\(key)", title: "(\(children.count)) \(key)", imageName: imageName, children: children)
-        }
     }
 
     func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
@@ -366,13 +340,20 @@ final class ChangedFilesViewController: NSViewController, NSOutlineViewDelegate,
     @objc private func toggleTreeMode() {
         isTreeMode.toggle()
         treeModeButton.state = isTreeMode ? .on : .off
+        updateGroupingButtonStates()
+        persistViewPreferences()
         reloadFilteredFiles(preferredIDs: selectedFileIDs())
     }
 
     @objc private func chooseGrouping(_ sender: NSButton) {
-        guard let next = Grouping(rawValue: sender.tag) else { return }
+        let next: FileStatusGrouping = switch sender.tag {
+        case 1: .fileExtension
+        case 2: .status
+        default: .path
+        }
         grouping = next
         updateGroupingButtonStates()
+        persistViewPreferences()
         reloadFilteredFiles(preferredIDs: selectedFileIDs())
     }
 
@@ -392,6 +373,7 @@ final class ChangedFilesViewController: NSViewController, NSOutlineViewDelegate,
         if sender.tag < 10 { isTreeMode = sender.tag.isMultiple(of: 2) }
         treeModeButton.state = isTreeMode ? .on : .off
         updateGroupingButtonStates()
+        persistViewPreferences()
         reloadFilteredFiles(preferredIDs: selectedFileIDs())
     }
 
@@ -485,10 +467,10 @@ final class ChangedFilesViewController: NSViewController, NSOutlineViewDelegate,
         (0..<outlineView.numberOfRows).first { (outlineView.item(atRow: $0) as? ChangedFileNode)?.file != nil }
     }
 
-    private func makeGroupingButton(_ grouping: Grouping, image: String, tooltip: String) -> NSButton {
+    private func makeGroupingButton(_ grouping: FileStatusGrouping, tag: Int, image: String, tooltip: String) -> NSButton {
         let button = AppKitFactory.resourceButton(image, tooltip: tooltip, target: self, action: #selector(chooseGrouping(_:)))
         button.setButtonType(.pushOnPushOff)
-        button.tag = grouping.rawValue
+        button.tag = tag
         button.state = self.grouping == grouping ? .on : .off
         groupingButtons[grouping] = button
         return button
@@ -496,6 +478,33 @@ final class ChangedFilesViewController: NSViewController, NSOutlineViewDelegate,
 
     private func updateGroupingButtonStates() {
         groupingButtons.forEach { $0.value.state = $0.key == grouping ? .on : .off }
+        viewModeMenu?.items.forEach { item in
+            if item.action == #selector(chooseViewMode(_:)), item.tag < 10 {
+                let itemGrouping: FileStatusGrouping = switch item.tag {
+                case 2, 3: .fileExtension
+                case 4, 5: .status
+                default: .path
+                }
+                let itemIsTree = item.tag.isMultiple(of: 2)
+                item.state = itemGrouping == grouping && itemIsTree == isTreeMode ? .on : .off
+            } else if item.tag == 10 {
+                item.state = usesDenseTree ? .on : .off
+                item.isEnabled = isTreeMode
+            } else if item.tag == 11 {
+                item.state = showsGroupNodesInFlatList ? .on : .off
+                item.isEnabled = !isTreeMode && grouping != .path
+            }
+        }
+    }
+
+    private func persistViewPreferences() {
+        AppSettingsStore.shared.saveFileStatusListPreferences(FileStatusListPreferences(
+            grouping: grouping,
+            isTreeMode: isTreeMode,
+            usesDenseTree: usesDenseTree,
+            showsGroupNodesInFlatList: showsGroupNodesInFlatList,
+            showsUntrackedFiles: showsUntrackedFiles
+        ))
     }
 
     private func makeViewModeMenu() -> NSPopUpButton {
@@ -514,12 +523,16 @@ final class ChangedFilesViewController: NSViewController, NSOutlineViewDelegate,
         let dense = NSMenuItem(title: "Dense tree (merge single item with its folder node)", action: #selector(chooseViewMode(_:)), keyEquivalent: "")
         dense.target = self
         dense.tag = 10
-        dense.state = .on
+        dense.state = usesDenseTree ? .on : .off
+        dense.isEnabled = isTreeMode
         button.menu?.addItem(dense)
         let groups = NSMenuItem(title: "Show group nodes in flat list (if multiple)", action: #selector(chooseViewMode(_:)), keyEquivalent: "")
         groups.target = self
         groups.tag = 11
+        groups.state = showsGroupNodesInFlatList ? .on : .off
+        groups.isEnabled = !isTreeMode && grouping != .path
         button.menu?.addItem(groups)
+        viewModeMenu = button.menu
         return button
     }
 
@@ -533,10 +546,36 @@ final class ChangedFilesViewController: NSViewController, NSOutlineViewDelegate,
 
     private func makeSettingsMenu() -> NSPopUpButton {
         let button = imagePullDown("Settings", tooltip: "Settings", width: 29)
-        ["Show skip-worktree files", "Show untracked files", "Edit ignored files", "Edit locally ignored files", "Show file differences for all parents", "Toolbar"].forEach {
-            button.menu?.addItem(placeholderMenuItem($0))
+        let ignoredFiles = NSMenuItem(title: "Show ignored files", action: nil, keyEquivalent: "")
+        ignoredFiles.isEnabled = false
+        button.menu?.addItem(ignoredFiles)
+        let skipWorktree = NSMenuItem(title: "Show skip-worktree files", action: nil, keyEquivalent: "")
+        skipWorktree.isEnabled = false
+        button.menu?.addItem(skipWorktree)
+        let assumeUnchanged = NSMenuItem(title: "Show assumed-unchanged files", action: nil, keyEquivalent: "")
+        assumeUnchanged.isEnabled = false
+        button.menu?.addItem(assumeUnchanged)
+        let untracked = NSMenuItem(title: "Show untracked files", action: #selector(toggleShowUntracked(_:)), keyEquivalent: "")
+        untracked.target = self
+        untracked.state = showsUntrackedFiles ? .on : .off
+        untracked.isEnabled = false
+        showUntrackedMenuItem = untracked
+        button.menu?.addItem(untracked)
+        button.menu?.addItem(.separator())
+        for title in ["Edit ignored files", "Edit locally ignored files", "Show file differences for all parents", "Toolbar"] {
+            let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+            item.isEnabled = false
+            button.menu?.addItem(item)
         }
         return button
+    }
+
+    @objc private func toggleShowUntracked(_ sender: NSMenuItem) {
+        guard selectionScope == .workingTree else { return }
+        showsUntrackedFiles.toggle()
+        sender.state = showsUntrackedFiles ? .on : .off
+        persistViewPreferences()
+        reloadFilteredFiles(preferredIDs: selectedFileIDs())
     }
 
     private func imagePullDown(_ imageName: String, tooltip: String, width: CGFloat) -> NSPopUpButton {
@@ -554,9 +593,8 @@ final class ChangedFilesViewController: NSViewController, NSOutlineViewDelegate,
     }
 }
 
-private final class ChangedFileCellView: NSTableCellView {
+final class ChangedFileCellView: NSTableCellView {
     private let statusImage = NSImageView()
-    private let changeCount = NSTextField(labelWithString: "")
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -565,26 +603,18 @@ private final class ChangedFileCellView: NSTableCellView {
         text.lineBreakMode = .byTruncatingMiddle
         text.translatesAutoresizingMaskIntoConstraints = false
         statusImage.translatesAutoresizingMaskIntoConstraints = false
-        changeCount.font = .monospacedDigitSystemFont(ofSize: 9.5, weight: .regular)
-        changeCount.textColor = .secondaryLabelColor
-        changeCount.alignment = .right
-        changeCount.translatesAutoresizingMaskIntoConstraints = false
         textField = text
         imageView = statusImage
         addSubview(statusImage)
         addSubview(text)
-        addSubview(changeCount)
         NSLayoutConstraint.activate([
             statusImage.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
             statusImage.centerYAnchor.constraint(equalTo: centerYAnchor),
             statusImage.widthAnchor.constraint(equalToConstant: 16),
             statusImage.heightAnchor.constraint(equalToConstant: 16),
             text.leadingAnchor.constraint(equalTo: statusImage.trailingAnchor, constant: 3),
+            text.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
             text.centerYAnchor.constraint(equalTo: centerYAnchor),
-            changeCount.leadingAnchor.constraint(greaterThanOrEqualTo: text.trailingAnchor, constant: 4),
-            changeCount.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
-            changeCount.centerYAnchor.constraint(equalTo: centerYAnchor),
-            changeCount.widthAnchor.constraint(equalToConstant: 64)
         ])
     }
 
@@ -592,18 +622,35 @@ private final class ChangedFileCellView: NSTableCellView {
 
     func apply(node: ChangedFileNode) {
         textField?.stringValue = node.title
-        textField?.font = node.file == nil ? .systemFont(ofSize: 11) : .systemFont(ofSize: 11)
+        textField?.font = .systemFont(ofSize: 11)
         if let file = node.file {
-            changeCount.stringValue = "+\(file.additions) −\(file.deletions)"
             statusImage.image = AppKitFactory.resourceImage(node.imageName, accessibilityDescription: file.changeType.description)
         } else {
-            changeCount.stringValue = ""
             statusImage.image = AppKitFactory.resourceImage(node.imageName, accessibilityDescription: node.title)
+        }
+    }
+
+    func apply(file: ChangedFile, title: String? = nil) {
+        textField?.stringValue = title ?? file.path
+        textField?.font = .systemFont(ofSize: 11)
+        let imageName = ChangedFileStatusPresentation.imageName(for: file.changeType)
+        statusImage.image = AppKitFactory.resourceImage(imageName, accessibilityDescription: file.changeType.description)
+    }
+}
+
+enum ChangedFileStatusPresentation {
+    static func imageName(for changeType: FileChangeType) -> String {
+        switch changeType {
+        case .added: "FileStatusAdded"
+        case .modified: "FileStatusModified"
+        case .deleted: "FileStatusModifiedOnlyA"
+        case .renamed: "FileStatusRenamed"
+        case .copied: "FileStatusCopied"
         }
     }
 }
 
-private final class ChangedFileNode: NSObject {
+final class ChangedFileNode: NSObject {
     let id: String
     let title: String
     let imageName: String
@@ -619,14 +666,7 @@ private final class ChangedFileNode: NSObject {
     }
 
     static func file(_ file: ChangedFile, title: String) -> ChangedFileNode {
-        let imageName: String
-        switch file.changeType {
-        case .added: imageName = "FileStatusAdded"
-        case .modified: imageName = "FileStatusModified"
-        case .deleted: imageName = "FileStatusModifiedOnlyA"
-        case .renamed: imageName = "FileStatusRenamed"
-        case .copied: imageName = "FileStatusCopied"
-        }
+        let imageName = ChangedFileStatusPresentation.imageName(for: file.changeType)
         return ChangedFileNode(id: "file:\(file.id)", title: title, imageName: imageName, file: file)
     }
 
@@ -636,7 +676,7 @@ private final class ChangedFileNode: NSObject {
     }
 }
 
-private enum ChangedFilePathTreeBuilder {
+enum ChangedFilePathTreeBuilder {
     private final class Branch {
         let name: String
         let path: String
@@ -685,13 +725,75 @@ private enum ChangedFilePathTreeBuilder {
     }
 }
 
+enum ChangedFileListTreeBuilder {
+    static func build(
+        files: [ChangedFile],
+        grouping: FileStatusGrouping,
+        isTreeMode: Bool,
+        usesDenseTree: Bool,
+        showsGroupNodesInFlatList: Bool
+    ) -> [ChangedFileNode] {
+        if isTreeMode, grouping == .path {
+            return ChangedFilePathTreeBuilder.build(files: files, dense: usesDenseTree)
+        }
+
+        let leaves = sorted(files: files, grouping: grouping).map {
+            ChangedFileNode.file($0, title: $0.path)
+        }
+        guard grouping != .path,
+              isTreeMode || showsGroupNodesInFlatList,
+              !leaves.isEmpty else { return leaves }
+        return groupedNodes(wrapping: leaves, grouping: grouping)
+    }
+
+    private static func sorted(files: [ChangedFile], grouping: FileStatusGrouping) -> [ChangedFile] {
+        files.sorted { left, right in
+            let leftKey = groupKey(for: left, grouping: grouping)
+            let rightKey = groupKey(for: right, grouping: grouping)
+            let comparison = leftKey.localizedCaseInsensitiveCompare(rightKey)
+            return comparison == .orderedAscending
+                || (comparison == .orderedSame && left.path.localizedCaseInsensitiveCompare(right.path) == .orderedAscending)
+        }
+    }
+
+    private static func groupedNodes(wrapping leaves: [ChangedFileNode], grouping: FileStatusGrouping) -> [ChangedFileNode] {
+        let groups = Dictionary(grouping: leaves) { node in
+            node.file.map { groupKey(for: $0, grouping: grouping) } ?? ""
+        }
+        return groups.keys.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }.map { key in
+            let children = (groups[key] ?? []).sorted {
+                $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending
+            }
+            let imageName = grouping == .status ? children.first?.imageName ?? "FileStatusModified" : "File"
+            return ChangedFileNode(
+                id: "group:\(grouping.rawValue):\(key)",
+                title: "(\(children.count)) \(key)",
+                imageName: imageName,
+                children: children
+            )
+        }
+    }
+
+    private static func groupKey(for file: ChangedFile, grouping: FileStatusGrouping) -> String {
+        switch grouping {
+        case .path:
+            return file.path
+        case .fileExtension:
+            let value = (file.path as NSString).pathExtension
+            return value.isEmpty ? "(no extension)" : ".\(value.lowercased())"
+        case .status:
+            return file.changeType.description
+        }
+    }
+}
+
 final class DiffContentViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate {
     var onHunkMutation: ((RepositoryHunkSelection) -> Void)?
     var selectionScope: ChangedFileSelectionScope = .revision
     private let tableView = NSTableView()
-    private let hoverToolbar = AppKitFactory.toolbarBackground()
+    private let hoverToolbar = DiffViewerToolbar(showsNonPrintingCharacters: false, showsSyntaxHighlighting: true)
     private var presentations: [DiffLinePresentation] = []
-    private var numberColumnWidth: CGFloat = 23
+    private var gutterMetrics = DiffGutterMetrics.empty
     private var caretRow = -1
     private var showsNonPrintingCharacters = false
     private var showsSyntaxHighlighting = true
@@ -702,6 +804,9 @@ final class DiffContentViewController: NSViewController, NSTableViewDataSource, 
         let root = DiffTrackingView()
         root.onPointerPresenceChanged = { [weak self] isPresent in
             self?.hoverToolbar.isHidden = !isPresent
+        }
+        hoverToolbar.onAction = { [weak self] action, state in
+            self?.performToolbarAction(action, state: state)
         }
 
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("DiffLine"))
@@ -730,7 +835,7 @@ final class DiffContentViewController: NSViewController, NSTableViewDataSource, 
         scroll.translatesAutoresizingMaskIntoConstraints = false
 
         root.addSubview(scroll)
-        configureHoverToolbar(in: root)
+        hoverToolbar.install(in: root)
         NSLayoutConstraint.activate([
             scroll.topAnchor.constraint(equalTo: root.topAnchor),
             scroll.leadingAnchor.constraint(equalTo: root.leadingAnchor),
@@ -746,107 +851,26 @@ final class DiffContentViewController: NSViewController, NSTableViewDataSource, 
         hoverToolbar.toolTip = "\(file.path) — \(file.changeType.description), +\(file.additions) −\(file.deletions)"
         let lines = diff?.lines ?? []
         presentations = DiffLinePresentation.build(from: lines)
-        numberColumnWidth = Self.numberColumnWidth(for: lines)
+        gutterMetrics = DiffGutterMetrics(lines: lines)
         caretRow = -1
         tableView.reloadData()
         if !presentations.isEmpty { tableView.scrollRowToVisible(0) }
     }
 
-    private static func numberColumnWidth(for lines: [DiffLine]) -> CGFloat {
-        let maximum = lines.flatMap { [$0.oldLineNumber, $0.newLineNumber] }.compactMap { $0 }.max() ?? 0
-        let digits = max(1, String(maximum).count)
-        let font = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular)
-        let digitWidth = ceil(("0" as NSString).size(withAttributes: [.font: font]).width)
-        let completeMarginWidth = 4 + (2 * CGFloat(digits + 1) * digitWidth)
-        return ceil(completeMarginWidth / 2)
-    }
-
-    private func configureHoverToolbar(in root: NSView) {
-        hoverToolbar.translatesAutoresizingMaskIntoConstraints = false
-        hoverToolbar.isHidden = true
-
-        let stack = NSStackView()
-        stack.orientation = .horizontal
-        stack.alignment = .centerY
-        stack.spacing = 0
-        stack.translatesAutoresizingMaskIntoConstraints = false
-
-        @discardableResult
-        func addButton(_ image: String, _ tooltip: String, adaptsToTheme: Bool = false) -> NSButton {
-            let button = AppKitFactory.resourceButton(
-                image,
-                tooltip: tooltip,
-                isTemplate: adaptsToTheme,
-                target: self,
-                action: #selector(performToolbarAction(_:))
-            )
-            stack.addArrangedSubview(button)
-            return button
-        }
-
-        addButton("ArrowDown", "Next change")
-        addButton("ArrowUp", "Previous change")
-        stack.addArrangedSubview(AppKitFactory.separator())
-        addButton("NumberOfLinesIncrease", "Increase the number of lines of context")
-        addButton("NumberOfLinesDecrease", "Decrease the number of lines of context")
-        stack.addArrangedSubview(AppKitFactory.separator())
-        addButton("ShowEntireFile", "Show entire file")
-        let nonPrintingButton = addButton("ShowWhitespace", "Show nonprinting characters", adaptsToTheme: true)
-        nonPrintingButton.setButtonType(.pushOnPushOff)
-        nonPrintingButton.state = showsNonPrintingCharacters ? .on : .off
-        let syntaxButton = addButton("SyntaxHighlighting", "Show syntax highlighting", adaptsToTheme: true)
-        syntaxButton.setButtonType(.pushOnPushOff)
-        syntaxButton.state = showsSyntaxHighlighting ? .on : .off
-        addButton("WhitespaceIgnoreEol", "Ignore whitespace changes at end of line", adaptsToTheme: true)
-        addButton("WhitespaceIgnore", "Ignore changes in amount of whitespace", adaptsToTheme: true)
-        addButton("WhitespaceIgnoreAll", "Ignore all whitespace changes", adaptsToTheme: true)
-
-        let encoding = NSPopUpButton()
-        encoding.controlSize = .small
-        encoding.font = .systemFont(ofSize: 11)
-        encoding.addItem(withTitle: "Unicode (UTF-8)")
-        encoding.toolTip = "Encoding"
-        encoding.target = self
-        encoding.action = #selector(placeholderPopUp(_:))
-        encoding.translatesAutoresizingMaskIntoConstraints = false
-        encoding.widthAnchor.constraint(equalToConstant: 110).isActive = true
-        stack.addArrangedSubview(encoding)
-        addButton("Settings", "Settings")
-
-        hoverToolbar.addSubview(stack)
-        root.addSubview(hoverToolbar)
-        let leading = hoverToolbar.leadingAnchor.constraint(greaterThanOrEqualTo: root.leadingAnchor)
-        leading.priority = .defaultHigh
-        NSLayoutConstraint.activate([
-            hoverToolbar.topAnchor.constraint(equalTo: root.topAnchor),
-            hoverToolbar.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -40),
-            hoverToolbar.heightAnchor.constraint(equalToConstant: 23),
-            leading,
-            stack.leadingAnchor.constraint(equalTo: hoverToolbar.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: hoverToolbar.trailingAnchor),
-            stack.topAnchor.constraint(equalTo: hoverToolbar.topAnchor),
-            stack.bottomAnchor.constraint(equalTo: hoverToolbar.bottomAnchor)
-        ])
-    }
-
-    @objc private func placeholderPopUp(_ sender: NSPopUpButton) {
-        BrowserCommandCenter.perform(sender.toolTip ?? "Diff option")
-    }
-
-    @objc private func performToolbarAction(_ sender: NSButton) {
-        switch sender.toolTip {
+    private func performToolbarAction(_ action: String, state: NSControl.StateValue) {
+        switch action {
         case "Next change":
             navigateToChange(forward: true)
         case "Previous change":
             navigateToChange(forward: false)
         case "Show nonprinting characters":
-            showsNonPrintingCharacters = sender.state == .on
+            showsNonPrintingCharacters = state == .on
             reloadRenderedLines()
         case "Show syntax highlighting":
-            showsSyntaxHighlighting = sender.state == .on
+            showsSyntaxHighlighting = state == .on
             reloadRenderedLines()
         default:
-            BrowserCommandCenter.perform(sender.toolTip ?? "Diff option")
+            BrowserCommandCenter.perform(action)
         }
     }
 
@@ -893,7 +917,7 @@ final class DiffContentViewController: NSViewController, NSTableViewDataSource, 
         cell.identifier = identifier
         cell.apply(
             presentation: presentations[row],
-            numberColumnWidth: numberColumnWidth,
+            gutterMetrics: gutterMetrics,
             showsNonPrintingCharacters: showsNonPrintingCharacters,
             showsSyntaxHighlighting: showsSyntaxHighlighting
         )
@@ -1013,6 +1037,32 @@ struct DiffLinePresentation {
     }
 }
 
+struct DiffGutterMetrics: Equatable {
+    static let leadingMargin: CGFloat = 4
+    static let empty = DiffGutterMetrics(numberColumnWidth: 19)
+
+    let numberColumnWidth: CGFloat
+
+    init(numberColumnWidth: CGFloat) {
+        self.numberColumnWidth = numberColumnWidth
+    }
+
+    init(lines: [DiffLine]) {
+        let maximum = lines
+            .flatMap { [$0.oldLineNumber, $0.newLineNumber] }
+            .compactMap { $0 }
+            .max() ?? 0
+        let digits = max(1, String(maximum).count)
+        let font = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular)
+        let digitWidth = ceil(("0" as NSString).size(withAttributes: [.font: font]).width)
+        numberColumnWidth = CGFloat(digits + 1) * digitWidth
+    }
+
+    var oldColumnWidth: CGFloat { Self.leadingMargin + numberColumnWidth }
+    var newColumnWidth: CGFloat { numberColumnWidth }
+    var totalWidth: CGFloat { oldColumnWidth + newColumnWidth }
+}
+
 final class DiffLineCellView: NSTableCellView {
     private let oldNumber = NSTextField(labelWithString: "")
     private let newNumber = NSTextField(labelWithString: "")
@@ -1021,7 +1071,7 @@ final class DiffLineCellView: NSTableCellView {
     private var oldNumberWidthConstraint: NSLayoutConstraint!
     private var newNumberWidthConstraint: NSLayoutConstraint!
     private var presentation: DiffLinePresentation?
-    private var numberColumnWidth: CGFloat = 23
+    private var gutterMetrics = DiffGutterMetrics.empty
     private let prefixWidth: CGFloat = 8
 
     override init(frame frameRect: NSRect) {
@@ -1036,11 +1086,11 @@ final class DiffLineCellView: NSTableCellView {
         [oldNumber, newNumber].forEach {
             $0.font = .monospacedDigitSystemFont(ofSize: 10, weight: .regular)
             $0.textColor = .tertiaryLabelColor
-            $0.alignment = .right
+            $0.alignment = .left
             $0.translatesAutoresizingMaskIntoConstraints = false
         }
-        oldNumberWidthConstraint = oldNumber.widthAnchor.constraint(equalToConstant: numberColumnWidth)
-        newNumberWidthConstraint = newNumber.widthAnchor.constraint(equalToConstant: numberColumnWidth)
+        oldNumberWidthConstraint = oldNumber.widthAnchor.constraint(equalToConstant: gutterMetrics.numberColumnWidth)
+        newNumberWidthConstraint = newNumber.widthAnchor.constraint(equalToConstant: gutterMetrics.numberColumnWidth)
         oldNumberWidthConstraint.isActive = true
         newNumberWidthConstraint.isActive = true
         prefix.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
@@ -1053,7 +1103,7 @@ final class DiffLineCellView: NSTableCellView {
         content.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: DiffGutterMetrics.leadingMargin),
             stack.trailingAnchor.constraint(equalTo: trailingAnchor),
             stack.centerYAnchor.constraint(equalTo: centerYAnchor)
         ])
@@ -1065,7 +1115,7 @@ final class DiffLineCellView: NSTableCellView {
         super.draw(dirtyRect)
         guard let presentation else { return }
 
-        let gutterWidth = numberColumnWidth * 2
+        let gutterWidth = gutterMetrics.totalWidth
         let baseColor: NSColor?
         switch presentation.line.kind {
         case .addition:
@@ -1112,20 +1162,18 @@ final class DiffLineCellView: NSTableCellView {
             ).fill()
         }
 
-        NSColor.separatorColor.withAlphaComponent(0.45).setFill()
-        NSRect(x: gutterWidth - 1, y: 0, width: 1, height: bounds.height).fill()
     }
 
     func apply(
         presentation: DiffLinePresentation,
-        numberColumnWidth: CGFloat,
+        gutterMetrics: DiffGutterMetrics,
         showsNonPrintingCharacters: Bool,
         showsSyntaxHighlighting: Bool
     ) {
         self.presentation = presentation
-        self.numberColumnWidth = numberColumnWidth
-        oldNumberWidthConstraint.constant = numberColumnWidth
-        newNumberWidthConstraint.constant = numberColumnWidth
+        self.gutterMetrics = gutterMetrics
+        oldNumberWidthConstraint.constant = gutterMetrics.numberColumnWidth
+        newNumberWidthConstraint.constant = gutterMetrics.numberColumnWidth
         let line = presentation.line
         oldNumber.stringValue = line.oldLineNumber.map(String.init) ?? ""
         newNumber.stringValue = line.newLineNumber.map(String.init) ?? ""
@@ -1197,11 +1245,103 @@ private enum DiffSyntaxHighlighter {
     }
 }
 
-private final class DiffTrackingView: NSView {
+final class DiffViewerToolbar: NSVisualEffectView {
+    var onAction: ((String, NSControl.StateValue) -> Void)?
+
+    init(showsNonPrintingCharacters: Bool, showsSyntaxHighlighting: Bool) {
+        super.init(frame: .zero)
+        material = .headerView
+        blendingMode = .withinWindow
+        state = .active
+        isHidden = true
+
+        let stack = NSStackView()
+        stack.orientation = .horizontal
+        stack.alignment = .centerY
+        stack.spacing = 0
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        @discardableResult
+        func addButton(_ image: String, _ tooltip: String, toggleState: NSControl.StateValue? = nil) -> NSButton {
+            let button = AppKitFactory.resourceButton(
+                image,
+                tooltip: tooltip,
+                isTemplate: toggleState != nil,
+                target: self,
+                action: #selector(performAction(_:))
+            )
+            if let toggleState {
+                button.setButtonType(.pushOnPushOff)
+                button.state = toggleState
+            }
+            stack.addArrangedSubview(button)
+            return button
+        }
+
+        addButton("ArrowDown", "Next change")
+        addButton("ArrowUp", "Previous change")
+        stack.addArrangedSubview(AppKitFactory.separator())
+        addButton("NumberOfLinesIncrease", "Increase the number of lines of context")
+        addButton("NumberOfLinesDecrease", "Decrease the number of lines of context")
+        stack.addArrangedSubview(AppKitFactory.separator())
+        addButton("ShowEntireFile", "Show entire file")
+        addButton("ShowWhitespace", "Show nonprinting characters", toggleState: showsNonPrintingCharacters ? .on : .off)
+        addButton("SyntaxHighlighting", "Show syntax highlighting", toggleState: showsSyntaxHighlighting ? .on : .off)
+        addButton("WhitespaceIgnoreEol", "Ignore whitespace changes at end of line")
+        addButton("WhitespaceIgnore", "Ignore changes in amount of whitespace")
+        addButton("WhitespaceIgnoreAll", "Ignore all whitespace changes")
+
+        let encoding = NSPopUpButton()
+        encoding.controlSize = .small
+        encoding.font = .systemFont(ofSize: 11)
+        encoding.addItem(withTitle: "Unicode (UTF-8)")
+        encoding.toolTip = "Encoding"
+        encoding.target = self
+        encoding.action = #selector(performPopUpAction(_:))
+        encoding.translatesAutoresizingMaskIntoConstraints = false
+        encoding.widthAnchor.constraint(equalToConstant: 110).isActive = true
+        stack.addArrangedSubview(encoding)
+        addButton("Settings", "Settings")
+
+        addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor),
+            stack.topAnchor.constraint(equalTo: topAnchor),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor)
+        ])
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    func install(in root: NSView) {
+        translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(self)
+        let leading = leadingAnchor.constraint(greaterThanOrEqualTo: root.leadingAnchor)
+        leading.priority = .defaultHigh
+        NSLayoutConstraint.activate([
+            topAnchor.constraint(equalTo: root.topAnchor),
+            trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -40),
+            heightAnchor.constraint(equalToConstant: 23),
+            leading
+        ])
+    }
+
+    @objc private func performAction(_ sender: NSButton) {
+        onAction?(sender.toolTip ?? "Diff option", sender.state)
+    }
+
+    @objc private func performPopUpAction(_ sender: NSPopUpButton) {
+        onAction?(sender.toolTip ?? "Encoding", .off)
+    }
+}
+
+final class DiffTrackingView: NSView {
     var onPointerPresenceChanged: ((Bool) -> Void)?
     private var pointerTrackingArea: NSTrackingArea?
 
     override func updateTrackingAreas() {
+        super.updateTrackingAreas()
         if let pointerTrackingArea {
             removeTrackingArea(pointerTrackingArea)
         }
@@ -1212,7 +1352,6 @@ private final class DiffTrackingView: NSView {
         )
         addTrackingArea(area)
         pointerTrackingArea = area
-        super.updateTrackingAreas()
     }
 
     override func mouseEntered(with event: NSEvent) {

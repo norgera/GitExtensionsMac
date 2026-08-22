@@ -1,5 +1,22 @@
 import AppKit
 
+private final class PullDialogRootView: NSView {
+    weak var helpToggle: NSView?
+    var onHelpToggle: (() -> Void)?
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        if let helpToggle {
+            let hitFrame = helpToggle.convert(helpToggle.bounds, to: self).insetBy(dx: -6, dy: -6)
+            if hitFrame.contains(point) { return self }
+        }
+        return super.hitTest(point)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        onHelpToggle?()
+    }
+}
+
 @MainActor
 extension ApplicationShellDialogs {
     static func presentPullWindow(
@@ -20,7 +37,8 @@ extension ApplicationShellDialogs {
         let window = NSWindow(contentViewController: controller)
         window.title = "Pull (\(snapshot.currentRepository.path))"
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
-        window.setContentSize(NSSize(width: 920, height: 620))
+        let helpWidth: CGFloat = AppSettingsStore.shared.pullPreferences.helpExpanded ? 307 : 80
+        window.setContentSize(NSSize(width: 920 - (307 - helpWidth), height: 620))
         window.minSize = NSSize(width: 690, height: 564)
         window.maxSize = NSSize(width: 10_000, height: 10_000)
         window.contentMaxSize = NSSize(width: 10_000, height: 10_000)
@@ -105,7 +123,7 @@ private final class PullDialogViewController: NSViewController, NSWindowDelegate
     }
 
     override func loadView() {
-        let root = NSView()
+        let root = PullDialogRootView()
         configureControls()
         let help = makeHelpPanel()
         let form = makeForm()
@@ -136,7 +154,7 @@ private final class PullDialogViewController: NSViewController, NSWindowDelegate
         root.addSubview(scroll)
         root.addSubview(separator)
         root.addSubview(footer)
-        let helpWidth = help.widthAnchor.constraint(equalToConstant: isHelpExpanded ? 307 : 30)
+        let helpWidth = help.widthAnchor.constraint(equalToConstant: isHelpExpanded ? 307 : 80)
         helpWidthConstraint = helpWidth
         NSLayoutConstraint.activate([
             help.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 14),
@@ -156,6 +174,8 @@ private final class PullDialogViewController: NSViewController, NSWindowDelegate
             footer.heightAnchor.constraint(equalToConstant: 41)
         ])
         view = root
+        root.helpToggle = helpToggle
+        root.onHelpToggle = { [weak self] in self?.toggleHelp() }
         populateRemotes()
         applyInitialAction()
         updateHelp()
@@ -214,7 +234,8 @@ private final class PullDialogViewController: NSViewController, NSWindowDelegate
         reachableTags.state = .on
         prune.target = self; prune.action = #selector(pruneChanged)
         pruneTags.target = self; pruneTags.action = #selector(pruneTagsChanged)
-        helpToggle.target = self; helpToggle.action = #selector(toggleHelp); helpToggle.isBordered = false
+        helpToggle.target = self; helpToggle.action = #selector(toggleHelp)
+        helpToggle.setButtonType(.momentaryPushIn)
         conflictsButton.target = self; conflictsButton.action = #selector(solveConflicts)
         stashButton.target = self; stashButton.action = #selector(stashChanges)
         autoStash.state = settings.pullPreferences.autoStash ? .on : .off
@@ -235,7 +256,10 @@ private final class PullDialogViewController: NSViewController, NSWindowDelegate
         helpImageView.imageScaling = .scaleProportionallyUpOrDown
         helpImageView.imageAlignment = .alignTopLeft
         helpImageView.translatesAutoresizingMaskIntoConstraints = false
+        helpToggle.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
+            helpToggle.widthAnchor.constraint(equalToConstant: 80),
+            helpToggle.heightAnchor.constraint(equalToConstant: 26),
             helpImageView.widthAnchor.constraint(equalToConstant: 307),
             helpImageView.heightAnchor.constraint(equalToConstant: 375)
         ])
@@ -243,6 +267,7 @@ private final class PullDialogViewController: NSViewController, NSWindowDelegate
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 5
+        stack.detachesHiddenViews = true
         stack.setCustomSpacing(10, after: helpNotice)
         stack.translatesAutoresizingMaskIntoConstraints = false
         helpPanel.addSubview(stack)
@@ -910,9 +935,9 @@ private final class PullDialogViewController: NSViewController, NSWindowDelegate
     }
 
     @objc private func toggleHelp() {
-        let oldWidth = isHelpExpanded ? 307.0 : 30.0
+        let oldWidth = isHelpExpanded ? 307.0 : 80.0
         isHelpExpanded.toggle()
-        let newWidth = isHelpExpanded ? 307.0 : 30.0
+        let newWidth = isHelpExpanded ? 307.0 : 80.0
         helpWidthConstraint?.constant = newWidth
         updateHelpVisibility()
         var preferences = settings.pullPreferences
@@ -939,10 +964,14 @@ private final class PullDialogViewController: NSViewController, NSWindowDelegate
                 attributes: [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor.linkColor, .underlineStyle: NSUnderlineStyle.single.rawValue]
             )
             helpToggle.toolTip = nil
+            helpToggle.setAccessibilityLabel("Hide help")
         } else {
-            helpToggle.attributedTitle = NSAttributedString(string: "")
+            helpToggle.attributedTitle = NSAttributedString(
+                string: "Show help",
+                attributes: [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor.linkColor]
+            )
             helpToggle.image = AppKitFactory.resourceImage("Information", accessibilityDescription: "Show help")
-            helpToggle.imagePosition = .imageOnly
+            helpToggle.imagePosition = .imageLeading
             helpToggle.isBordered = true
             helpToggle.bezelStyle = .texturedRounded
             helpToggle.toolTip = "Show help"

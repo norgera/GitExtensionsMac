@@ -791,12 +791,17 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
     }
 
     private func apply(snapshot: RepositorySnapshot, preferredCommitID: String? = nil) {
+        let previousSnapshot = self.snapshot
+        let sameRepository = previousSnapshot?.currentRepository.id == snapshot.currentRepository.id
+        let requestedSelection = preferredCommitID ?? (sameRepository ? selectedCommitID : nil)
+        let restoredSelectionID = RevisionSelectionRestorer.restoredID(
+            requestedID: requestedSelection,
+            previousCommits: sameRepository ? previousSnapshot?.commits ?? [] : [],
+            refreshedCommits: snapshot.commits
+        )
         self.snapshot = snapshot
         outlineController.apply(snapshot: snapshot)
-        let preferred = preferredCommitID.flatMap { id in snapshot.commits.first(where: { $0.id == id }) }
-            ?? snapshot.commits.first(where: \.isHEAD)
-            ?? snapshot.commits.first(where: { !$0.isArtificial })
-        revisionGridController.apply(commits: snapshot.commits, preferredCommitID: preferred?.id)
+        revisionGridController.apply(commits: snapshot.commits, preferredCommitID: restoredSelectionID)
 
         workingDirectoryPopUp.removeAllItems()
         snapshot.repositories.forEach { repository in
@@ -1310,8 +1315,16 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             }
             return
         }
+        if identifier == "revision.commit.fixup" {
+            beginCommit(initialMode: .normal, specialKind: .fixup(focused))
+            return
+        }
+        if identifier == "revision.commit.squash" {
+            beginCommit(initialMode: .normal, specialKind: .squash(focused))
+            return
+        }
         if identifier == "revision.commit.amend" {
-            beginCommit(initialMode: .amend)
+            beginCommit(initialMode: .normal, specialKind: .amendAutosquash(focused))
             return
         }
         if identifier == "revision.commit.checkout" {
@@ -1454,7 +1467,10 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         }
     }
 
-    private func beginCommit(initialMode: RepositoryCommitMode) {
+    private func beginCommit(
+        initialMode: RepositoryCommitMode,
+        specialKind: CommitWorkflowSpecialKind? = nil
+    ) {
         guard let mutationSource = dataSource as? any RepositoryMutatingDataSource,
               let window = view.window else {
             showPlaceholderStatus(for: "Commit is unavailable for mock data")
@@ -1473,40 +1489,23 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             ?? snapshot?.commits.first(where: { !$0.isArtificial })
         commitWindowController = CommitWorkflowDialog.present(
             source: mutationSource,
+            pushSource: dataSource as? any RepositoryPushingDataSource,
             initialMode: initialMode,
+            specialKind: specialKind,
             head: head,
             draft: commitDraft,
-            owner: window
-        ) { [weak self, weak window] request in
+            owner: window,
+            onSnapshot: { [weak self] snapshot, selected in
+                guard let self else { return }
+                commitDraft = nil
+                apply(snapshot: snapshot, preferredCommitID: selected ?? previousSelection)
+                statusLabel.stringValue = "Repository refreshed after Commit"
+            },
+            onClose: { [weak self] in
             guard let self else { return }
             self.commitWindowController = nil
-            guard let request else {
-                self.statusLabel.stringValue = "Commit cancelled"
-                return
-            }
-            self.mutationTask?.cancel()
-            self.mutationTask = Task { @MainActor [weak self, weak window] in
-                guard let self, let window else { return }
-                do {
-                    commitDraft = CommitDialogDraft(request: request)
-                    statusLabel.stringValue = request.mode == .normal ? "Committing…" : "Amending…"
-                    revisionDetailsTask?.cancel()
-                    let result = try await mutationSource.commit(request)
-                    guard !Task.isCancelled else { return }
-                    commitDraft = nil
-                    apply(snapshot: result.snapshot, preferredCommitID: result.selectedCommitID)
-                    statusLabel.stringValue = result.message
-                } catch is CancellationError {
-                    return
-                } catch {
-                    if let refreshed = try? await mutationSource.loadSnapshot(), !Task.isCancelled {
-                        apply(snapshot: refreshed, preferredCommitID: previousSelection)
-                    }
-                    statusLabel.stringValue = error.localizedDescription
-                    await MutationDialogs.showError(error, title: "Commit failed", window: window)
-                }
-            }
-        }
+            self.statusLabel.stringValue = "Commit window closed"
+        })
     }
 
     private enum StashMutationKind {

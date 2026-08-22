@@ -1,3 +1,4 @@
+import CoreFoundation
 import Foundation
 
 enum CheckoutLocalChangesAction: Hashable, Sendable {
@@ -36,10 +37,24 @@ struct RepositoryHunkSelection: Hashable, Sendable {
     let direction: RepositoryHunkDirection
 }
 
+struct RepositoryLineSelection: Hashable, Sendable {
+    let file: ChangedFile
+    let diff: FileDiff
+    let lineIDs: Set<String>
+    let direction: RepositoryHunkDirection
+}
+
 enum RepositoryCommitMode: Hashable, Sendable {
     case normal
     case amend
     case amendMessageOnly
+}
+
+enum RepositoryCommitGPGSigning: Hashable, Sendable {
+    case gitDefault
+    case doNotSign
+    case signDefault
+    case signSpecificKey(String)
 }
 
 struct RepositoryCommitRequest: Hashable, Sendable {
@@ -50,6 +65,61 @@ struct RepositoryCommitRequest: Hashable, Sendable {
     let signOff: Bool
     let author: String?
     let resetAuthor: Bool
+    let noVerify: Bool
+    let gpgSigning: RepositoryCommitGPGSigning
+    let messageEncoding: String?
+    let usingTemplate: Bool
+    let ensureSecondLineEmpty: Bool
+
+    init(
+        message: String,
+        mode: RepositoryCommitMode,
+        stageAllBeforeCommit: Bool,
+        allowEmpty: Bool,
+        signOff: Bool,
+        author: String?,
+        resetAuthor: Bool,
+        noVerify: Bool = false,
+        gpgSigning: RepositoryCommitGPGSigning = .gitDefault,
+        messageEncoding: String? = nil,
+        usingTemplate: Bool = false,
+        ensureSecondLineEmpty: Bool = true
+    ) {
+        self.message = message
+        self.mode = mode
+        self.stageAllBeforeCommit = stageAllBeforeCommit
+        self.allowEmpty = allowEmpty
+        self.signOff = signOff
+        self.author = author
+        self.resetAuthor = resetAuthor
+        self.noVerify = noVerify
+        self.gpgSigning = gpgSigning
+        self.messageEncoding = messageEncoding
+        self.usingTemplate = usingTemplate
+        self.ensureSecondLineEmpty = ensureSecondLineEmpty
+    }
+}
+
+struct RepositoryCommitState: Sendable {
+    let mutationState: RepositoryMutationState
+    let message: String
+    let loadedTemplate: String?
+    let commitEncoding: String
+    let previousMessages: [String]
+    let committer: String
+    let isMergeCommit: Bool
+    let rememberedAmend: Bool
+    let messageLoadError: String?
+}
+
+enum RepositoryResetChangesScope: Hashable, Sendable {
+    case worktree
+    case all
+}
+
+struct RepositoryResetChangesRequest: Hashable, Sendable {
+    let scope: RepositoryResetChangesScope
+    let deleteUntracked: Bool
 }
 
 struct RepositoryStashCreateRequest: Hashable, Sendable {
@@ -135,8 +205,13 @@ enum RepositoryMutationError: LocalizedError, Sendable {
     case invalidBranchName(String)
     case noPaths
     case hunkUnavailable
+    case lineSelectionUnavailable
     case emptyCommitMessage
     case nothingStaged
+    case invalidAuthor(String)
+    case invalidCommitEncoding(String)
+    case commitMessageNotRepresentable(String)
+    case configuredTemplateMissing(String)
     case unresolvedConflicts([String])
     case invalidStash(String)
     case noStashes
@@ -164,10 +239,20 @@ enum RepositoryMutationError: LocalizedError, Sendable {
             "Select at least one file."
         case .hunkUnavailable:
             "The selected diff line is not part of an applicable hunk."
+        case .lineSelectionUnavailable:
+            "Select at least one added or removed diff line."
         case .emptyCommitMessage:
             "Please enter a commit message."
         case .nothingStaged:
             "There are no staged changes to commit."
+        case .invalidAuthor(let author):
+            "Author must use the format Name <email@example.com>; received ‘\(author)’."
+        case .invalidCommitEncoding(let encoding):
+            "The configured commit encoding ‘\(encoding)’ is not supported."
+        case .commitMessageNotRepresentable(let encoding):
+            "The commit message contains characters that cannot be represented using \(encoding)."
+        case .configuredTemplateMissing(let path):
+            "The configured commit template could not be found at \(path)."
         case .unresolvedConflicts(let paths):
             "Resolve and stage all conflicts before committing: \(paths.joined(separator: ", "))"
         case .invalidStash(let selector):
@@ -208,7 +293,13 @@ protocol RepositoryMutatingDataSource: RepositoryBrowsingDataSource {
     func stageAll() async throws -> RepositoryMutationResult
     func unstageAll() async throws -> RepositoryMutationResult
     func applyHunk(_ selection: RepositoryHunkSelection) async throws -> RepositoryMutationResult
+    func applyLines(_ selection: RepositoryLineSelection) async throws -> RepositoryMutationResult
+    func loadCommitState(historyLimit: Int, showOnlyMyMessages: Bool, rememberAmend: Bool) async throws -> RepositoryCommitState
+    func saveCommitDraft(message: String, amend: Bool, rememberAmend: Bool, encoding: String?) async throws
     func commit(_ request: RepositoryCommitRequest) async throws -> RepositoryMutationResult
+    func resetChanges(_ request: RepositoryResetChangesRequest) async throws -> RepositoryMutationResult
+    func resetSoftToParent() async throws -> RepositoryMutationResult
+    func createBranch(named name: String) async throws -> RepositoryMutationResult
     func createStash(_ request: RepositoryStashCreateRequest) async throws -> RepositoryMutationResult
     func applyStash(_ stash: Stash) async throws -> RepositoryMutationResult
     func popStash(_ stash: Stash?) async throws -> RepositoryMutationResult
@@ -290,8 +381,19 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
         let repository = try mutationRepository()
         let paths = normalizedPaths(paths)
         guard !paths.isEmpty else { throw RepositoryMutationError.noPaths }
-        _ = try await checkedMutation(["add", "--all", "--"] + paths, in: repository)
-        return try await refreshedMutationResult(message: "Staged \(paths.count) path(s).", selectedCommitID: "$working-directory")
+        var applicablePaths: [String] = []
+        for path in paths {
+            let worktreeURL = repository.rootURL.appendingPathComponent(path)
+            if FileManager.default.fileExists(atPath: worktreeURL.path) {
+                applicablePaths.append(path)
+                continue
+            }
+            let tracked = try await rawMutation(["ls-files", "--error-unmatch", "--", path], in: repository)
+            if tracked.succeeded { applicablePaths.append(path) }
+        }
+        guard !applicablePaths.isEmpty else { throw RepositoryMutationError.noPaths }
+        _ = try await checkedMutation(["add", "--all", "--"] + applicablePaths, in: repository)
+        return try await refreshedMutationResult(message: "Staged \(applicablePaths.count) path(s).", selectedCommitID: "$working-directory")
     }
 
     func unstage(paths: [String]) async throws -> RepositoryMutationResult {
@@ -343,6 +445,150 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
         return try await refreshedMutationResult(message: "\(verb) selected hunk in \(selection.file.path).", selectedCommitID: selectedID)
     }
 
+    func applyLines(_ selection: RepositoryLineSelection) async throws -> RepositoryMutationResult {
+        let repository = try mutationRepository()
+        guard let patch = GitSelectedLinePatchBuilder.patch(
+            from: selection.diff,
+            selecting: selection.lineIDs,
+            direction: selection.direction,
+            isNewFile: selection.file.changeType == .added,
+            isRenamedFile: selection.file.changeType == .renamed
+        ) else {
+            throw RepositoryMutationError.lineSelectionUnavailable
+        }
+        var arguments = ["apply", "--cached", "--index", "--whitespace=nowarn"]
+        if selection.direction == .unstage { arguments.append("--reverse") }
+        let result = try await git.run(
+            arguments: arguments,
+            in: repository.rootURL,
+            standardInput: patch,
+            environment: [:]
+        )
+        guard result.succeeded else { throw commandError(from: result) }
+        let verb = selection.direction == .stage ? "Staged" : "Unstaged"
+        let selectedID = selection.direction == .stage ? "$working-directory" : "$index"
+        return try await refreshedMutationResult(
+            message: "\(verb) \(selection.lineIDs.count) selected line(s) in \(selection.file.path).",
+            selectedCommitID: selectedID
+        )
+    }
+
+    func loadCommitState(
+        historyLimit: Int,
+        showOnlyMyMessages: Bool,
+        rememberAmend: Bool
+    ) async throws -> RepositoryCommitState {
+        let repository = try mutationRepository()
+        let mutationState = try await mutationState(in: repository)
+        let encodingName = await commitEncodingName(in: repository)
+        var messageLoadError: String?
+        let encoding: String.Encoding
+        do {
+            encoding = try GitCommitMessageFormatter.encoding(named: encodingName)
+        } catch {
+            encoding = .utf8
+            messageLoadError = error.localizedDescription
+        }
+        let mergeURL = repository.gitDirectoryURL.appendingPathComponent("MERGE_MSG")
+        let draftURL = repository.gitDirectoryURL.appendingPathComponent("COMMITMESSAGE")
+        let amendURL = repository.gitDirectoryURL.appendingPathComponent("GitExtensions.amend")
+        let isMerge = FileManager.default.fileExists(atPath: mergeURL.path)
+
+        var loadedTemplate: String?
+        var message = ""
+        let messageURL = isMerge ? mergeURL : draftURL
+        if FileManager.default.fileExists(atPath: messageURL.path) {
+            do {
+                message = try readCommitText(at: messageURL, encoding: encoding, encodingName: encodingName)
+            } catch {
+                messageLoadError = error.localizedDescription
+            }
+        } else if !isMerge {
+            let configured = try await rawMutation(["config", "--get", "commit.template"], in: repository)
+            if configured.succeeded {
+                let configuredPath = configured.standardOutputString.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !configuredPath.isEmpty {
+                    let expanded = NSString(string: configuredPath).expandingTildeInPath
+                    let templateURL = URL(fileURLWithPath: expanded, relativeTo: configuredPath.hasPrefix("/") ? nil : repository.rootURL).standardizedFileURL
+                    if !FileManager.default.fileExists(atPath: templateURL.path) {
+                        messageLoadError = RepositoryMutationError.configuredTemplateMissing(templateURL.path).localizedDescription
+                    } else {
+                        do {
+                            let template = try readCommitText(at: templateURL, encoding: encoding, encodingName: encodingName)
+                            loadedTemplate = template
+                            message = template
+                        } catch {
+                            messageLoadError = error.localizedDescription
+                        }
+                    }
+                }
+            }
+        }
+
+        async let nameResult = rawMutation(["config", "--get", "user.name"], in: repository)
+        async let emailResult = rawMutation(["config", "--get", "user.email"], in: repository)
+        let name = try await nameResult.standardOutputString.trimmingCharacters(in: .whitespacesAndNewlines)
+        let email = try await emailResult.standardOutputString.trimmingCharacters(in: .whitespacesAndNewlines)
+        let committer = name.isEmpty && email.isEmpty ? "Not configured" : "\(name) <\(email)>"
+
+        var logArguments = ["log", "-\(max(1, historyLimit))", "--format=%B%x00"]
+        if showOnlyMyMessages, !name.isEmpty, !email.isEmpty {
+            logArguments += ["--author=^\(NSRegularExpression.escapedPattern(for: name)) <\(NSRegularExpression.escapedPattern(for: email))>$"]
+        }
+        let log = try await rawMutation(logArguments, in: repository)
+        let messages = log.succeeded
+            ? log.standardOutputString.split(separator: "\0", omittingEmptySubsequences: true)
+                .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            : []
+        let rememberedAmend = rememberAmend
+            && FileManager.default.fileExists(atPath: amendURL.path)
+            && ((try? String(contentsOf: amendURL, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "true")
+
+        return RepositoryCommitState(
+            mutationState: mutationState,
+            message: message,
+            loadedTemplate: loadedTemplate,
+            commitEncoding: encodingName,
+            previousMessages: Array(messages.prefix(max(1, historyLimit))),
+            committer: committer,
+            isMergeCommit: isMerge,
+            rememberedAmend: rememberedAmend,
+            messageLoadError: messageLoadError
+        )
+    }
+
+    func saveCommitDraft(
+        message: String,
+        amend: Bool,
+        rememberAmend: Bool,
+        encoding: String?
+    ) async throws {
+        let repository = try mutationRepository()
+        let configuredEncoding = encoding?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let encodingName: String
+        if let configuredEncoding, !configuredEncoding.isEmpty {
+            encodingName = configuredEncoding
+        } else {
+            encodingName = await commitEncodingName(in: repository)
+        }
+        let stringEncoding = try GitCommitMessageFormatter.encoding(named: encodingName)
+        guard let data = message.data(using: stringEncoding, allowLossyConversion: false) else {
+            throw RepositoryMutationError.commitMessageNotRepresentable(encodingName)
+        }
+        let mergeURL = repository.gitDirectoryURL.appendingPathComponent("MERGE_MSG")
+        let destination = FileManager.default.fileExists(atPath: mergeURL.path)
+            ? mergeURL
+            : repository.gitDirectoryURL.appendingPathComponent("COMMITMESSAGE")
+        try data.write(to: destination, options: .atomic)
+        let amendURL = repository.gitDirectoryURL.appendingPathComponent("GitExtensions.amend")
+        if rememberAmend, amend {
+            try Data("True".utf8).write(to: amendURL, options: .atomic)
+        } else if FileManager.default.fileExists(atPath: amendURL.path) {
+            try FileManager.default.removeItem(at: amendURL)
+        }
+    }
+
     func commit(_ request: RepositoryCommitRequest) async throws -> RepositoryMutationResult {
         let repository = try mutationRepository()
         guard !request.message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -364,29 +610,55 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
             throw RepositoryMutationError.nothingStaged
         }
 
-        var arguments = ["commit"]
-        if isAmend { arguments.append("--amend") }
-        if request.mode == .amendMessageOnly {
-            arguments += ["--only", "--allow-empty"]
-        } else if request.allowEmpty {
-            arguments.append("--allow-empty")
+        let author = request.author?
+            .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "\"")))
+        if let author, !author.isEmpty,
+           author.range(of: #"^.+\s<[^<>]+>$"#, options: .regularExpression) == nil {
+            throw RepositoryMutationError.invalidAuthor(author)
         }
-        if request.signOff { arguments.append("--signoff") }
-        if let author = request.author?.trimmingCharacters(in: .whitespacesAndNewlines), !author.isEmpty {
-            arguments += ["--author", author]
+        let configuredEncoding = request.messageEncoding?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let encodingName: String
+        if let configuredEncoding, !configuredEncoding.isEmpty {
+            encodingName = configuredEncoding
+        } else {
+            encodingName = await commitEncodingName(in: repository)
         }
-        if request.resetAuthor, isAmend { arguments.append("--reset-author") }
-        arguments += ["--file=-"]
+        let messageEncoding = try GitCommitMessageFormatter.encoding(named: encodingName)
+        let formattedMessage = GitCommitMessageFormatter.format(
+            request.message,
+            usingTemplate: request.usingTemplate,
+            ensureSecondLineEmpty: request.ensureSecondLineEmpty
+        )
+        guard !formattedMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw RepositoryMutationError.emptyCommitMessage
+        }
+        guard let messageData = formattedMessage.data(using: messageEncoding, allowLossyConversion: false) else {
+            throw RepositoryMutationError.commitMessageNotRepresentable(encodingName)
+        }
+        let isMerge = FileManager.default.fileExists(atPath: repository.gitDirectoryURL.appendingPathComponent("MERGE_MSG").path)
+        let messageURL = repository.gitDirectoryURL.appendingPathComponent(isMerge ? "MERGE_MSG" : "COMMITMESSAGE")
+        try messageData.write(to: messageURL, options: .atomic)
 
-        var messageData = Data(request.message.utf8)
-        if messageData.last != 10 { messageData.append(10) }
+        let arguments = GitCommitCommandBuilder.arguments(
+            request: request,
+            messageFile: messageURL.path,
+            hasStagedChanges: state.hasStagedChanges,
+            normalizedAuthor: author
+        )
         let result = try await git.run(
             arguments: arguments,
             in: repository.rootURL,
-            standardInput: messageData,
+            standardInput: nil,
             environment: [:]
         )
         guard result.succeeded else { throw commandError(from: result) }
+
+        for name in ["COMMITMESSAGE", "GitExtensions.amend"] {
+            let url = repository.gitDirectoryURL.appendingPathComponent(name)
+            if FileManager.default.fileExists(atPath: url.path) {
+                try? FileManager.default.removeItem(at: url)
+            }
+        }
 
         let snapshot = try await loadSnapshot()
         let headID = snapshot.commits.first(where: \.isHEAD)?.id
@@ -398,6 +670,36 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
             outcome: .completed,
             message: "\(verb) commit \(headID.map { String($0.prefix(8)) } ?? "")."
         )
+    }
+
+    func resetChanges(_ request: RepositoryResetChangesRequest) async throws -> RepositoryMutationResult {
+        let repository = try mutationRepository()
+        switch request.scope {
+        case .worktree:
+            _ = try await checkedMutation(["checkout", "--", "."], in: repository)
+        case .all:
+            _ = try await checkedMutation(["reset", "--hard"], in: repository)
+        }
+        if request.deleteUntracked {
+            _ = try await checkedMutation(["clean", "-d", "-f"], in: repository)
+        }
+        return try await refreshedMutationResult(message: "Reset repository changes.", selectedCommitID: "$working-directory")
+    }
+
+    func resetSoftToParent() async throws -> RepositoryMutationResult {
+        let repository = try mutationRepository()
+        _ = try await checkedMutation(["reset", "--soft", "HEAD~1"], in: repository)
+        return try await refreshedMutationResult(message: "Soft-reset HEAD to its parent.", selectedCommitID: "$index")
+    }
+
+    func createBranch(named name: String) async throws -> RepositoryMutationResult {
+        let repository = try mutationRepository()
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { throw RepositoryMutationError.invalidBranchName(name) }
+        let valid = try await rawMutation(["check-ref-format", "--branch", name], in: repository)
+        guard valid.succeeded else { throw RepositoryMutationError.invalidBranchName(name) }
+        _ = try await checkedMutation(["checkout", "-b", name], in: repository)
+        return try await refreshedMutationResult(message: "Created and checked out \(name).", selectedCommitID: nil)
     }
 
     func createStash(_ request: RepositoryStashCreateRequest) async throws -> RepositoryMutationResult {
@@ -1058,6 +1360,21 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
         return paths.filter { !$0.isEmpty && seen.insert($0).inserted }
     }
 
+    private func commitEncodingName(in repository: ResolvedGitRepository) async -> String {
+        guard let result = try? await rawMutation(["config", "--get", "i18n.commitEncoding"], in: repository),
+              result.succeeded else { return "UTF-8" }
+        let value = result.standardOutputString.trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? "UTF-8" : value
+    }
+
+    private func readCommitText(at url: URL, encoding: String.Encoding, encodingName: String) throws -> String {
+        let data = try Data(contentsOf: url)
+        guard let value = String(data: data, encoding: encoding) else {
+            throw RepositoryMutationError.commitMessageNotRepresentable(encodingName)
+        }
+        return value
+    }
+
     private func refreshedMutationResult(message: String, selectedCommitID: String?) async throws -> RepositoryMutationResult {
         let snapshot = try await loadSnapshot()
         let repository = try mutationRepository()
@@ -1077,7 +1394,7 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
         async let branchResult = checkedMutation(["branch", "--show-current"], in: repository)
         async let headResult = rawMutation(["rev-parse", "--verify", "HEAD"], in: repository)
         async let statusResult = checkedMutation(
-            ["--no-optional-locks", "status", "--porcelain=2", "-z", "--untracked-files=normal"],
+            ["--no-optional-locks", "status", "--porcelain=2", "-z", "--untracked-files=all"],
             in: repository
         )
         let branch = try await branchResult.standardOutputString.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1112,11 +1429,83 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
     }
 
     private func commandError(from result: GitCommandResult) -> GitError {
-        GitError.commandFailed(
+        let standardOutput = result.standardOutputString.trimmingCharacters(in: .whitespacesAndNewlines)
+        let standardError = result.standardErrorString.trimmingCharacters(in: .whitespacesAndNewlines)
+        let detail: String
+        if !standardOutput.isEmpty, !standardError.isEmpty {
+            detail = "stdout:\n\(standardOutput)\n\nstderr:\n\(standardError)"
+        } else {
+            detail = standardError.isEmpty ? standardOutput : standardError
+        }
+        return GitError.commandFailed(
             arguments: result.arguments,
             status: result.exitStatus,
-            stderr: result.standardErrorString.isEmpty ? result.standardOutputString : result.standardErrorString
+            stderr: detail
         )
+    }
+}
+
+enum GitCommitCommandBuilder {
+    static func arguments(
+        request: RepositoryCommitRequest,
+        messageFile: String,
+        hasStagedChanges: Bool,
+        normalizedAuthor: String? = nil
+    ) -> [String] {
+        let isAmend = request.mode != .normal
+        var arguments = ["commit"]
+        if isAmend { arguments.append("--amend") }
+        if request.noVerify { arguments.append("--no-verify") }
+        if request.signOff { arguments.append("--signoff") }
+        let author = normalizedAuthor ?? request.author?
+            .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "\"")))
+        if let author, !author.isEmpty { arguments += ["--author", author] }
+        switch request.gpgSigning {
+        case .gitDefault:
+            break
+        case .doNotSign:
+            arguments.append("--no-gpg-sign")
+        case .signDefault:
+            arguments.append("--gpg-sign")
+        case .signSpecificKey(let key):
+            arguments.append("--gpg-sign=\(key.trimmingCharacters(in: .whitespacesAndNewlines))")
+        }
+        arguments += ["-F", messageFile]
+        if request.mode == .amendMessageOnly {
+            arguments += ["--only", "--allow-empty"]
+        } else if request.allowEmpty || (isAmend && !hasStagedChanges) {
+            arguments.append("--allow-empty")
+        }
+        if request.resetAuthor, isAmend { arguments.append("--reset-author") }
+        return arguments
+    }
+}
+
+enum GitCommitMessageFormatter {
+    static func format(
+        _ message: String,
+        usingTemplate: Bool,
+        ensureSecondLineEmpty: Bool
+    ) -> String {
+        guard !message.isEmpty else { return "" }
+        var result: [String] = []
+        var logicalLine = 1
+        for line in message.split(separator: "\n", omittingEmptySubsequences: false).map(String.init) {
+            if usingTemplate, line.hasPrefix("#") { continue }
+            if ensureSecondLineEmpty, logicalLine == 2, !line.isEmpty { result.append("") }
+            result.append(line)
+            logicalLine += 1
+        }
+        return result.joined(separator: "\n") + "\n"
+    }
+
+    static func encoding(named name: String) throws -> String.Encoding {
+        let normalized = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cfEncoding = CFStringConvertIANACharSetNameToEncoding(normalized as CFString)
+        guard cfEncoding != kCFStringEncodingInvalidId else {
+            throw RepositoryMutationError.invalidCommitEncoding(name)
+        }
+        return String.Encoding(rawValue: CFStringConvertEncodingToNSStringEncoding(cfEncoding))
     }
 }
 
@@ -1133,6 +1522,165 @@ enum GitHunkPatchBuilder {
         while text.hasSuffix("\n\n") { text.removeLast() }
         if !text.hasSuffix("\n") { text.append("\n") }
         return Data(text.utf8)
+    }
+
+    private static func serialize(_ line: DiffLine) -> String {
+        switch line.kind {
+        case .addition: "+" + line.text
+        case .deletion: "-" + line.text
+        case .context: " " + line.text
+        case .header, .hunk: line.text
+        }
+    }
+}
+
+enum GitSelectedLinePatchBuilder {
+    private struct HunkRange {
+        let start: Int
+        let end: Int
+    }
+
+    static func patch(
+        from diff: FileDiff,
+        selecting lineIDs: Set<String>,
+        direction: RepositoryHunkDirection,
+        isNewFile: Bool = false,
+        isRenamedFile: Bool = false
+    ) -> Data? {
+        let selectedChangedIDs = Set(diff.lines.filter {
+            lineIDs.contains($0.id) && ($0.kind == .addition || $0.kind == .deletion)
+        }.map(\.id))
+        guard !selectedChangedIDs.isEmpty,
+              let firstHunk = diff.lines.firstIndex(where: { $0.kind == .hunk }) else { return nil }
+
+        let hunkStarts = diff.lines.indices.filter { diff.lines[$0].kind == .hunk }
+        let ranges = hunkStarts.enumerated().map { offset, start in
+            HunkRange(start: start, end: offset + 1 < hunkStarts.count ? hunkStarts[offset + 1] : diff.lines.endIndex)
+        }
+        var output = Array(diff.lines[..<firstHunk]).map(serialize)
+        if direction == .unstage, isNewFile {
+            output = correctedNewFileHeader(output)
+        } else if direction == .unstage, isRenamedFile {
+            output = correctedRenamedFileHeader(output)
+        }
+        var emittedHunk = false
+
+        for range in ranges {
+            let body = Array(diff.lines[(range.start + 1)..<range.end])
+            guard body.contains(where: { selectedChangedIDs.contains($0.id) }) else { continue }
+            guard let startLine = parseOldStart(diff.lines[range.start].text) else { continue }
+            var rewritten: [String] = []
+            var oldCount = 0
+            var newCount = 0
+            var previousPatchLine: DiffLine?
+
+            for line in body {
+                switch line.kind {
+                case .context:
+                    rewritten.append(" " + line.text)
+                    oldCount += 1
+                    newCount += 1
+                    previousPatchLine = line
+                case .deletion:
+                    if selectedChangedIDs.contains(line.id) {
+                        rewritten.append("-" + line.text)
+                        oldCount += 1
+                    } else if direction == .stage {
+                        rewritten.append(" " + line.text)
+                        oldCount += 1
+                        newCount += 1
+                    }
+                    previousPatchLine = line
+                case .addition:
+                    if selectedChangedIDs.contains(line.id) {
+                        rewritten.append("+" + line.text)
+                        newCount += 1
+                    } else if direction == .unstage {
+                        rewritten.append(" " + line.text)
+                        oldCount += 1
+                        newCount += 1
+                    }
+                    previousPatchLine = line
+                case .header:
+                    if line.text.hasPrefix("\\ No newline at end of file"),
+                       shouldEmitNoNewlineMarker(
+                           after: previousPatchLine,
+                           direction: direction,
+                           selectedChangedIDs: selectedChangedIDs
+                       ) {
+                        rewritten.append(line.text)
+                    }
+                case .hunk:
+                    break
+                }
+            }
+            guard rewritten.contains(where: { $0.hasPrefix("+") || $0.hasPrefix("-") }) else { continue }
+            output.append("@@ -\(startLine),\(oldCount) +\(startLine),\(newCount) @@")
+            output.append(contentsOf: rewritten)
+            emittedHunk = true
+        }
+
+        guard emittedHunk else { return nil }
+        var text = output.joined(separator: "\n")
+        if !text.hasSuffix("\n") { text.append("\n") }
+        return Data(text.utf8)
+    }
+
+    private static func parseOldStart(_ header: String) -> Int? {
+        let fields = header.split(separator: " ")
+        guard fields.count >= 2 else { return nil }
+        return Int(fields[1].dropFirst().split(separator: ",", maxSplits: 1)[0])
+    }
+
+    private static func correctedNewFileHeader(_ lines: [String]) -> [String] {
+        guard let newPath = lines.first(where: { $0.hasPrefix("+++ ") }).map({ String($0.dropFirst(4)) }),
+              newPath != "/dev/null" else { return lines }
+        return lines.compactMap { line in
+            if line.hasPrefix("new file mode ") { return nil }
+            if line.hasPrefix("--- ") {
+                let oldPath = newPath.hasPrefix("\"b/")
+                    ? "\"a/" + newPath.dropFirst(3)
+                    : newPath.replacingOccurrences(of: "b/", with: "a/", options: .anchored)
+                return "--- \(oldPath)"
+            }
+            return line
+        }
+    }
+
+    private static func correctedRenamedFileHeader(_ lines: [String]) -> [String] {
+        guard let newPath = lines.first(where: { $0.hasPrefix("+++ ") }).map({ String($0.dropFirst(4)) }),
+              newPath != "/dev/null" else { return lines }
+        let oldPath = newPath.hasPrefix("\"b/")
+            ? "\"a/" + newPath.dropFirst(3)
+            : newPath.replacingOccurrences(of: "b/", with: "a/", options: .anchored)
+        return lines.compactMap { line in
+            if line.hasPrefix("similarity index ")
+                || line.hasPrefix("rename from ")
+                || line.hasPrefix("rename to ") {
+                return nil
+            }
+            if line.hasPrefix("diff --git ") { return "diff --git \(oldPath) \(newPath)" }
+            if line.hasPrefix("--- ") { return "--- \(oldPath)" }
+            return line
+        }
+    }
+
+    private static func shouldEmitNoNewlineMarker(
+        after line: DiffLine?,
+        direction: RepositoryHunkDirection,
+        selectedChangedIDs: Set<String>
+    ) -> Bool {
+        guard let line else { return false }
+        switch line.kind {
+        case .context:
+            return true
+        case .deletion:
+            return direction == .stage || selectedChangedIDs.contains(line.id)
+        case .addition:
+            return direction == .unstage || selectedChangedIDs.contains(line.id)
+        case .header, .hunk:
+            return false
+        }
     }
 
     private static func serialize(_ line: DiffLine) -> String {

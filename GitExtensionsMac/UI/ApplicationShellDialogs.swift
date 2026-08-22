@@ -1,5 +1,16 @@
 import AppKit
 
+private final class NetworkHelpToggleButton: NSButton {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func mouseDown(with event: NSEvent) {
+        guard isEnabled else { return }
+        if let target, let action {
+            _ = NSApp.sendAction(action, to: target, from: self)
+        }
+    }
+}
+
 @MainActor
 final class RepositoryStartupViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate {
     var onOpenRepository: (() -> Void)?
@@ -351,7 +362,7 @@ private final class NetworkDialogViewController: NSViewController, NSWindowDeleg
     private var executeButton: NSButton?
     private let helpImageView = PullHelpImageView()
     private let helpNotice = NSTextField(labelWithString: "Hover to see scenario when fast forward is possible.")
-    private let helpToggle = NSButton()
+    private let helpToggle = NetworkHelpToggleButton()
     private var helpWidthConstraint: NSLayoutConstraint?
     private var isHelpExpanded = true
     private let mergeMode = NSButton(radioButtonWithTitle: "Merge remote branch into current branch", target: nil, action: nil)
@@ -842,32 +853,72 @@ final class PullHelpImageView: NSImageView {
     private var primaryImage: NSImage?
     private(set) var alternateImage: NSImage?
     private var tracking: NSTrackingArea?
+    private var hoverTimer: Timer?
+    private var isShowingAlternate = false
 
     func setImages(primary: NSImage?, alternate: NSImage?) {
         primaryImage = primary
         alternateImage = alternate
-        image = primary
+        showAlternate(false)
+        updateTrackingAreas()
+        refreshHoverState()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        hoverTimer?.invalidate()
+        hoverTimer = nil
+        window?.acceptsMouseMovedEvents = true
+        updateTrackingAreas()
+        guard window != nil else { return }
+        let timer = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.refreshHoverState()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        hoverTimer = timer
     }
 
     override func updateTrackingAreas() {
+        super.updateTrackingAreas()
         if let tracking { removeTrackingArea(tracking) }
         let area = NSTrackingArea(
-            rect: bounds,
-            options: [.mouseEnteredAndExited, .activeInKeyWindow],
+            rect: .zero,
+            options: [.mouseEnteredAndExited, .mouseMoved, .activeInActiveApp, .inVisibleRect],
             owner: self,
             userInfo: nil
         )
         addTrackingArea(area)
         tracking = area
-        super.updateTrackingAreas()
     }
 
     override func mouseEntered(with event: NSEvent) {
-        if let alternateImage { image = alternateImage }
+        showAlternate(true)
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        showAlternate(true)
     }
 
     override func mouseExited(with event: NSEvent) {
-        image = primaryImage
+        showAlternate(false)
+    }
+
+    private func refreshHoverState() {
+        guard let window, window.isKeyWindow, !isHidden, alternateImage != nil else {
+            showAlternate(false)
+            return
+        }
+        let pointInWindow = window.convertPoint(fromScreen: NSEvent.mouseLocation)
+        showAlternate(bounds.contains(convert(pointInWindow, from: nil)))
+    }
+
+    private func showAlternate(_ shouldShow: Bool) {
+        let resolved = shouldShow && alternateImage != nil
+        guard resolved != isShowingAlternate || image == nil else { return }
+        isShowingAlternate = resolved
+        image = resolved ? alternateImage : primaryImage
     }
 }
 
@@ -937,6 +988,7 @@ private final class SettingsViewController: NSViewController, NSOutlineViewDataS
     private let store: AppSettingsStore
     private var draft: AppPreferences
     private var pushDraft: PushPreferences
+    private var commitDraft: CommitPreferences
     private lazy var roots: [SettingsNode] = [
         SettingsNode("application", "Git Extensions", [
             SettingsNode("general", "General"),
@@ -975,6 +1027,7 @@ private final class SettingsViewController: NSViewController, NSOutlineViewDataS
         self.store = store
         draft = store.preferences
         pushDraft = store.pushPreferences
+        commitDraft = store.commitPreferences
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -1156,8 +1209,25 @@ private final class SettingsViewController: NSViewController, NSOutlineViewDataS
             content.addArrangedSubview(toggle("Ignore whitespace", value: draft.ignoreWhitespace) { self.draft.ignoreWhitespace = $0 })
             content.addArrangedSubview(note("Diff options are persisted; backend application is tracked for a later parity pass."))
         case "commit":
-            content.addArrangedSubview(toggle("Sign-off commit by default", value: draft.defaultSignOff) { self.draft.defaultSignOff = $0 })
-            content.addArrangedSubview(toggle("Allow empty commit by default", value: draft.defaultAllowEmpty) { self.draft.defaultAllowEmpty = $0 })
+            content.addArrangedSubview(settingsGroup("Commit defaults", [
+                toggle("Sign-off commit by default", value: draft.defaultSignOff) { self.draft.defaultSignOff = $0 },
+                toggle("Allow empty commit by default", value: draft.defaultAllowEmpty) { self.draft.defaultAllowEmpty = $0 },
+                toggle("Ensure the second line of a commit message is empty", value: commitDraft.ensureSecondLineEmpty) { self.commitDraft.ensureSecondLineEmpty = $0 },
+                toggle("Remember amend mode", value: commitDraft.rememberAmendState) { self.commitDraft.rememberAmendState = $0 },
+                toggle("Select a staged file when the message receives focus", value: commitDraft.selectStagedOnMessageFocus) { self.commitDraft.selectStagedOnMessageFocus = $0 }
+            ]))
+            content.addArrangedSubview(settingsGroup("Commit window", [
+                stepper("Commit-message history entries:", value: commitDraft.historyLimit, range: 1...999) { self.commitDraft.historyLimit = $0 },
+                toggle("Only show my commit messages in history", value: commitDraft.showOnlyMyMessages) { self.commitDraft.showOnlyMyMessages = $0 },
+                toggle("Close after each successful commit", value: commitDraft.closeAfterCommit) { self.commitDraft.closeAfterCommit = $0 },
+                toggle("Close after the last commit", value: commitDraft.closeAfterLastCommit) { self.commitDraft.closeAfterLastCommit = $0 },
+                toggle("Refresh changes when the Commit window receives focus", value: commitDraft.refreshOnFocus) { self.commitDraft.refreshOnFocus = $0 }
+            ]))
+            content.addArrangedSubview(settingsGroup("Visible commands", [
+                toggle("Show Commit & Push", value: commitDraft.showCommitAndPush) { self.commitDraft.showCommitAndPush = $0 },
+                toggle("Show Reset unstaged changes", value: commitDraft.showResetUnstaged) { self.commitDraft.showResetUnstaged = $0 },
+                toggle("Show Reset all changes", value: commitDraft.showResetAll) { self.commitDraft.showResetAll = $0 }
+            ]))
         case "git_advanced":
             content.addArrangedSubview(toggle("Auto stash", value: draft.autoStashDuringRebase) { self.draft.autoStashDuringRebase = $0 })
         case "hotkeys":
@@ -1169,11 +1239,16 @@ private final class SettingsViewController: NSViewController, NSOutlineViewDataS
         case "advanced":
             content.addArrangedSubview(toggle("Always show advanced options", value: pushDraft.showAdvancedOptions) { self.pushDraft.showAdvancedOptions = $0 })
             content.addArrangedSubview(pathField("Signing key:", value: draft.signingKey) { self.draft.signingKey = $0 })
-            content.addArrangedSubview(note("GPG signing is not implemented."))
+            content.addArrangedSubview(note("The Commit window can use Git's configured signing behavior, disable signing, sign with the default key, or pass this key explicitly."))
         case "confirmations":
             content.addArrangedSubview(settingsGroup("Confirm actions — Branches", [
                 toggle("Push a new branch for the remote", value: pushDraft.confirmNewBranch) { self.pushDraft.confirmNewBranch = $0 },
                 toggle("Add a tracking reference for newly pushed branch", value: pushDraft.confirmAddTrackingReference) { self.pushDraft.confirmAddTrackingReference = $0 }
+            ]))
+            content.addArrangedSubview(settingsGroup("Confirm actions — Commit", [
+                toggle("Amend the current commit", value: commitDraft.confirmAmend) { self.commitDraft.confirmAmend = $0 },
+                toggle("Commit while HEAD is detached", value: commitDraft.confirmDetachedHead) { self.commitDraft.confirmDetachedHead = $0 },
+                toggle("Use force-with-lease when pushing an amended commit", value: commitDraft.forceWithLeaseAfterAmend) { self.commitDraft.forceWithLeaseAfterAmend = $0 }
             ]))
         case "scripts":
             content.addArrangedSubview(pathField("Shell:", value: draft.shellPath) { self.draft.shellPath = $0 })
@@ -1282,11 +1357,13 @@ private final class SettingsViewController: NSViewController, NSOutlineViewDataS
         guard validate() else { return }
         store.save(draft)
         store.savePushPreferences(pushDraft)
+        store.saveCommitPreferences(commitDraft)
     }
     @objc private func saveAndClose() {
         guard validate() else { return }
         store.save(draft)
         store.savePushPreferences(pushDraft)
+        store.saveCommitPreferences(commitDraft)
         finish(.OK)
     }
     @objc private func cancel() { finish(.cancel) }

@@ -323,7 +323,7 @@ actor GitRepositoryBrowsingDataSource: RepositoryOpeningDataSource {
 
     private func loadStatus(repository: ResolvedGitRepository) async throws -> [GitStatusRecord] {
         let output = try await run(arguments: [
-            "--no-optional-locks", "status", "--porcelain=2", "-z", "--untracked-files=normal"
+            "--no-optional-locks", "status", "--porcelain=2", "-z", "--untracked-files=all"
         ], repository: repository)
         return try GitOutputParser.parsePorcelainV2(output.standardOutput)
     }

@@ -16,6 +16,8 @@ private enum RevisionGraphLayoutTests {
         testUpstreamReducedCrossingFixture()
         testUpstreamDiagonalCrossingFixture()
         testOctopusMergeIsCappedAndDeterministic()
+        testRevisionSelectionRestoration()
+        testAuthorAvatarPresentation()
         ContextMenuStateTests.run()
         RepositoryDetailModelTests.run()
         AppSettingsTests.run()
@@ -305,6 +307,59 @@ private enum RevisionGraphLayoutTests {
                         && (edge.bottomLane ?? 0) < RevisionGraphLayout.maximumVisibleLanes
                 }
         }, "octopus: no emitted geometry exceeds the cap")
+    }
+
+    private static func testRevisionSelectionRestoration() {
+        let previous = history((0...600).map { index in
+            ("r\(index)", index == 600 ? [] : ["r\(index + 1)"])
+        })
+        let refreshed = previous
+        expect(
+            RevisionSelectionRestorer.restoredID(
+                requestedID: "r500",
+                previousCommits: previous,
+                refreshedCommits: refreshed
+            ) == "r500",
+            "refresh retains an existing selection hundreds of rows down"
+        )
+
+        let withoutSelected = refreshed.filter { $0.id != "r500" }
+        expect(
+            RevisionSelectionRestorer.restoredID(
+                requestedID: "r500",
+                previousCommits: previous,
+                refreshedCommits: withoutSelected
+            ) == "r501",
+            "missing selection falls back to its nearest surviving parent"
+        )
+
+        let head = Commit(
+            id: "new-head", shortID: "new", subject: "new", body: "", authorName: "Test", authorEmail: "test@example.com",
+            authorDate: .distantPast, committerName: "Test", committerEmail: "test@example.com", commitDate: .distantPast,
+            parentIDs: [], references: [RevisionReference(id: "HEAD", name: "main", kind: .head)]
+        )
+        expect(
+            RevisionSelectionRestorer.restoredID(
+                requestedID: "missing",
+                previousCommits: [],
+                refreshedCommits: [head]
+            ) == "new-head",
+            "unrelated missing selection falls back to checkout"
+        )
+    }
+
+    private static func testAuthorAvatarPresentation() {
+        expect(
+            AuthorAvatarPresentation.make(name: "Albert Einstein", email: "albert@example.com").initials == "AE",
+            "avatar uses first and last author initials"
+        )
+        expect(
+            AuthorAvatarPresentation.make(name: "", email: "albert.einstein@example.com").initials == "AE",
+            "avatar derives initials from the email local part"
+        )
+        let first = AuthorAvatarPresentation.make(name: "Albert Einstein", email: "albert@example.com")
+        let second = AuthorAvatarPresentation.make(name: "Albert Einstein", email: "albert@example.com")
+        expect(first == second, "avatar color and initials are deterministic")
     }
 
     private static func history(_ specs: [(String, [String])]) -> [Commit] {

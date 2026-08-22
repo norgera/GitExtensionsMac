@@ -193,6 +193,7 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
             let index = requestedIndex ?? (selectFirst ? filteredCommits.firstIndex(where: { !$0.isArtificial }) ?? 0 : 0)
             self.pendingSelectionID = nil
             self.tableView.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
+            self.tableView.scrollRowToVisible(index)
             self.onSelection?(filteredCommits[index])
         }
     }
@@ -487,6 +488,8 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
             where: { identifier in
                 identifier == "revision.commit.checkout"
                     || identifier == "revision.commit.amend"
+                    || identifier == "revision.commit.fixup"
+                    || identifier == "revision.commit.squash"
                     || identifier == "revision.commit.cherryPick"
                     || identifier == "revision.cherryPick.continue"
                     || identifier == "revision.cherryPick.abort"

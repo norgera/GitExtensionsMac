@@ -7,7 +7,9 @@ enum PushDialog {
         snapshot: RepositorySnapshot,
         initialBranch: String? = nil,
         executeImmediately: Bool = false,
+        initialForceWithLease: Bool = false,
         onSnapshot: @escaping (RepositorySnapshot, String?) -> Void,
+        onCompletion: ((Bool) -> Void)? = nil,
         onClose: @escaping () -> Void
     ) -> NSWindowController {
         let controller = PushDialogViewController(
@@ -15,6 +17,7 @@ enum PushDialog {
             snapshot: snapshot,
             initialBranch: initialBranch,
             executeImmediately: executeImmediately,
+            initialForceWithLease: initialForceWithLease,
             onSnapshot: onSnapshot
         )
         let window = NSWindow(contentViewController: controller)
@@ -26,6 +29,7 @@ enum PushDialog {
         window.delegate = controller
         controller.window = window
         controller.onClose = onClose
+        controller.onCompletion = onCompletion
         let windowController = NSWindowController(window: window)
         windowController.showWindow(nil)
         window.makeKeyAndOrderFront(nil)
@@ -41,16 +45,19 @@ private final class PushDialogViewController: NSViewController,
 
     weak var window: NSWindow?
     var onClose: (() -> Void)?
+    var onCompletion: ((Bool) -> Void)?
 
     private let source: any RepositoryPushingDataSource
     private var snapshot: RepositorySnapshot
     private let initialBranch: String?
     private let executeImmediately: Bool
+    private let initialForceWithLease: Bool
     private let onSnapshot: (RepositorySnapshot, String?) -> Void
     private let settings = AppSettingsStore.shared
     private var pushState: RepositoryPushState?
     private var didClose = false
     private var didAttemptImmediateExecution = false
+    private var lastPushCompleted = false
     private var operationTask: Task<Void, Never>?
     private var remoteWindowController: NSWindowController?
     private var pullWindowController: NSWindowController?
@@ -85,12 +92,14 @@ private final class PushDialogViewController: NSViewController,
         snapshot: RepositorySnapshot,
         initialBranch: String?,
         executeImmediately: Bool,
+        initialForceWithLease: Bool,
         onSnapshot: @escaping (RepositorySnapshot, String?) -> Void
     ) {
         self.source = source
         self.snapshot = snapshot
         self.initialBranch = initialBranch
         self.executeImmediately = executeImmediately
+        self.initialForceWithLease = initialForceWithLease
         self.onSnapshot = onSnapshot
         super.init(nibName: nil, bundle: nil)
     }
@@ -405,6 +414,10 @@ private final class PushDialogViewController: NSViewController,
         localBranchCombo.addItems(withObjectValues: [Self.allRefs, Self.head] + state.localBranches.map(\.name))
         let desired = initialBranch ?? (!previous.isEmpty ? previous : (state.isDetached ? Self.head : state.currentBranch))
         localBranchCombo.stringValue = desired ?? ""
+        if initialForceWithLease {
+            forceWithLease.state = .on
+            forceBranches.state = .off
+        }
         updateRemoteBranchForLocalSelection()
     }
 
@@ -746,6 +759,7 @@ private final class PushDialogViewController: NSViewController,
                         onSnapshot(result.snapshot, result.selectedCommitID)
                         statusLabel.stringValue = result.message
                         if result.outcome == .completed {
+                            lastPushCompleted = true
                             openPullRequestIfRequested(request: request)
                             self.window?.close()
                             operationTask = nil
@@ -1075,6 +1089,7 @@ private final class PushDialogViewController: NSViewController,
         multipleBranchTask?.cancel()
         remoteWindowController?.close()
         pullWindowController?.close()
+        onCompletion?(lastPushCompleted)
         onClose?()
     }
 }

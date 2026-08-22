@@ -174,6 +174,75 @@ struct Commit: Identifiable, Hashable, Sendable {
     var isArtificial: Bool { kind != .revision }
 }
 
+enum RevisionSelectionRestorer {
+    static func restoredID(
+        requestedID: String?,
+        previousCommits: [Commit],
+        refreshedCommits: [Commit]
+    ) -> String? {
+        guard !refreshedCommits.isEmpty else { return nil }
+        let refreshedIDs = Set(refreshedCommits.map(\.id))
+        if let requestedID, refreshedIDs.contains(requestedID) {
+            return requestedID
+        }
+
+        if let requestedID,
+           let previous = previousCommits.first(where: { $0.id == requestedID }) {
+            let previousByID = Dictionary(uniqueKeysWithValues: previousCommits.map { ($0.id, $0) })
+            var pending = Array(previous.parentIDs.prefix(50))
+            var visited = Set<String>()
+            while !pending.isEmpty, visited.count < 50 {
+                let candidate = pending.removeFirst()
+                guard visited.insert(candidate).inserted else { continue }
+                if refreshedIDs.contains(candidate) { return candidate }
+                if let commit = previousByID[candidate] {
+                    pending.append(contentsOf: commit.parentIDs)
+                }
+            }
+        }
+
+        return refreshedCommits.first(where: \.isHEAD)?.id
+            ?? refreshedCommits.first(where: { !$0.isArtificial })?.id
+            ?? refreshedCommits.first?.id
+    }
+}
+
+struct AuthorAvatarPresentation: Equatable {
+    let initials: String
+    let paletteIndex: Int
+
+    static func make(name: String?, email: String?) -> AuthorAvatarPresentation {
+        let cleanName = name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let cleanEmail = email?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let selected = cleanName.isEmpty ? cleanEmail.split(separator: "@", maxSplits: 1).first.map(String.init) ?? "" : cleanName
+        let pieces = selected
+            .split(whereSeparator: { $0.isWhitespace || $0 == "." || $0 == "-" || $0 == "_" })
+            .map(String.init)
+            .filter { !$0.isEmpty }
+        let initials: String
+        if pieces.count > 1 {
+            initials = String(pieces[0].prefix(1) + pieces[pieces.count - 1].prefix(1)).uppercased()
+        } else if let value = pieces.first {
+            let uppercase = value.filter(\.isUppercase)
+            if uppercase.count > 1 {
+                initials = String(uppercase.prefix(1) + uppercase.suffix(1))
+            } else if value.count == 1 {
+                initials = value.uppercased()
+            } else {
+                initials = String(value.prefix(1)).uppercased() + String(value.dropFirst().prefix(1))
+            }
+        } else {
+            initials = "?"
+        }
+        var hash = Int32(23)
+        for scalar in cleanEmail.unicodeScalars {
+            hash = hash &* 31 &+ Int32(bitPattern: scalar.value)
+        }
+        let magnitude = hash == .min ? Int(Int32.max) : abs(Int(hash))
+        return AuthorAvatarPresentation(initials: initials, paletteIndex: magnitude % 6)
+    }
+}
+
 enum RevisionDiffSummaryResolver {
     static func summary(selected: Commit, comparison: Commit?) -> String {
         guard let comparison else {

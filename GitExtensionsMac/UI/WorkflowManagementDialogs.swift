@@ -312,13 +312,16 @@ private final class ConflictResolverViewController: NSViewController, NSTableVie
             initialMode: .normal,
             head: head,
             draft: nil,
-            owner: panel
-        ) { [weak self] request in
+            owner: panel,
+            onSnapshot: { [weak self] snapshot, _ in
+                guard let self else { return }
+                latestSnapshot = snapshot
+                finish(snapshot)
+            },
+            onClose: { [weak self] in
             guard let self else { return }
             commitWindowController = nil
-            guard let request else { return }
-            commitMerge(request)
-        }
+        })
     }
     private func commitMerge(_ request: RepositoryCommitRequest) {
         task?.cancel()

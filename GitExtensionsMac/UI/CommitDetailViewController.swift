@@ -5,7 +5,7 @@ final class CommitDetailViewController: NSViewController, NSMenuDelegate {
 
     private let documentView = FlippedView()
     private let stack = NSStackView()
-    private let avatar = InitialsAvatarView()
+    private let avatar = AuthorAvatarView()
     private let commitIDValue = NSTextField(labelWithString: "")
     private let authorValue = NSTextField(labelWithString: "")
     private let authorDateValue = NSTextField(labelWithString: "")
@@ -31,8 +31,8 @@ final class CommitDetailViewController: NSViewController, NSMenuDelegate {
         headerRow.spacing = 8
         avatar.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            avatar.widthAnchor.constraint(equalToConstant: 96),
-            avatar.heightAnchor.constraint(equalToConstant: 96)
+            avatar.widthAnchor.constraint(equalToConstant: 80),
+            avatar.heightAnchor.constraint(equalToConstant: 80)
         ])
 
         let grid = NSGridView(views: [
@@ -134,7 +134,7 @@ final class CommitDetailViewController: NSViewController, NSMenuDelegate {
 
     func apply(commit: Commit, relations: CommitRelations, history: [Commit]) {
         let shortIDByID = Dictionary(uniqueKeysWithValues: history.map { ($0.id, $0.shortID) })
-        avatar.initials = commit.authorName.split(separator: " ").prefix(2).compactMap(\.first).map(String.init).joined()
+        avatar.apply(name: commit.authorName, email: commit.authorEmail)
         commitIDValue.stringValue = commit.shortID
         authorValue.stringValue = "\(commit.authorName) <\(commit.authorEmail)>"
         authorDateValue.stringValue = Self.dateFormatter.string(from: commit.authorDate)
@@ -182,26 +182,38 @@ final class CommitDetailViewController: NSViewController, NSMenuDelegate {
     }()
 }
 
-final class InitialsAvatarView: NSView {
-    var initials = "" { didSet { needsDisplay = true } }
+final class AuthorAvatarView: NSView {
+    private var presentation = AuthorAvatarPresentation(initials: "?", paletteIndex: 0)
+    private static let palette: [NSColor] = [
+        NSColor(srgbRed: 0.439, green: 0.502, blue: 0.565, alpha: 1), // SlateGray
+        NSColor(srgbRed: 0.255, green: 0.412, blue: 0.882, alpha: 1), // RoyalBlue
+        NSColor(srgbRed: 0.502, green: 0, blue: 0.502, alpha: 1),     // Purple
+        NSColor(srgbRed: 1, green: 0.271, blue: 0, alpha: 1),         // OrangeRed
+        NSColor(srgbRed: 0, green: 0.502, blue: 0.502, alpha: 1),     // Teal
+        NSColor(srgbRed: 0.420, green: 0.557, blue: 0.137, alpha: 1)  // OliveDrab
+    ]
+
+    func apply(name: String?, email: String?) {
+        presentation = AuthorAvatarPresentation.make(name: name, email: email)
+        setAccessibilityLabel("Author avatar for \(name?.isEmpty == false ? name! : email ?? "unknown author")")
+        needsDisplay = true
+    }
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-        NSColor.systemBlue.withAlphaComponent(0.82).setFill()
-        let imageSize: CGFloat = 80
-        let imageRect = NSRect(
-            x: floor((bounds.width - imageSize) / 2),
-            y: floor((bounds.height - imageSize) / 2),
-            width: imageSize,
-            height: imageSize
-        )
-        NSBezierPath(ovalIn: imageRect).fill()
+        let color = Self.palette[presentation.paletteIndex % Self.palette.count]
+        color.setFill()
+        bounds.fill()
+        let luminance = 0.2126 * color.redComponent + 0.7152 * color.greenComponent + 0.0722 * color.blueComponent
         let attributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 20, weight: .semibold),
-            .foregroundColor: NSColor.white
+            .font: NSFont.systemFont(ofSize: 32, weight: .regular),
+            .foregroundColor: luminance > 0.58 ? NSColor.black : NSColor.white
         ]
-        let size = initials.size(withAttributes: attributes)
-        initials.draw(at: NSPoint(x: bounds.midX - size.width / 2, y: bounds.midY - size.height / 2), withAttributes: attributes)
+        let size = presentation.initials.size(withAttributes: attributes)
+        presentation.initials.draw(
+            at: NSPoint(x: bounds.midX - size.width / 2, y: bounds.midY - size.height / 2),
+            withAttributes: attributes
+        )
     }
 }
 
