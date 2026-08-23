@@ -45,8 +45,11 @@ enum GitRepositoryMutationTests {
         defer { fixture.remove() }
 
         try await testStashCreationOptions(fixture)
+        try await testStashSelectedPaths(fixture)
         try await testStashLifecycle(fixture)
+        try await testStashDropSelection(fixture)
         try await testStashConflict(fixture)
+        try await testStashPopConflictPreservesStash(fixture)
         print("GitRepositoryMutationTests.stash: passed")
     }
 
@@ -1205,12 +1208,87 @@ enum GitRepositoryMutationTests {
 
         result = try await source.dropStash(result.snapshot.stashes[0])
         try require(result.snapshot.stashes.isEmpty, "stash drop: selected stash is removed")
+        try require(result.selectedCommitID == result.snapshot.commits.first(where: \.isHEAD)?.id, "stash drop: empty stash list falls back to HEAD selection")
         do {
             _ = try await source.applyStash(older)
             throw MutationFixtureError("stash: a stale stash selector was accepted")
         } catch RepositoryMutationError.invalidStash(let selector) {
             try require(selector == older.selector, "stash: stale selection reports its original selector")
         }
+    }
+
+    private static func testStashSelectedPaths(_ fixture: MutationGitFixture) async throws {
+        let repository = try fixture.clone(named: "Selected path stash repo")
+        let source = GitRepositoryBrowsingDataSource(repositoryURL: repository)
+        _ = try await source.loadSnapshot()
+
+        try fixture.write("selected main\n", to: repository.appendingPathComponent("main.txt"))
+        try fixture.write("unselected shared\n", to: repository.appendingPathComponent("shared.txt"))
+        let onePath = try await source.createStash(RepositoryStashCreateRequest(
+            message: "one selected path",
+            includeUntracked: false,
+            keepIndex: false,
+            stagedOnly: false,
+            selectedPaths: ["main.txt"]
+        ))
+        try require(onePath.snapshot.stashes.count == 1, "partial stash: selected tracked path creates one stash")
+        try require(try String(contentsOf: repository.appendingPathComponent("main.txt"), encoding: .utf8) == "main\n", "partial stash: selected path is restored")
+        try require(try String(contentsOf: repository.appendingPathComponent("shared.txt"), encoding: .utf8) == "unselected shared\n", "partial stash: unselected path remains dirty")
+        let partialNames = try fixture.git(["stash", "show", "--name-only", "--format=", "stash@{0}"], in: repository)
+            .split(separator: "\n").map(String.init)
+        try require(partialNames == ["main.txt"], "partial stash: stash contains only the typed pathspec")
+
+        try fixture.git(["restore", "--staged", "--worktree", "--", "shared.txt"], in: repository)
+        let applied = try await source.applyStash(try required(onePath.snapshot.stashes.first, "partial stash: created stash is selectable"))
+        try require(applied.outcome == .completed, "partial stash: selected-path stash applies normally")
+        try require(try String(contentsOf: repository.appendingPathComponent("main.txt"), encoding: .utf8) == "selected main\n", "partial stash: apply restores selected content")
+
+        let multipleRepository = try fixture.clone(named: "Multiple path stash repo")
+        let multipleSource = GitRepositoryBrowsingDataSource(repositoryURL: multipleRepository)
+        _ = try await multipleSource.loadSnapshot()
+        try fixture.write("selected shared\n", to: multipleRepository.appendingPathComponent("shared.txt"))
+        try fixture.write("selected untracked\n", to: multipleRepository.appendingPathComponent("selected untracked.txt"))
+        try fixture.write("leave untracked\n", to: multipleRepository.appendingPathComponent("leave untracked.txt"))
+        let multiple = try await multipleSource.createStash(RepositoryStashCreateRequest(
+            message: "multiple selected paths",
+            includeUntracked: true,
+            keepIndex: false,
+            stagedOnly: false,
+            selectedPaths: ["selected untracked.txt", "shared.txt", "shared.txt"]
+        ))
+        try require(multiple.snapshot.stashes.count == 1, "partial stash: multiple paths create one stash")
+        try require(try String(contentsOf: multipleRepository.appendingPathComponent("shared.txt"), encoding: .utf8) == "base\n", "partial stash: selected tracked path is restored")
+        try require(!FileManager.default.fileExists(atPath: multipleRepository.appendingPathComponent("selected untracked.txt").path), "partial stash: selected untracked path is cleaned")
+        try require(FileManager.default.fileExists(atPath: multipleRepository.appendingPathComponent("leave untracked.txt").path), "partial stash: unselected untracked path remains")
+        let multipleNames = Set(try fixture.git(["stash", "show", "--include-untracked", "--name-only", "--format=", "stash@{0}"], in: multipleRepository)
+            .split(separator: "\n").map(String.init))
+        try require(multipleNames == Set(["selected untracked.txt", "shared.txt"]), "partial stash: multiple typed pathspecs and untracked content are recorded")
+
+        let stashModel = try required(multiple.snapshot.stashes.first, "stash details: created stash is modeled")
+        let stashCommit = try required(
+            multiple.snapshot.commits.first(where: { $0.id == stashModel.commitID }),
+            "stash details: artificial stash revision is present"
+        )
+        let details = try await multipleSource.loadRevisionDetails(for: stashCommit)
+        try require(Set(details.files.map(\.path)) == multipleNames, "stash details: shared browser loading includes the untracked third parent")
+        let trackedFile = try required(details.files.first(where: { $0.path == "shared.txt" }), "stash details: selected tracked file is available")
+        let diff = try required(
+            try await multipleSource.loadDiff(for: stashCommit, file: trackedFile),
+            "stash details: tracked file patch is available"
+        )
+        try require(diff.lines.contains { $0.text.contains("selected shared") }, "stash details: shared FileViewer receives the stash patch")
+        let untrackedFile = try required(
+            details.files.first(where: { $0.path == "selected untracked.txt" }),
+            "stash details: selected untracked file is available"
+        )
+        let untrackedDiff = try required(
+            try await multipleSource.loadDiff(for: stashCommit, file: untrackedFile),
+            "stash details: untracked third-parent patch is available"
+        )
+        try require(
+            untrackedDiff.lines.contains { $0.text.contains("selected untracked") },
+            "stash details: shared FileViewer receives the untracked third-parent patch"
+        )
     }
 
     private static func testStashConflict(_ fixture: MutationGitFixture) async throws {
@@ -1231,6 +1309,60 @@ enum GitRepositoryMutationTests {
         try require(paths == ["shared.txt"], "stash conflict: conflicted path is reported")
         try require(result.snapshot.stashes.contains { $0.commitID == stash.commitID }, "stash conflict: stash remains available")
         try require(try fixture.git(["diff", "--name-only", "--diff-filter=U"], in: repository).trimmed == "shared.txt", "stash conflict: repository retains Git's unmerged index state")
+    }
+
+    private static func testStashDropSelection(_ fixture: MutationGitFixture) async throws {
+        let repository = try fixture.clone(named: "Stash drop selection repo")
+        let source = GitRepositoryBrowsingDataSource(repositoryURL: repository)
+        _ = try await source.loadSnapshot()
+        for (message, file) in [("oldest", "shared.txt"), ("middle", "main.txt"), ("newest", "hunks.txt")] {
+            try fixture.write("\(message) stash\n", to: repository.appendingPathComponent(file))
+            _ = try await source.createStash(RepositoryStashCreateRequest(
+                message: message,
+                includeUntracked: false,
+                keepIndex: false,
+                stagedOnly: false
+            ))
+        }
+        var snapshot = try await source.loadSnapshot()
+        try require(snapshot.stashes.map(\.subject).allSatisfy { !$0.isEmpty }, "stash ordering: stash metadata is populated")
+        try require(snapshot.stashes[0].subject.contains("newest") && snapshot.stashes[2].subject.contains("oldest"), "stash ordering: list is newest-first")
+
+        let middle = snapshot.stashes[1]
+        var dropped = try await source.dropStash(middle)
+        try require(dropped.snapshot.stashes.count == 2, "stash drop selection: middle stash is removed")
+        try require(dropped.selectedCommitID == dropped.snapshot.stashes[1].commitID, "stash drop selection: the row now at the dropped index is selected")
+
+        snapshot = dropped.snapshot
+        dropped = try await source.dropStash(snapshot.stashes[1])
+        try require(dropped.snapshot.stashes.count == 1, "stash drop selection: last stash row is removed")
+        try require(dropped.selectedCommitID == dropped.snapshot.stashes[0].commitID, "stash drop selection: dropping the last row selects the previous row")
+    }
+
+    private static func testStashPopConflictPreservesStash(_ fixture: MutationGitFixture) async throws {
+        let repository = try fixture.clone(named: "Stash pop conflict repo")
+        let source = GitRepositoryBrowsingDataSource(repositoryURL: repository)
+        _ = try await source.loadSnapshot()
+        try fixture.write("stashed pop side\n", to: repository.appendingPathComponent("shared.txt"))
+        var result = try await source.createStash(RepositoryStashCreateRequest(
+            message: "pop conflict",
+            includeUntracked: false,
+            keepIndex: false,
+            stagedOnly: false
+        ))
+        let stash = try required(result.snapshot.stashes.first, "stash pop conflict: stash exists")
+        try fixture.write("current pop side\n", to: repository.appendingPathComponent("shared.txt"))
+        try fixture.git(["add", "--all", "--"], in: repository)
+        try fixture.git(["commit", "-m", "Conflicting pop change"], in: repository)
+
+        result = try await source.popStash(stash)
+        guard case .conflicts(let paths) = result.outcome else {
+            throw MutationFixtureError("stash pop conflict: pop did not report Git's conflict")
+        }
+        try require(paths == ["shared.txt"], "stash pop conflict: conflicted path is reported")
+        try require(result.snapshot.stashes.contains { $0.commitID == stash.commitID }, "stash pop conflict: failed pop preserves the stash")
+        try require(try fixture.git(["rev-parse", "--verify", "refs/stash"], in: repository).trimmed == stash.commitID, "stash pop conflict: refs/stash remains the original stash")
+        try require(try fixture.git(["diff", "--name-only", "--diff-filter=U"], in: repository).trimmed == "shared.txt", "stash pop conflict: Git's unmerged index/worktree state is preserved")
     }
 
     private static func testCherryPickOrderingAndOptions(_ fixture: MutationGitFixture) async throws {
@@ -1358,8 +1490,6 @@ enum GitRepositoryMutationTests {
             items: [RepositoryCherryPickItem(commitID: cancelledFirst, mainlineParent: nil)],
             options: RepositoryCherryPickOptions(automaticallyCommit: true, addReference: false)
         ))
-        // Cancelling the next per-commit form performs no Git operation. The
-        // already accepted request must remain applied and no later item may run.
         let partialHead = try fixture.git(["rev-parse", "HEAD"], in: cancelledRepository).trimmed
         try require(partial.selectedCommitID == partialHead && partialHead != beforePartial, "partial cancel: the accepted commit remains as the refreshed target HEAD")
         try require(FileManager.default.fileExists(atPath: cancelledRepository.appendingPathComponent("dialog-first.txt").path), "partial cancel: completed commit remains applied")
@@ -1511,9 +1641,6 @@ enum GitRepositoryMutationTests {
         let repository = try fixture.clone(named: "Cherry pick failure repo")
         let topic = try fixture.git(["rev-parse", "origin/topic"], in: repository).trimmed
         let before = try fixture.git(["rev-parse", "HEAD"], in: repository).trimmed
-        // The topic commit adds topic.txt. An untracked file at that path makes
-        // Git reject the operation before applying anything, while still using
-        // the real cherry-pick command and its diagnostic output.
         try fixture.write("untracked local content\n", to: repository.appendingPathComponent("topic.txt"))
 
         let source = GitRepositoryBrowsingDataSource(repositoryURL: repository)

@@ -16,23 +16,20 @@ enum WorkflowManagementDialogs {
     static func manageStashes(
         source: any RepositoryMutatingDataSource,
         snapshot: RepositorySnapshot,
-        window: NSWindow
-    ) async -> RepositorySnapshot? {
-        let controller = StashManagerViewController(source: source, snapshot: snapshot)
-        let panel = NSPanel(contentViewController: controller)
-        panel.title = "Stash"
-        panel.styleMask = [.titled, .closable, .resizable]
-        panel.setContentSize(NSSize(width: 720, height: 430))
-        panel.minSize = NSSize(width: 570, height: 340)
-        controller.panel = panel
-        panel.delegate = controller
-        return await withCheckedContinuation { continuation in
-            controller.onClose = { refreshed in
-                window.endSheet(panel)
-                continuation.resume(returning: refreshed)
+        window: NSWindow,
+        manageStashes: Bool = true,
+        initialStash: String? = nil
+    ) async -> StashDialogResult {
+        await StashDialog.present(
+            source: source,
+            snapshot: snapshot,
+            manageStashes: manageStashes,
+            initialStash: initialStash,
+            owner: window,
+            resolveConflicts: { stashWindow in
+                await resolveConflicts(source: source, window: stashWindow)
             }
-            window.beginSheet(panel)
-        }
+        )
     }
 
     static func resolveConflicts(
@@ -615,145 +612,6 @@ private final class RebaseManagerViewController: NSViewController, NSTableViewDa
     }
     private func finish(_ snapshot: RepositorySnapshot?) {
         guard !didClose else { return }; didClose = true; task?.cancel(); commitWindowController?.close(); onClose?(snapshot)
-    }
-}
-
-@MainActor
-private final class StashManagerViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSWindowDelegate {
-    weak var panel: NSPanel?
-    var onClose: ((RepositorySnapshot?) -> Void)?
-    private let source: any RepositoryMutatingDataSource
-    private var snapshot: RepositorySnapshot
-    private let table = NSTableView()
-    private let details = NSTextField(wrappingLabelWithString: "Select a stash.")
-    private let status = NSTextField(labelWithString: "")
-    private let applyButton = NSButton(title: "Apply", target: nil, action: nil)
-    private let popButton = NSButton(title: "Pop", target: nil, action: nil)
-    private let dropButton = NSButton(title: "Drop", target: nil, action: nil)
-    private var task: Task<Void, Never>?
-    private var didClose = false
-
-    init(source: any RepositoryMutatingDataSource, snapshot: RepositorySnapshot) {
-        self.source = source
-        self.snapshot = snapshot
-        super.init(nibName: nil, bundle: nil)
-    }
-    required init?(coder: NSCoder) { nil }
-    deinit { task?.cancel() }
-
-    override func loadView() {
-        let root = NSView()
-        let selector = NSTableColumn(identifier: .init("Selector")); selector.title = "Stash"; selector.width = 95
-        let branch = NSTableColumn(identifier: .init("Branch")); branch.title = "Branch"; branch.width = 150
-        let message = NSTableColumn(identifier: .init("Message")); message.title = "Message"; message.width = 390
-        [selector, branch, message].forEach(table.addTableColumn)
-        table.rowHeight = 22
-        table.intercellSpacing = .zero
-        table.delegate = self
-        table.dataSource = self
-        let scroll = NSScrollView()
-        scroll.documentView = table
-        scroll.hasVerticalScroller = true
-        scroll.borderType = .bezelBorder
-
-        details.maximumNumberOfLines = 3
-        details.textColor = .secondaryLabelColor
-        applyButton.target = self; applyButton.action = #selector(apply)
-        popButton.target = self; popButton.action = #selector(pop)
-        dropButton.target = self; dropButton.action = #selector(drop)
-        let create = NSButton(title: "Create stash…", target: self, action: #selector(create))
-        let close = NSButton(title: "Close", target: self, action: #selector(close))
-        close.keyEquivalent = "\u{1b}"
-        let spacer = NSView(); spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let buttons = NSStackView(views: [create, applyButton, popButton, dropButton, spacer, close])
-        buttons.orientation = .horizontal
-        buttons.spacing = 7
-        let stack = NSStackView(views: [scroll, details, status, buttons])
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 8
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        root.addSubview(stack)
-        NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 10),
-            stack.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -10),
-            stack.topAnchor.constraint(equalTo: root.topAnchor, constant: 10),
-            stack.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -10),
-            scroll.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 220),
-            buttons.widthAnchor.constraint(equalTo: stack.widthAnchor)
-        ])
-        view = root
-        table.reloadData()
-        if !snapshot.stashes.isEmpty { table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false) }
-        updateSelection()
-    }
-
-    func numberOfRows(in tableView: NSTableView) -> Int { snapshot.stashes.count }
-    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        let stash = snapshot.stashes[row]
-        let value: String
-        switch tableColumn?.identifier.rawValue {
-        case "Selector": value = stash.selector
-        case "Branch": value = stash.branchName
-        default: value = stash.subject
-        }
-        let cell = NSTableCellView()
-        let label = NSTextField(labelWithString: value)
-        label.font = .systemFont(ofSize: 12)
-        label.lineBreakMode = .byTruncatingTail
-        label.translatesAutoresizingMaskIntoConstraints = false
-        cell.addSubview(label)
-        NSLayoutConstraint.activate([label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 5), label.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -5), label.centerYAnchor.constraint(equalTo: cell.centerYAnchor)])
-        return cell
-    }
-    func tableViewSelectionDidChange(_ notification: Notification) { updateSelection() }
-
-    private var selectedStash: Stash? {
-        guard table.selectedRow >= 0, table.selectedRow < snapshot.stashes.count else { return nil }
-        return snapshot.stashes[table.selectedRow]
-    }
-    private func updateSelection() {
-        let stash = selectedStash
-        details.stringValue = stash.map { "\($0.selector) on \($0.branchName)\n\($0.subject)\n\($0.commitID)" } ?? "No stash selected."
-        [applyButton, popButton, dropButton].forEach { $0.isEnabled = stash != nil }
-    }
-
-    @objc private func create() {
-        guard let panel else { return }
-        task?.cancel()
-        task = Task { @MainActor [weak self] in
-            guard let self, let request = await MutationDialogs.stashCreateRequest(window: panel) else { return }
-            await mutate { try await $0.createStash(request) }
-        }
-    }
-    @objc private func apply() { guard let stash = selectedStash else { return }; task = Task { await mutate { try await $0.applyStash(stash) } } }
-    @objc private func pop() { guard let stash = selectedStash else { return }; task = Task { await mutate { try await $0.popStash(stash) } } }
-    @objc private func drop() {
-        guard let stash = selectedStash, let panel else { return }
-        task = Task { @MainActor [weak self] in
-            guard let self, await MutationDialogs.confirmDrop(stash: stash, window: panel) else { return }
-            await mutate { try await $0.dropStash(stash) }
-        }
-    }
-
-    private func mutate(_ operation: @escaping @Sendable (any RepositoryMutatingDataSource) async throws -> RepositoryMutationResult) async {
-        do {
-            status.stringValue = "Updating stash list…"
-            let result = try await operation(source)
-            snapshot = result.snapshot
-            table.reloadData()
-            if !snapshot.stashes.isEmpty { table.selectRowIndexes(IndexSet(integer: min(max(0, table.selectedRow), snapshot.stashes.count - 1)), byExtendingSelection: false) }
-            updateSelection()
-            status.stringValue = result.message
-        } catch { status.stringValue = error.localizedDescription }
-    }
-    @objc private func close() { finish(snapshot) }
-    func windowWillClose(_ notification: Notification) { finish(snapshot) }
-    private func finish(_ value: RepositorySnapshot?) {
-        guard !didClose else { return }
-        didClose = true
-        onClose?(value)
     }
 }
 

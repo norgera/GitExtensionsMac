@@ -8,6 +8,7 @@ enum AppSettingsTests {
         testRebasePreferencesRoundTrip()
         testCherryPickPreferencesRoundTrip()
         testPushPreferencesRoundTrip()
+        testStashPreferencesRoundTrip()
         testCommitPreferencesRoundTrip()
         testFileStatusListPreferencesRoundTrip()
         testCommitMessageRules()
@@ -94,6 +95,22 @@ enum AppSettingsTests {
             preferences.helpExpanded = false
             store.saveRebasePreferences(preferences)
             precondition(AppSettingsStore(defaults: defaults).rebasePreferences == preferences)
+        }
+    }
+
+    private static func testStashPreferencesRoundTrip() {
+        withStore { store, defaults in
+            var preferences = store.stashPreferences
+            preferences.keepIndex = true
+            preferences.includeUntracked = true
+            preferences.dontConfirmDrop = true
+            preferences.showStashCount = true
+            preferences.showStashesInRepositoryTree = false
+            preferences.windowWidth = 812
+            preferences.windowHeight = 601
+            preferences.dividerPosition = 312
+            store.saveStashPreferences(preferences)
+            precondition(AppSettingsStore(defaults: defaults).stashPreferences == preferences)
         }
     }
 

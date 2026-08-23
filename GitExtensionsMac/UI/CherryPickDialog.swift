@@ -298,9 +298,6 @@ private final class CherryPickViewController: NSViewController, NSTableViewDataS
         if commit.isMerge, !parentRows.isEmpty {
             parentTable.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
         }
-        // FormCherryPick retains its designed 54-point list and grows the form
-        // by one 18-point row per parent. Keeping that spare row also prevents
-        // a two-parent merge from showing a needless vertical scrollbar.
         parentHeightConstraint?.constant = 54 + CGFloat(parentRows.count * 18)
     }
 

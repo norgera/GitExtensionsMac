@@ -36,6 +36,7 @@ final class RepositoryOutlineViewController: NSViewController, NSOutlineViewData
     private var visibleRoots: [RepositoryTreeNode] = []
     private var hiddenRootTitles: Set<String> = []
     private var isFiltering = false
+    private var isBareRepository = false
     private var menuFocusedNode: RepositoryTreeNode?
 
     override func loadView() {
@@ -62,7 +63,9 @@ final class RepositoryOutlineViewController: NSViewController, NSOutlineViewData
         ].enumerated() {
             let button = AppKitFactory.resourceButton(item.0, tooltip: item.1, width: 29, target: self, action: #selector(toggleRootVisibility(_:)))
             button.tag = index
-            button.state = .on
+            let isVisible = item.1 != "Stashes" || AppSettingsStore.shared.stashPreferences.showStashesInRepositoryTree
+            button.state = isVisible ? .on : .off
+            if !isVisible { hiddenRootTitles.insert(item.1) }
             button.setButtonType(.toggle)
             toolbarStack.addArrangedSubview(button)
         }
@@ -88,6 +91,8 @@ final class RepositoryOutlineViewController: NSViewController, NSOutlineViewData
         outlineView.allowsMultipleSelection = true
         outlineView.allowsEmptySelection = true
         outlineView.selectionHighlightStyle = .regular
+        outlineView.target = self
+        outlineView.doubleAction = #selector(openSelectedStash)
         outlineView.intercellSpacing = .zero
         outlineView.backgroundColor = .controlBackgroundColor
         outlineView.delegate = self
@@ -136,6 +141,7 @@ final class RepositoryOutlineViewController: NSViewController, NSOutlineViewData
     }
 
     func apply(snapshot: RepositorySnapshot) {
+        isBareRepository = snapshot.currentRepository.isBare
         let localBranches = buildBranchTree(snapshot.branches, isRemote: false)
         let branchesRoot = RepositoryTreeNode(title: "Branches", kind: .group, symbolName: "LocalBranchRoot", children: localBranches)
 
@@ -264,6 +270,11 @@ final class RepositoryOutlineViewController: NSViewController, NSOutlineViewData
             hiddenRootTitles.remove(title)
         } else {
             hiddenRootTitles.insert(title)
+        }
+        if title == "Stashes" {
+            var preferences = AppSettingsStore.shared.stashPreferences
+            preferences.showStashesInRepositoryTree = sender.state == .on
+            AppSettingsStore.shared.saveStashPreferences(preferences)
         }
         applyTreeFilter()
     }
@@ -428,7 +439,8 @@ final class RepositoryOutlineViewController: NSViewController, NSOutlineViewData
             selected: selectedNodes.map(\.menuKind),
             selectedHaveChildren: !parents.isEmpty,
             selectedHaveExpandableChildren: parents.contains { !outlineView.isItemExpanded($0) },
-            selectedHaveCollapsibleChildren: parents.contains { outlineView.isItemExpanded($0) }
+            selectedHaveCollapsibleChildren: parents.contains { outlineView.isItemExpanded($0) },
+            isBareRepository: isBareRepository
         )
         populatePlaceholderMenu(menu, with: RepositoryContextMenuBuilder.build(context))
         menuFocusedNode = node
@@ -444,8 +456,10 @@ final class RepositoryOutlineViewController: NSViewController, NSOutlineViewData
             "repository.stash.apply",
             "repository.stash.pop",
             "repository.stash.drop",
+            "repository.stash.open",
             "repository.stashes.create",
-            "repository.stashes.staged"
+            "repository.stashes.staged",
+            "repository.stashes.manage"
         ]
         retargetMenuItems(in: menu, where: { mutationCommands.contains($0) }, target: self, action: #selector(performMenuCommand(_:)))
     }
@@ -453,6 +467,15 @@ final class RepositoryOutlineViewController: NSViewController, NSOutlineViewData
     @objc private func performMenuCommand(_ sender: NSMenuItem) {
         guard let identifier = sender.identifier?.rawValue, let menuFocusedNode else { return }
         onCommand?(identifier, menuFocusedNode)
+    }
+
+    @objc private func openSelectedStash() {
+        let row = outlineView.clickedRow >= 0 ? outlineView.clickedRow : outlineView.selectedRow
+        guard row >= 0,
+              let node = outlineView.item(atRow: row) as? RepositoryTreeNode,
+              case .stash = node.kind,
+              !isBareRepository else { return }
+        onCommand?("repository.stash.open", node)
     }
 }
 

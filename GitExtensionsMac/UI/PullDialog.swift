@@ -921,14 +921,15 @@ private final class PullDialogViewController: NSViewController, NSWindowDelegate
         guard operationTask == nil, let window = view.window else { return }
         operationTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            if let request = await MutationDialogs.stashCreateRequest(window: window) {
-                do {
-                    let result = try await source.createStash(request)
-                    snapshot = result.snapshot
-                    onSnapshot(result.snapshot, result.selectedCommitID)
-                    statusLabel.stringValue = result.message
-                } catch { await showError(error, title: "Stash failed") }
-            }
+            let result = await WorkflowManagementDialogs.manageStashes(
+                source: source,
+                snapshot: snapshot,
+                window: window,
+                manageStashes: true
+            )
+            snapshot = result.snapshot
+            onSnapshot(result.snapshot, result.selectedCommitID)
+            statusLabel.stringValue = "Repository state refreshed."
             operationTask = nil
             reloadRepositoryState()
         }

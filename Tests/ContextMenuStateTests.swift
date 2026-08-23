@@ -7,11 +7,13 @@ enum ContextMenuStateTests {
         testNonCurrentRevisionRefCommands()
         testMultipleRevisionSelection()
         testArtificialRevisionCherryPickState()
+        testRevisionStashCommands()
         testSequencerCommands()
         testRevisionNavigation()
         testCurrentBranchTreeCommands()
         testTreeMultiSelection()
         testCurrentWorktreeCommands()
+        testStashTreeCommands()
         testHistoricalFileCommands()
         testMultipleHistoricalFiles()
         testWorktreeFileCommands()
@@ -101,6 +103,34 @@ enum ContextMenuStateTests {
             menu.entry(id: "revision.commit.cherryPick")?.isEnabled == false,
             "revision: artificial revisions cannot be cherry-picked"
         )
+    }
+
+    private static func testRevisionStashCommands() {
+        let stashReference = RevisionReference(id: "stash-0", name: "stash@{0}", kind: .stash)
+        let stash = commit("stash", refs: [stashReference])
+        var context = RevisionContextMenuContext(
+            focusedCommit: stash,
+            selectedCommits: [stash],
+            history: [stash],
+            currentBranchName: "main"
+        )
+        var menu = RevisionContextMenuBuilder.build(context)
+        expect(menu.entry(id: "revision.stash.apply")?.isEnabled == true, "revision stash: apply is available on a stash revision")
+        expect(menu.entry(id: "revision.stash.pop")?.isEnabled == true, "revision stash: pop is available on a stash revision")
+        expect(menu.entry(id: "revision.stash.drop")?.isEnabled == true, "revision stash: drop is available on a stash revision")
+
+        context.isBareRepository = true
+        menu = RevisionContextMenuBuilder.build(context)
+        expect(menu.entry(id: "revision.stash.apply") == nil, "revision stash: mutating actions are absent in a bare repository")
+
+        let regular = commit("regular")
+        menu = RevisionContextMenuBuilder.build(.init(
+            focusedCommit: regular,
+            selectedCommits: [regular],
+            history: [regular],
+            currentBranchName: "main"
+        ))
+        expect(menu.entry(id: "revision.stash.apply") == nil, "revision stash: actions are absent on ordinary commits")
     }
 
     private static func testSequencerCommands() {
@@ -202,6 +232,43 @@ enum ContextMenuStateTests {
         expect(menu.entry(id: "repository.worktree.delete")?.isEnabled == false, "tree: current worktree cannot be deleted")
         expect(menu.entry(id: "repository.worktree.copyPath")?.isEnabled == true, "tree: current worktree path can be copied")
         expect(menu.entry(id: "repository.worktree.show")?.isEnabled == true, "tree: existing worktree can be shown")
+    }
+
+    private static func testStashTreeCommands() {
+        var context = RepositoryContextMenuContext(
+            focused: .stash,
+            selected: [.stash],
+            selectedHaveChildren: false,
+            selectedHaveExpandableChildren: false,
+            selectedHaveCollapsibleChildren: false
+        )
+        var menu = RepositoryContextMenuBuilder.build(context)
+        expect(menu.entry(id: "repository.stash.open")?.isEnabled == true, "stash tree: a stash node can open FormStash")
+        expect(menu.entry(id: "repository.stash.apply")?.isEnabled == true, "stash tree: apply is enabled")
+        expect(menu.entry(id: "repository.stash.pop")?.isEnabled == true, "stash tree: pop is enabled")
+        expect(menu.entry(id: "repository.stash.drop")?.isEnabled == true, "stash tree: drop is enabled")
+
+        context.isBareRepository = true
+        menu = RepositoryContextMenuBuilder.build(context)
+        expect(menu.entry(id: "repository.stash.open")?.isEnabled == false, "stash tree: stash actions are disabled for bare repositories")
+        expect(menu.entry(id: "repository.stash.drop")?.isEnabled == false, "stash tree: destructive actions are disabled for bare repositories")
+
+        context = RepositoryContextMenuContext(
+            focused: .group(.stashes),
+            selected: [.group(.stashes)],
+            selectedHaveChildren: true,
+            selectedHaveExpandableChildren: true,
+            selectedHaveCollapsibleChildren: false
+        )
+        menu = RepositoryContextMenuBuilder.build(context)
+        expect(menu.entry(id: "repository.stashes.create")?.isEnabled == true, "stash root: quick stash is enabled")
+        expect(menu.entry(id: "repository.stashes.staged")?.isEnabled == true, "stash root: staged-only stash is enabled")
+        expect(menu.entry(id: "repository.stashes.manage")?.isEnabled == true, "stash root: manager is enabled")
+
+        context.isBareRepository = true
+        menu = RepositoryContextMenuBuilder.build(context)
+        expect(menu.entry(id: "repository.stashes.create")?.isEnabled == false, "stash root: quick stash is disabled for bare repositories")
+        expect(menu.entry(id: "repository.stashes.manage")?.isEnabled == false, "stash root: manager is disabled for bare repositories")
     }
 
     private static func testHistoricalFileCommands() {

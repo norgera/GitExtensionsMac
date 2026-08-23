@@ -127,6 +127,21 @@ struct RepositoryStashCreateRequest: Hashable, Sendable {
     let includeUntracked: Bool
     let keepIndex: Bool
     let stagedOnly: Bool
+    let selectedPaths: [String]
+
+    init(
+        message: String,
+        includeUntracked: Bool,
+        keepIndex: Bool,
+        stagedOnly: Bool,
+        selectedPaths: [String] = []
+    ) {
+        self.message = message
+        self.includeUntracked = includeUntracked
+        self.keepIndex = keepIndex
+        self.stagedOnly = stagedOnly
+        self.selectedPaths = selectedPaths
+    }
 }
 
 struct RepositoryCherryPickItem: Hashable, Sendable {
@@ -457,9 +472,6 @@ protocol RepositoryRebaseDataSource: RepositoryConflictDataSource {
     func abortRebase() async throws -> RepositoryMutationResult
 }
 
-// Compatibility composition for the already-closed mutation workflows. New
-// features should add and consume a focused capability instead of growing this
-// aggregate protocol.
 protocol RepositoryMutatingDataSource:
     RepositoryCheckoutDataSource,
     RepositoryCommitDataSource,
@@ -858,15 +870,27 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
         let beforeRef = try await rawMutation(["rev-parse", "--verify", "--quiet", "refs/stash"], in: repository)
             .standardOutputString.trimmingCharacters(in: .whitespacesAndNewlines)
 
+        var seenPaths = Set<String>()
+        let selectedPaths = request.selectedPaths.compactMap { path -> String? in
+            guard !path.isEmpty, seenPaths.insert(path).inserted else { return nil }
+            return path
+        }
+        let message = request.message.trimmingCharacters(in: .whitespacesAndNewlines)
         var arguments = ["stash"]
         if request.stagedOnly {
             arguments.append("--staged")
+        } else if selectedPaths.isEmpty {
+            arguments.append("save")
+            if request.includeUntracked { arguments.append("-u") }
+            if request.keepIndex { arguments.append("--keep-index") }
+            if !message.isEmpty { arguments.append(message) }
         } else {
             arguments.append("push")
-            if request.includeUntracked { arguments.append("--include-untracked") }
+            if request.includeUntracked { arguments.append("-u") }
             if request.keepIndex { arguments.append("--keep-index") }
-            let message = request.message.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !message.isEmpty { arguments += ["--message", message] }
+            if !message.isEmpty { arguments += ["-m", message] }
+            arguments.append("--")
+            arguments.append(contentsOf: selectedPaths)
         }
 
         let command = try await rawMutation(arguments, in: repository)

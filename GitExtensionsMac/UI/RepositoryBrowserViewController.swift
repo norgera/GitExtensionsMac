@@ -31,7 +31,8 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
     private let branchPopUp = NSPopUpButton()
     private let commitPositionPopUp = NSPopUpButton()
     private let pullPopUp = NSPopUpButton()
-    private let stashPopUp = NSPopUpButton()
+    private let stashSplitButton = NSSegmentedControl()
+    private let stashMenu = NSMenu(title: "Stash")
     private let pushButton = NSButton()
     private let commitButton = NSButton()
     private var workingDirectoryWidthConstraint: NSLayoutConstraint?
@@ -286,14 +287,8 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         commitStashGap.widthAnchor.constraint(equalToConstant: 4).isActive = true
         stack.addArrangedSubview(commitStashGap)
 
-        configureImagePopUp(
-            stashPopUp,
-            imageName: "stash",
-            items: ["Stash", "Stash staged", "Stash pop", "Manage stashes…", "Create a stash…"],
-            width: 32,
-            action: #selector(selectStashAction)
-        )
-        stack.addArrangedSubview(stashPopUp)
+        configureStashSplitButton()
+        stack.addArrangedSubview(stashSplitButton)
         stack.addArrangedSubview(AppKitFactory.separator())
         stack.addArrangedSubview(AppKitFactory.resourceButton("BrowseFileExplorer", tooltip: "File Explorer", target: self, action: #selector(placeholderToolbarButton(_:))))
         stack.addArrangedSubview(AppKitFactory.resourceButton("GitForWindows", tooltip: "Git bash", target: self, action: #selector(placeholderToolbarButton(_:))))
@@ -459,6 +454,32 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         button.heightAnchor.constraint(equalToConstant: 22).isActive = true
     }
 
+    private func configureStashSplitButton() {
+        stashSplitButton.segmentCount = 2
+        stashSplitButton.trackingMode = .momentary
+        stashSplitButton.segmentStyle = .texturedRounded
+        stashSplitButton.controlSize = .small
+        stashSplitButton.target = self
+        stashSplitButton.action = #selector(selectStashSegment(_:))
+        stashSplitButton.setImage(AppKitFactory.resourceImage("stash", accessibilityDescription: "Manage stashes"), forSegment: 0)
+        stashSplitButton.setImage(NSImage(systemSymbolName: "chevron.down", accessibilityDescription: "Stash actions"), forSegment: 1)
+        stashSplitButton.setWidth(23, forSegment: 0)
+        stashSplitButton.setWidth(13, forSegment: 1)
+        stashSplitButton.setToolTip("Manage stashes", forSegment: 0)
+        stashSplitButton.setToolTip("Stash actions", forSegment: 1)
+        stashSplitButton.translatesAutoresizingMaskIntoConstraints = false
+        stashSplitButton.heightAnchor.constraint(equalToConstant: 22).isActive = true
+
+        let actions = ["Stash", "Stash staged", "Stash pop", "Manage stashes…", "Create a stash…"]
+        for (index, title) in actions.enumerated() {
+            if index == 3 { stashMenu.addItem(.separator()) }
+            let item = NSMenuItem(title: title, action: #selector(stashMenuCommand(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = title
+            stashMenu.addItem(item)
+        }
+    }
+
     private func repositoryDisplayTitle(_ repository: Repository) -> String {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         guard repository.path.hasPrefix(home) else { return repository.path }
@@ -495,6 +516,16 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             accessibilityDescription: commitButton.title
         )
         commitButton.toolTip = count == 1 ? "Commit — 1 changed file" : "Commit — \(count) changed files"
+
+        let stashCount = snapshot.stashes.count
+        let showStashCount = AppSettingsStore.shared.stashPreferences.showStashCount && !snapshot.currentRepository.isBare
+        stashSplitButton.setLabel(showStashCount ? "(\(stashCount))" : "", forSegment: 0)
+        stashSplitButton.setWidth(showStashCount ? CGFloat(41 + String(stashCount).count * 7) : 23, forSegment: 0)
+        stashSplitButton.setToolTip(
+            stashCount == 1 ? "Manage stashes — 1 stash" : "Manage stashes — \(stashCount) stashes",
+            forSegment: 0
+        )
+        stashSplitButton.isEnabled = !snapshot.currentRepository.isBare
 
         guard let currentBranch = snapshot.branches.first(where: \.isCurrent) else {
             pushButton.title = ""
@@ -705,8 +736,6 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         case .manageStashes: beginManageStashes()
         case .solveMergeConflicts: beginResolveConflicts()
         case .cherryPick:
-            // FormBrowse's application Commands menu is a single-revision
-            // entry point. RevisionGrid's context menu owns multi-selection.
             if let commit = snapshot?.commits.first(where: { $0.id == selectedCommitID && !$0.isArtificial }) {
                 beginCherryPick([commit])
             }
@@ -715,7 +744,10 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
                 beginRebase(on: commit, interactive: false, showAdvancedOptions: true)
             }
         case .settings:
-            Task { await ApplicationShellDialogs.presentSettings(from: window) }
+            Task { @MainActor [weak self] in
+                await ApplicationShellDialogs.presentSettings(from: window)
+                if let snapshot = self?.snapshot { self?.updateToolbarRepositoryState(snapshot) }
+            }
         case .showStatus(let message):
             statusLabel.stringValue = message
         case .unavailable(let title):
@@ -1155,25 +1187,29 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         rebuildPullMenu()
     }
 
-    @objc private func selectStashAction() {
-        let selectedAction = stashPopUp.titleOfSelectedItem ?? "Stash"
-        stashPopUp.selectItem(at: 0)
+    @objc private func selectStashSegment(_ sender: NSSegmentedControl) {
+        if sender.selectedSegment == 0 {
+            beginManageStashes()
+        } else if sender.selectedSegment == 1 {
+            stashMenu.popUp(
+                positioning: nil,
+                at: NSPoint(x: sender.bounds.minX, y: sender.bounds.maxY),
+                in: sender
+            )
+        }
+    }
+
+    @objc private func stashMenuCommand(_ sender: NSMenuItem) {
+        let selectedAction = sender.representedObject as? String ?? sender.title
         switch selectedAction {
-        case "Stash", "Create a stash…":
-            beginCreateStash()
+        case "Stash":
+            beginQuickStash()
+        case "Create a stash…":
+            beginManageStashes(manageStashes: false)
         case "Stash staged":
-            beginMutation(errorTitle: "Stash failed") { source in
-                try await source.createStash(RepositoryStashCreateRequest(
-                    message: "",
-                    includeUntracked: false,
-                    keepIndex: false,
-                    stagedOnly: true
-                ))
-            }
+            beginStashStaged()
         case "Stash pop":
-            beginMutation(errorTitle: "Stash pop failed") { source in
-                try await source.popStash(nil)
-            }
+            performLatestStashPop()
         case "Manage stashes…":
             beginManageStashes()
         default:
@@ -1266,17 +1302,14 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             performStashMutation(.pop, stash: stash)
         case ("repository.stash.drop", .stash(let stash)):
             beginDropStash(stash)
+        case ("repository.stash.open", .stash(let stash)):
+            beginManageStashes(initialStash: stash.selector)
         case ("repository.stashes.create", _):
-            beginCreateStash()
+            beginQuickStash()
         case ("repository.stashes.staged", _):
-            beginMutation(errorTitle: "Stash failed") { source in
-                try await source.createStash(RepositoryStashCreateRequest(
-                    message: "",
-                    includeUntracked: false,
-                    keepIndex: false,
-                    stagedOnly: true
-                ))
-            }
+            beginStashStaged()
+        case ("repository.stashes.manage", _):
+            beginManageStashes()
         default:
             showPlaceholderStatus(for: identifier)
         }
@@ -1567,7 +1600,10 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         case pop
     }
 
-    private func beginManageStashes() {
+    private func beginManageStashes(
+        manageStashes: Bool = true,
+        initialStash: String? = nil
+    ) {
         guard let source = dataSource as? any RepositoryMutatingDataSource,
               let snapshot,
               let window = view.window else {
@@ -1576,9 +1612,14 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         }
         Task { @MainActor [weak self, weak window] in
             guard let self, let window else { return }
-            if let refreshed = await WorkflowManagementDialogs.manageStashes(source: source, snapshot: snapshot, window: window) {
-                apply(snapshot: refreshed, preferredCommitID: selectedCommitID)
-            }
+            let result = await WorkflowManagementDialogs.manageStashes(
+                source: source,
+                snapshot: snapshot,
+                window: window,
+                manageStashes: manageStashes,
+                initialStash: initialStash
+            )
+            apply(snapshot: result.snapshot, preferredCommitID: result.selectedCommitID ?? selectedCommitID)
         }
     }
 
@@ -1597,20 +1638,47 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
     }
 
     private func performStashMutation(_ kind: StashMutationKind, stash: Stash) {
-        let title: String
-        switch kind {
-        case .apply: title = "Stash apply failed"
-        case .pop: title = "Stash pop failed"
-        }
-        beginMutation(errorTitle: title) { source in
+        performStashOperation(errorTitle: kind == .apply ? "Stash apply failed" : "Stash pop failed") { source in
             switch kind {
-            case .apply: return try await source.applyStash(stash)
-            case .pop: return try await source.popStash(stash)
+            case .apply: try await source.applyStash(stash)
+            case .pop: try await source.popStash(stash)
             }
         }
     }
 
-    private func beginCreateStash() {
+    private func performLatestStashPop() {
+        performStashOperation(errorTitle: "Stash pop failed") { source in
+            try await source.popStash(nil)
+        }
+    }
+
+    private func beginQuickStash() {
+        let includeUntracked = AppSettingsStore.shared.stashPreferences.includeUntracked
+        performStashOperation(errorTitle: "Stash failed") { source in
+            try await source.createStash(RepositoryStashCreateRequest(
+                message: "",
+                includeUntracked: includeUntracked,
+                keepIndex: false,
+                stagedOnly: false
+            ))
+        }
+    }
+
+    private func beginStashStaged() {
+        performStashOperation(errorTitle: "Stash failed") { source in
+            try await source.createStash(RepositoryStashCreateRequest(
+                message: "",
+                includeUntracked: false,
+                keepIndex: false,
+                stagedOnly: true
+            ))
+        }
+    }
+
+    private func performStashOperation(
+        errorTitle: String,
+        operation: @escaping @Sendable (any RepositoryMutatingDataSource) async throws -> RepositoryMutationResult
+    ) {
         guard let mutationSource = dataSource as? any RepositoryMutatingDataSource,
               let window = view.window else {
             showPlaceholderStatus(for: "Stash is unavailable for mock data")
@@ -1620,17 +1688,25 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         mutationTask?.cancel()
         mutationTask = Task { @MainActor [weak self, weak window] in
             guard let self, let window else { return }
-            guard let request = await MutationDialogs.stashCreateRequest(window: window) else {
-                statusLabel.stringValue = "Stash cancelled"
-                return
-            }
             do {
-                statusLabel.stringValue = "Creating stash…"
+                statusLabel.stringValue = "Updating stash state…"
                 revisionDetailsTask?.cancel()
-                let result = try await mutationSource.createStash(request)
+                let result = try await operation(mutationSource)
                 guard !Task.isCancelled else { return }
                 apply(snapshot: result.snapshot, preferredCommitID: result.selectedCommitID ?? previousSelection)
-                statusLabel.stringValue = result.message
+                switch result.outcome {
+                case .completed:
+                    statusLabel.stringValue = result.message
+                case .conflicts(let paths):
+                    statusLabel.stringValue = "\(result.message) \(paths.count) conflicted path(s) remain."
+                    if await MutationDialogs.confirmResolveStashConflicts(paths: paths, window: window),
+                       let resolved = await WorkflowManagementDialogs.resolveConflicts(source: mutationSource, window: window) {
+                        apply(snapshot: resolved, preferredCommitID: result.selectedCommitID ?? previousSelection)
+                        statusLabel.stringValue = "Repository refreshed after resolving stash conflicts."
+                    }
+                case .paused(let reason):
+                    statusLabel.stringValue = reason
+                }
             } catch is CancellationError {
                 return
             } catch {
@@ -1638,7 +1714,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
                     apply(snapshot: refreshed, preferredCommitID: previousSelection)
                 }
                 statusLabel.stringValue = error.localizedDescription
-                await MutationDialogs.showError(error, title: "Stash failed", window: window)
+                await MutationDialogs.showError(error, title: errorTitle, window: window)
             }
         }
     }

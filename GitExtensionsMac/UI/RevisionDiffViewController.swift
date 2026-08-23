@@ -101,6 +101,13 @@ final class RevisionDiffViewController: RetainingSplitViewController {
     }
 }
 
+struct ChangedFileSection: Sendable {
+    let id: String
+    let title: String
+    let imageName: String
+    let files: [ChangedFile]
+}
+
 final class ChangedFilesViewController: NSViewController, NSOutlineViewDelegate, NSOutlineViewDataSource, NSMenuDelegate, NSTextFieldDelegate {
     var onSelection: ((ChangedFile) -> Void)?
     var onMutation: ((String, [ChangedFile], ChangedFileSelectionScope) -> Void)?
@@ -112,6 +119,7 @@ final class ChangedFilesViewController: NSViewController, NSOutlineViewDelegate,
     private var groupingButtons: [FileStatusGrouping: NSButton] = [:]
     private var allFiles: [ChangedFile] = []
     private var files: [ChangedFile] = []
+    private var explicitSections: [ChangedFileSection]?
     private var rootNodes: [ChangedFileNode] = []
     private var selectionScope: ChangedFileSelectionScope = .revision
     private var comparisonTitle = "Diff with parent"
@@ -236,10 +244,25 @@ final class ChangedFilesViewController: NSViewController, NSOutlineViewDelegate,
     func apply(files: [ChangedFile], scope: ChangedFileSelectionScope, comparisonTitle: String) {
         let selectedIDs = selectedFileIDs()
         allFiles = files
+        explicitSections = nil
         selectionScope = scope
         showUntrackedMenuItem?.isEnabled = scope == .workingTree
         self.comparisonTitle = comparisonTitle
         reloadFilteredFiles(preferredIDs: selectedIDs)
+    }
+
+    func apply(sections: [ChangedFileSection], scope: ChangedFileSelectionScope) {
+        let selectedIDs = selectedFileIDs()
+        allFiles = sections.flatMap(\.files)
+        selectionScope = scope
+        showUntrackedMenuItem?.isEnabled = scope == .workingTree
+        comparisonTitle = "Changes"
+        explicitSections = sections
+        reloadFilteredFiles(preferredIDs: selectedIDs)
+    }
+
+    func currentlySelectedFiles() -> [ChangedFile] {
+        selectedFiles()
     }
 
     func controlTextDidChange(_ obj: Notification) {
@@ -290,6 +313,26 @@ final class ChangedFilesViewController: NSViewController, NSOutlineViewDelegate,
     }
 
     private func makeRootNodes() -> [ChangedFileNode] {
+        if let explicitSections {
+            let visibleIDs = Set(files.map(\.id))
+            return explicitSections.compactMap { section in
+                let sectionFiles = section.files.filter { visibleIDs.contains($0.id) }
+                guard !sectionFiles.isEmpty else { return nil }
+                let children = ChangedFileListTreeBuilder.build(
+                    files: sectionFiles,
+                    grouping: grouping,
+                    isTreeMode: isTreeMode,
+                    usesDenseTree: usesDenseTree,
+                    showsGroupNodesInFlatList: showsGroupNodesInFlatList
+                )
+                return ChangedFileNode(
+                    id: "section:\(section.id)",
+                    title: "(\(sectionFiles.count)) \(section.title)",
+                    imageName: section.imageName,
+                    children: children
+                )
+            }
+        }
         let leaves = ChangedFileListTreeBuilder.build(
             files: files,
             grouping: grouping,

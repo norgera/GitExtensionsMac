@@ -99,7 +99,8 @@ actor GitRepositoryBrowsingDataSource: RepositoryOpeningDataSource {
             id: repository.gitDirectoryURL.path,
             name: name,
             path: repository.rootURL.path,
-            description: repository.isBare ? "Bare Git repository" : "Git repository"
+            description: repository.isBare ? "Bare Git repository" : "Git repository",
+            isBare: repository.isBare
         )
 
         return RepositorySnapshot(
@@ -130,9 +131,16 @@ actor GitRepositoryBrowsingDataSource: RepositoryOpeningDataSource {
         let numstat: [String: (Int, Int)]
         switch commit.kind {
         case .revision:
+            let isStash = commit.references.contains { $0.kind == .stash }
             let commands = revisionDiffArguments(commit: commit)
-            async let namesResult = run(arguments: commands.nameStatus, repository: repository)
-            async let countsResult = run(arguments: commands.numstat, repository: repository)
+            let nameArguments = isStash
+                ? ["stash", "show", "--include-untracked", "--name-status", "-z", commit.id]
+                : commands.nameStatus
+            let numstatArguments = isStash
+                ? ["stash", "show", "--include-untracked", "--numstat", "-z", commit.id]
+                : commands.numstat
+            async let namesResult = run(arguments: nameArguments, repository: repository)
+            async let countsResult = run(arguments: numstatArguments, repository: repository)
             changedPaths = try GitOutputParser.parseNameStatus(try await namesResult.standardOutput)
             numstat = GitOutputParser.parseNumstat(try await countsResult.standardOutput)
         case .index:
@@ -190,8 +198,27 @@ actor GitRepositoryBrowsingDataSource: RepositoryOpeningDataSource {
         let output: GitCommandResult
         switch commit.kind {
         case .revision:
-            let commands = revisionDiffArguments(commit: commit)
-            output = try await run(arguments: commands.patch + ["--"] + paths, repository: repository)
+            if commit.references.contains(where: { $0.kind == .stash }) {
+                let untrackedObject = try await run(
+                    arguments: ["cat-file", "-e", "\(commit.id)^3:\(file.path)"],
+                    repository: repository,
+                    acceptedStatuses: [0, 1, 128]
+                )
+                if untrackedObject.succeeded {
+                    output = try await run(
+                        arguments: ["show", "--format=", "--patch", "--no-color", "\(commit.id)^3", "--"] + paths,
+                        repository: repository
+                    )
+                } else {
+                    output = try await run(
+                        arguments: ["diff", "--no-ext-diff", "--patch", "--no-color", "\(commit.id)^1", commit.id, "--"] + paths,
+                        repository: repository
+                    )
+                }
+            } else {
+                let commands = revisionDiffArguments(commit: commit)
+                output = try await run(arguments: commands.patch + ["--"] + paths, repository: repository)
+            }
         case .index:
             output = try await run(
                 arguments: diffBaseArguments() + ["--cached", "--patch", "--no-color", "--"] + paths,

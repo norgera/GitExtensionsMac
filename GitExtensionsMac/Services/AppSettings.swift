@@ -63,6 +63,17 @@ struct CherryPickPreferences: Codable, Equatable, Sendable {
     var addReference = false
 }
 
+struct StashPreferences: Codable, Equatable, Sendable {
+    var keepIndex = false
+    var includeUntracked = false
+    var dontConfirmDrop = false
+    var showStashCount = false
+    var showStashesInRepositoryTree = true
+    var windowWidth = 708.0
+    var windowHeight = 520.0
+    var dividerPosition = 280.0
+}
+
 enum PushRejectedActionPreference: String, Codable, CaseIterable, Sendable {
     case ask
     case none
@@ -319,6 +330,7 @@ final class AppSettingsStore {
         static let fileStatusListPreferences = "GitExtensionsMac.fileStatusListPreferences.v1"
         static let rebasePreferences = "GitExtensionsMac.rebasePreferences.v1"
         static let cherryPickPreferences = "GitExtensionsMac.cherryPickPreferences.v1"
+        static let stashPreferences = "GitExtensionsMac.stashPreferences.v1"
     }
 
     private let defaults: UserDefaults
@@ -330,6 +342,7 @@ final class AppSettingsStore {
     private(set) var fileStatusListPreferences: FileStatusListPreferences
     private(set) var rebasePreferences: RebasePreferences
     private(set) var cherryPickPreferences: CherryPickPreferences
+    private(set) var stashPreferences: StashPreferences
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -358,6 +371,9 @@ final class AppSettingsStore {
         cherryPickPreferences = defaults.data(forKey: Key.cherryPickPreferences)
             .flatMap { try? decoder.decode(CherryPickPreferences.self, from: $0) }
             ?? CherryPickPreferences()
+        stashPreferences = defaults.data(forKey: Key.stashPreferences)
+            .flatMap { try? decoder.decode(StashPreferences.self, from: $0) }
+            ?? StashPreferences()
         recentRepositories.removeAll { !FileManager.default.fileExists(atPath: $0.path) }
         applyAppearance()
     }
@@ -406,6 +422,11 @@ final class AppSettingsStore {
     func saveCherryPickPreferences(_ preferences: CherryPickPreferences) {
         cherryPickPreferences = preferences
         defaults.set(try? JSONEncoder().encode(preferences), forKey: Key.cherryPickPreferences)
+    }
+
+    func saveStashPreferences(_ preferences: StashPreferences) {
+        stashPreferences = preferences
+        defaults.set(try? JSONEncoder().encode(preferences), forKey: Key.stashPreferences)
     }
 
     func recordPullURL(_ value: String) {

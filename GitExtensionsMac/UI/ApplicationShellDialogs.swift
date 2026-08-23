@@ -989,6 +989,7 @@ private final class SettingsViewController: NSViewController, NSOutlineViewDataS
     private var draft: AppPreferences
     private var pushDraft: PushPreferences
     private var commitDraft: CommitPreferences
+    private var stashDraft: StashPreferences
     private lazy var roots: [SettingsNode] = [
         SettingsNode("application", "Git Extensions", [
             SettingsNode("general", "General"),
@@ -1028,6 +1029,7 @@ private final class SettingsViewController: NSViewController, NSOutlineViewDataS
         draft = store.preferences
         pushDraft = store.pushPreferences
         commitDraft = store.commitPreferences
+        stashDraft = store.stashPreferences
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -1177,7 +1179,7 @@ private final class SettingsViewController: NSViewController, NSOutlineViewDataS
                 disabledToggle("Show number of changed files on commit button", true),
                 disabledToggle("Show number of changed files for artificial commits", true),
                 disabledToggle("Show submodules status in browse menu", false),
-                disabledToggle("Show stash count on status bar in browse window", false),
+                toggle("Show stash count on status bar in browse window", value: stashDraft.showStashCount) { self.stashDraft.showStashCount = $0 },
                 disabledToggle("Show ahead and behind information on status bar in browse window", true),
                 disabledToggle("Check for uncommitted changes in checkout branch dialog", true)
             ]))
@@ -1358,12 +1360,14 @@ private final class SettingsViewController: NSViewController, NSOutlineViewDataS
         store.save(draft)
         store.savePushPreferences(pushDraft)
         store.saveCommitPreferences(commitDraft)
+        store.saveStashPreferences(stashDraft)
     }
     @objc private func saveAndClose() {
         guard validate() else { return }
         store.save(draft)
         store.savePushPreferences(pushDraft)
         store.saveCommitPreferences(commitDraft)
+        store.saveStashPreferences(stashDraft)
         finish(.OK)
     }
     @objc private func cancel() { finish(.cancel) }

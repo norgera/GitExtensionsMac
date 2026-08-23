@@ -296,8 +296,9 @@ enum MutationDialogs {
         message.controlSize = .small
         message.widthAnchor.constraint(equalToConstant: 390).isActive = true
         stack.addArrangedSubview(labeledControl("Message:", message))
-        let includeUntracked = checkbox("Include untracked files", state: false)
-        let keepIndex = checkbox("Keep staged changes in the index", state: false)
+        let preferences = AppSettingsStore.shared.stashPreferences
+        let includeUntracked = checkbox("Include untracked files", state: preferences.includeUntracked)
+        let keepIndex = checkbox("Keep staged changes in the index", state: preferences.keepIndex)
         stack.addArrangedSubview(includeUntracked)
         stack.addArrangedSubview(keepIndex)
 
@@ -313,6 +314,16 @@ enum MutationDialogs {
         alert.accessoryView = accessory
         let response = await begin(alert: alert, for: window)
         guard response == .alertFirstButtonReturn else { return nil }
+        AppSettingsStore.shared.saveStashPreferences(StashPreferences(
+            keepIndex: keepIndex.state == .on,
+            includeUntracked: includeUntracked.state == .on,
+            dontConfirmDrop: preferences.dontConfirmDrop,
+            showStashCount: preferences.showStashCount,
+            showStashesInRepositoryTree: preferences.showStashesInRepositoryTree,
+            windowWidth: preferences.windowWidth,
+            windowHeight: preferences.windowHeight,
+            dividerPosition: preferences.dividerPosition
+        ))
         return RepositoryStashCreateRequest(
             message: message.stringValue,
             includeUntracked: includeUntracked.state == .on,
@@ -322,13 +333,22 @@ enum MutationDialogs {
     }
 
     static func confirmDrop(stash: Stash, window: NSWindow) async -> Bool {
+        var preferences = AppSettingsStore.shared.stashPreferences
+        if preferences.dontConfirmDrop { return true }
         let alert = NSAlert()
-        alert.messageText = "Drop stash?"
-        alert.informativeText = "Drop \(stash.selector): \(stash.subject)\n\nThis action cannot be undone."
-        alert.alertStyle = .warning
+        alert.messageText = "This action cannot be undone"
+        alert.informativeText = "Are you sure you want to drop \(stash.selector): \(stash.subject)?"
+        alert.alertStyle = .informational
         alert.addButton(withTitle: "Drop")
         alert.addButton(withTitle: "Cancel")
-        return await begin(alert: alert, for: window) == .alertFirstButtonReturn
+        alert.showsSuppressionButton = true
+        alert.suppressionButton?.title = "Don't show again"
+        let response = await begin(alert: alert, for: window)
+        if response == .alertFirstButtonReturn, alert.suppressionButton?.state == .on {
+            preferences.dontConfirmDrop = true
+            AppSettingsStore.shared.saveStashPreferences(preferences)
+        }
+        return response == .alertFirstButtonReturn
     }
 
     static func confirmAbortCherryPick(window: NSWindow) async -> Bool {
@@ -347,6 +367,16 @@ enum MutationDialogs {
         alert.informativeText = paths.isEmpty
             ? "The cherry-pick stopped with conflicts."
             : "The cherry-pick stopped with conflicts in \(paths.count) path(s)."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Resolve conflicts")
+        alert.addButton(withTitle: "Later")
+        return await begin(alert: alert, for: window) == .alertFirstButtonReturn
+    }
+
+    static func confirmResolveStashConflicts(paths: [String], window: NSWindow) async -> Bool {
+        let alert = NSAlert()
+        alert.messageText = "Resolve merge conflicts?"
+        alert.informativeText = "The stash operation left \(paths.count) unresolved path(s). Open the shared conflict resolver now?"
         alert.alertStyle = .warning
         alert.addButton(withTitle: "Resolve conflicts")
         alert.addButton(withTitle: "Later")

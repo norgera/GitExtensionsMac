@@ -5,6 +5,15 @@ struct Repository: Identifiable, Hashable, Sendable {
     let name: String
     let path: String
     let description: String
+    let isBare: Bool
+
+    init(id: String, name: String, path: String, description: String, isBare: Bool = false) {
+        self.id = id
+        self.name = name
+        self.path = path
+        self.description = description
+        self.isBare = isBare
+    }
 }
 
 struct Branch: Identifiable, Hashable, Sendable {
