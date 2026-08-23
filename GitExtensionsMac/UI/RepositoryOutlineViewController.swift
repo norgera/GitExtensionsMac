@@ -10,7 +10,7 @@ final class RepositoryTreeNode: NSObject {
         case stash(Stash)
         case worktree(Worktree)
         case submodule(Submodule)
-        case folder
+        case folder(prefix: String, isRemote: Bool)
     }
 
     let title: String
@@ -92,7 +92,7 @@ final class RepositoryOutlineViewController: NSViewController, NSOutlineViewData
         outlineView.allowsEmptySelection = true
         outlineView.selectionHighlightStyle = .regular
         outlineView.target = self
-        outlineView.doubleAction = #selector(openSelectedStash)
+        outlineView.doubleAction = #selector(openSelectedNode)
         outlineView.intercellSpacing = .zero
         outlineView.backgroundColor = .controlBackgroundColor
         outlineView.delegate = self
@@ -241,7 +241,12 @@ final class RepositoryOutlineViewController: NSViewController, NSOutlineViewData
                     }
                 } else {
                     let existing = children.first { $0.title == part && $0.isFolder }
-                    let folder = existing ?? RepositoryTreeNode(title: part, kind: .folder, symbolName: "FolderClosed")
+                    let prefix = parts.prefix(index + 1).joined(separator: "/")
+                    let folder = existing ?? RepositoryTreeNode(
+                        title: part,
+                        kind: .folder(prefix: prefix, isRemote: isRemote),
+                        symbolName: "FolderClosed"
+                    )
                     if existing == nil {
                         if let parent {
                             parent.children.append(folder)
@@ -446,12 +451,22 @@ final class RepositoryOutlineViewController: NSViewController, NSOutlineViewData
         menuFocusedNode = node
         let mutationCommands: Set<String> = [
             "repository.branch.checkout",
+            "repository.branch.create",
+            "repository.branch.rename",
+            "repository.branch.delete",
             "repository.branch.push",
             "repository.branch.merge",
             "repository.remoteBranch.checkout",
+            "repository.remoteBranch.create",
+            "repository.remoteBranch.fetch",
+            "repository.remoteBranch.fetchCheckout",
+            "repository.remoteBranch.fetchCreate",
             "repository.remoteBranch.merge",
             "repository.remoteBranch.delete",
             "repository.tag.checkout",
+            "repository.tag.createBranch",
+            "repository.folder.create",
+            "repository.folder.deleteAll",
             "repository.tag.merge",
             "repository.branch.rebase",
             "repository.remoteBranch.rebase",
@@ -472,13 +487,23 @@ final class RepositoryOutlineViewController: NSViewController, NSOutlineViewData
         onCommand?(identifier, menuFocusedNode)
     }
 
-    @objc private func openSelectedStash() {
+    @objc private func openSelectedNode() {
         let row = outlineView.clickedRow >= 0 ? outlineView.clickedRow : outlineView.selectedRow
         guard row >= 0,
               let node = outlineView.item(atRow: row) as? RepositoryTreeNode,
-              case .stash = node.kind,
               !isBareRepository else { return }
-        onCommand?("repository.stash.open", node)
+        switch node.kind {
+        case .branch:
+            onCommand?("repository.branch.checkout", node)
+        case .remoteBranch:
+            onCommand?("repository.remoteBranch.checkout", node)
+        case .tag:
+            onCommand?("repository.tag.createBranch", node)
+        case .stash:
+            onCommand?("repository.stash.open", node)
+        default:
+            break
+        }
     }
 }
 
@@ -513,8 +538,8 @@ private extension RepositoryTreeNode {
             )
         case .submodule:
             return .submodule
-        case .folder:
-            return .folder
+        case .folder(_, let isRemote):
+            return isRemote ? .remoteBranchFolder : .branchFolder
         }
     }
 }

@@ -23,6 +23,17 @@ enum RepositoryCheckoutTarget: Hashable, Sendable {
 struct RepositoryCheckoutRequest: Hashable, Sendable {
     let target: RepositoryCheckoutTarget
     let localChanges: CheckoutLocalChangesAction
+    let updateSubmodulesAfterCheckout: Bool
+
+    init(
+        target: RepositoryCheckoutTarget,
+        localChanges: CheckoutLocalChangesAction,
+        updateSubmodulesAfterCheckout: Bool = false
+    ) {
+        self.target = target
+        self.localChanges = localChanges
+        self.updateSubmodulesAfterCheckout = updateSubmodulesAfterCheckout
+    }
 }
 
 enum RepositoryHunkDirection: Hashable, Sendable {
@@ -417,11 +428,6 @@ protocol RepositoryMutationStateDataSource: RepositoryBrowsingDataSource {
     func loadMutationState() async throws -> RepositoryMutationState
 }
 
-protocol RepositoryCheckoutDataSource: RepositoryMutationStateDataSource {
-    func checkout(_ request: RepositoryCheckoutRequest) async throws -> RepositoryMutationResult
-    func createBranch(named name: String) async throws -> RepositoryMutationResult
-}
-
 protocol RepositoryStagingDataSource: RepositoryMutationStateDataSource {
     func stage(paths: [String]) async throws -> RepositoryMutationResult
     func unstage(paths: [String]) async throws -> RepositoryMutationResult
@@ -476,7 +482,7 @@ protocol RepositoryRebaseDataSource: RepositoryConflictDataSource {
 }
 
 protocol RepositoryMutatingDataSource:
-    RepositoryCheckoutDataSource,
+    RepositoryCheckoutBranchDataSource,
     RepositoryConflictResolutionDataSource,
     RepositoryStashDataSource,
     RepositoryCherryPickDataSource,
@@ -515,6 +521,11 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
             _ = try await checkedMutation(checkoutArguments, in: repository)
         } catch {
             throw error
+        }
+
+        if request.updateSubmodulesAfterCheckout,
+           before.headID != (try await mutationState(in: repository)).headID {
+            _ = try await checkedMutation(["submodule", "update", "--init", "--recursive"], in: repository)
         }
 
         var outcome: RepositoryMutationOutcome = .completed
@@ -859,13 +870,12 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
     }
 
     func createBranch(named name: String) async throws -> RepositoryMutationResult {
-        let repository = try mutationRepository()
-        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !name.isEmpty else { throw RepositoryMutationError.invalidBranchName(name) }
-        let valid = try await rawMutation(["check-ref-format", "--branch", name], in: repository)
-        guard valid.succeeded else { throw RepositoryMutationError.invalidBranchName(name) }
-        _ = try await checkedMutation(["checkout", "-b", name], in: repository)
-        return try await refreshedMutationResult(message: "Created and checked out \(name).", selectedCommitID: nil)
+        try await createBranch(RepositoryCreateBranchRequest(
+            name: name,
+            sourceRevision: nil,
+            checkoutAfterCreation: true,
+            mode: .normal
+        ))
     }
 
     func createStash(_ request: RepositoryStashCreateRequest) async throws -> RepositoryMutationResult {
@@ -1468,26 +1478,25 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
 
         switch request.target {
         case .localBranch(let name):
-            if state.currentBranch == name { throw RepositoryMutationError.currentBranch(name) }
             arguments.append(name)
 
         case .revision(let objectID):
             guard !objectID.isEmpty, !objectID.hasPrefix("$") else {
                 throw RepositoryMutationError.invalidRevision(objectID)
             }
-            arguments += ["--detach", objectID]
+            arguments.append(objectID)
 
         case .remoteBranch(let remote, let branch, let mode):
             let remoteRef = "\(remote)/\(branch)"
             switch mode {
             case .detached:
-                arguments += ["--detach", remoteRef]
+                arguments.append(remoteRef)
             case .createTracking(let localBranch):
                 try await validateBranchName(localBranch, repository: repository)
                 arguments += ["-b", localBranch, "--track", remoteRef]
             case .resetTracking(let localBranch):
                 try await validateBranchName(localBranch, repository: repository)
-                arguments += ["-B", localBranch, "--track", remoteRef]
+                arguments += ["-B", localBranch, remoteRef]
             }
         }
         return arguments
@@ -2044,7 +2053,7 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
         return Int(selector[open.upperBound..<close])
     }
 
-    private func mutationRepository() throws -> ResolvedGitRepository {
+    func mutationRepository() throws -> ResolvedGitRepository {
         guard let repository = resolvedRepository else { throw RepositoryMutationError.unavailable }
         if repository.isBare { throw RepositoryMutationError.bareRepository }
         return repository
@@ -2070,7 +2079,7 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
         return value
     }
 
-    private func refreshedMutationResult(message: String, selectedCommitID: String?) async throws -> RepositoryMutationResult {
+    func refreshedMutationResult(message: String, selectedCommitID: String?) async throws -> RepositoryMutationResult {
         let snapshot = try await loadSnapshot()
         let repository = try mutationRepository()
         let state = try await mutationState(in: repository)
@@ -2116,17 +2125,17 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
         )
     }
 
-    private func checkedMutation(_ arguments: [String], in repository: ResolvedGitRepository) async throws -> GitCommandResult {
+    func checkedMutation(_ arguments: [String], in repository: ResolvedGitRepository) async throws -> GitCommandResult {
         let result = try await rawMutation(arguments, in: repository)
         guard result.succeeded else { throw commandError(from: result) }
         return result
     }
 
-    private func rawMutation(_ arguments: [String], in repository: ResolvedGitRepository) async throws -> GitCommandResult {
+    func rawMutation(_ arguments: [String], in repository: ResolvedGitRepository) async throws -> GitCommandResult {
         try await git.run(arguments: arguments, in: repository.rootURL)
     }
 
-    private func commandError(from result: GitCommandResult) -> GitError {
+    func commandError(from result: GitCommandResult) -> GitError {
         let standardOutput = result.standardOutputString.trimmingCharacters(in: .whitespacesAndNewlines)
         let standardError = result.standardErrorString.trimmingCharacters(in: .whitespacesAndNewlines)
         let detail: String

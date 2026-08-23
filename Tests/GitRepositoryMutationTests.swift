@@ -2,13 +2,42 @@ import Foundation
 
 enum GitRepositoryMutationTests {
     static func runCheckout() async throws {
+        try testBranchNameNormalization()
         let fixture = try MutationGitFixture.make()
         defer { fixture.remove() }
 
         try await testLocalAndDetachedCheckout(fixture)
         try await testRemoteTrackingCheckout(fixture)
         try await testDirtyCheckoutFailure(fixture)
+        try await testStagedAndUntrackedCheckoutFailures(fixture)
+        try await testCheckoutLocalChangeModes(fixture)
+        try await testRemoteResetAndDetachedCheckout(fixture)
+        try await testBranchCreationAndValidation(fixture)
+        try await testOrphanBranchCreation(fixture)
+        try await testBranchRename(fixture)
+        try await testBareBranchRename(fixture)
+        try await testBranchDeletionSafety(fixture)
+        try await testBranchDeletionInLinkedWorktree(fixture)
         print("GitRepositoryMutationTests.checkout: passed")
+    }
+
+    private static func testBranchNameNormalization() throws {
+        try require(
+            RepositoryBranchNameNormalizer.normalize(" feature name ") == "_feature_name_",
+            "branch names: spaces use the upstream replacement token"
+        )
+        try require(
+            RepositoryBranchNameNormalizer.normalize("/foo//.bar..baz.lock") == "foo/_bar_baz_lock",
+            "branch names: slash, dot, component and lock rules are normalized"
+        )
+        try require(
+            RepositoryBranchNameNormalizer.normalize(#"topic@{one}\\two?[x]^:"#) == "topic_one}_two__x]__",
+            "branch names: reflog and revision-special characters are normalized"
+        )
+        try require(
+            RepositoryBranchNameNormalizer.normalize("équipe/二") == "équipe/二",
+            "branch names: Unicode letters and digits are preserved"
+        )
     }
 
     static func runStaging() async throws {
@@ -339,12 +368,14 @@ enum GitRepositoryMutationTests {
         try require(switched.snapshot.branches.contains { $0.name == "local-topic" && $0.isCurrent }, "checkout: local branch becomes current")
         try require(switched.selectedCommitID == switched.snapshot.commits.first(where: \.isHEAD)?.id, "checkout: selection follows the new HEAD")
 
-        do {
-            _ = try await source.checkout(RepositoryCheckoutRequest(target: .localBranch("local-topic"), localChanges: .keep))
-            throw MutationFixtureError("checkout: current branch was accepted")
-        } catch RepositoryMutationError.currentBranch(let name) {
-            try require(name == "local-topic", "checkout: current branch error retains its name")
-        }
+        let sameBranch = try await source.checkout(RepositoryCheckoutRequest(
+            target: .localBranch("local-topic"),
+            localChanges: .keep
+        ))
+        try require(
+            sameBranch.snapshot.branches.contains { $0.name == "local-topic" && $0.isCurrent },
+            "checkout: selecting the current branch remains a successful Git checkout"
+        )
 
         let mainID = try fixture.git(["rev-parse", "main"], in: repository).trimmed
         let detached = try await source.checkout(RepositoryCheckoutRequest(target: .revision(mainID), localChanges: .keep))
@@ -357,6 +388,15 @@ enum GitRepositoryMutationTests {
         let repository = try fixture.clone(named: "Remote checkout repo")
         let source = GitRepositoryBrowsingDataSource(repositoryURL: repository)
         _ = try await source.loadSnapshot()
+
+        let mainID = try fixture.git(["rev-parse", "main"], in: repository).trimmed
+        let topicID = try fixture.git(["rev-parse", "origin/topic"], in: repository).trimmed
+        let divergence = try await source.divergence(from: mainID, to: topicID)
+        try require(
+            divergence == RepositoryRevisionDivergence(added: 0, removed: 1)
+                && divergence.displayText == "(+0-1)",
+            "checkout: selected-branch divergence matches Git Extensions display semantics"
+        )
 
         let result = try await source.checkout(RepositoryCheckoutRequest(
             target: .remoteBranch(remote: "origin", branch: "topic", mode: .createTracking(localBranch: "topic-local")),
@@ -396,6 +436,272 @@ enum GitRepositoryMutationTests {
         try require(try fixture.git(["branch", "--show-current"], in: repository).trimmed == beforeBranch, "checkout: dirty failure preserves branch")
         try require(try fixture.git(["rev-parse", "HEAD"], in: repository).trimmed == beforeHead, "checkout: dirty failure preserves HEAD")
         try require(try String(contentsOf: repository.appendingPathComponent("shared.txt"), encoding: .utf8) == "dirty main\n", "checkout: dirty failure preserves worktree content")
+    }
+
+    private static func testCheckoutLocalChangeModes(_ fixture: MutationGitFixture) async throws {
+        let mergeRepository = try fixture.clone(named: "Checkout merge changes repo")
+        try fixture.git(["branch", "local-topic", "origin/topic"], in: mergeRepository)
+        try fixture.write("local main edit\n", to: mergeRepository.appendingPathComponent("main.txt"))
+        let mergeSource = GitRepositoryBrowsingDataSource(repositoryURL: mergeRepository)
+        _ = try await mergeSource.loadSnapshot()
+        _ = try await mergeSource.checkout(RepositoryCheckoutRequest(
+            target: .localBranch("local-topic"),
+            localChanges: .merge
+        ))
+        try require(try fixture.git(["branch", "--show-current"], in: mergeRepository).trimmed == "local-topic", "checkout merge: target becomes current")
+        try require(try String(contentsOf: mergeRepository.appendingPathComponent("main.txt"), encoding: .utf8) == "local main edit\n", "checkout merge: local edit is preserved")
+
+        let forceRepository = try fixture.clone(named: "Checkout force changes repo")
+        try fixture.git(["branch", "local-topic", "origin/topic"], in: forceRepository)
+        try fixture.write("discard me\n", to: forceRepository.appendingPathComponent("shared.txt"))
+        let forceSource = GitRepositoryBrowsingDataSource(repositoryURL: forceRepository)
+        _ = try await forceSource.loadSnapshot()
+        _ = try await forceSource.checkout(RepositoryCheckoutRequest(
+            target: .localBranch("local-topic"),
+            localChanges: .force
+        ))
+        try require(try String(contentsOf: forceRepository.appendingPathComponent("shared.txt"), encoding: .utf8) == "topic\n", "checkout force: conflicting local edit is discarded")
+
+        let stashRepository = try fixture.clone(named: "Checkout stash changes repo")
+        try fixture.git(["branch", "local-topic", "origin/topic"], in: stashRepository)
+        try fixture.write("stashed edit\n", to: stashRepository.appendingPathComponent("main.txt"))
+        try fixture.write("untracked\n", to: stashRepository.appendingPathComponent("untracked checkout.txt"))
+        let stashSource = GitRepositoryBrowsingDataSource(repositoryURL: stashRepository)
+        _ = try await stashSource.loadSnapshot()
+        _ = try await stashSource.checkout(RepositoryCheckoutRequest(
+            target: .localBranch("local-topic"),
+            localChanges: .stash(includeUntracked: true, reapply: true)
+        ))
+        try require(try fixture.git(["branch", "--show-current"], in: stashRepository).trimmed == "local-topic", "checkout stash: target becomes current")
+        try require(FileManager.default.fileExists(atPath: stashRepository.appendingPathComponent("untracked checkout.txt").path), "checkout stash: included untracked file is reapplied")
+        try require(try fixture.git(["stash", "list"], in: stashRepository).trimmed.isEmpty, "checkout stash: successful automatic pop removes stash")
+    }
+
+    private static func testStagedAndUntrackedCheckoutFailures(_ fixture: MutationGitFixture) async throws {
+        let stagedRepository = try fixture.clone(named: "Staged checkout failure repo")
+        try fixture.git(["branch", "local-topic", "origin/topic"], in: stagedRepository)
+        try fixture.write("staged conflict\n", to: stagedRepository.appendingPathComponent("shared.txt"))
+        try fixture.git(["add", "shared.txt"], in: stagedRepository)
+        let stagedSource = GitRepositoryBrowsingDataSource(repositoryURL: stagedRepository)
+        _ = try await stagedSource.loadSnapshot()
+        do {
+            _ = try await stagedSource.checkout(RepositoryCheckoutRequest(target: .localBranch("local-topic"), localChanges: .keep))
+            throw MutationFixtureError("checkout: conflicting staged change unexpectedly switched")
+        } catch let error as GitError {
+            try require(error.errorDescription?.contains("would be overwritten by checkout") == true, "checkout: staged failure preserves Git diagnostics")
+        }
+        try require(try fixture.git(["diff", "--cached", "--name-only"], in: stagedRepository).trimmed == "shared.txt", "checkout: staged failure preserves index")
+
+        let untrackedRepository = try fixture.clone(named: "Untracked checkout failure repo")
+        try fixture.git(["branch", "local-topic", "origin/topic"], in: untrackedRepository)
+        try fixture.write("obstructing untracked\n", to: untrackedRepository.appendingPathComponent("topic.txt"))
+        let untrackedSource = GitRepositoryBrowsingDataSource(repositoryURL: untrackedRepository)
+        _ = try await untrackedSource.loadSnapshot()
+        do {
+            _ = try await untrackedSource.checkout(RepositoryCheckoutRequest(target: .localBranch("local-topic"), localChanges: .keep))
+            throw MutationFixtureError("checkout: obstructing untracked file unexpectedly switched")
+        } catch let error as GitError {
+            try require(error.errorDescription?.contains("untracked working tree files would be overwritten") == true, "checkout: untracked collision preserves Git diagnostics")
+        }
+        try require(try String(contentsOf: untrackedRepository.appendingPathComponent("topic.txt"), encoding: .utf8) == "obstructing untracked\n", "checkout: untracked failure preserves file")
+    }
+
+    private static func testRemoteResetAndDetachedCheckout(_ fixture: MutationGitFixture) async throws {
+        let repository = try fixture.clone(named: "Remote reset checkout repo")
+        try fixture.git(["checkout", "-b", "tracked-topic", "--track", "origin/topic"], in: repository)
+        try fixture.git(["reset", "--hard", "main"], in: repository)
+        try fixture.git(["checkout", "main"], in: repository)
+        let source = GitRepositoryBrowsingDataSource(repositoryURL: repository)
+        _ = try await source.loadSnapshot()
+
+        _ = try await source.checkout(RepositoryCheckoutRequest(
+            target: .remoteBranch(remote: "origin", branch: "topic", mode: .resetTracking(localBranch: "tracked-topic")),
+            localChanges: .keep
+        ))
+        let resetLocal = try fixture.git(["rev-parse", "tracked-topic"], in: repository).trimmed
+        let resetRemote = try fixture.git(["rev-parse", "origin/topic"], in: repository).trimmed
+        try require(resetLocal == resetRemote, "remote reset: local ref resets to remote")
+        try require(try fixture.git(["rev-parse", "--abbrev-ref", "tracked-topic@{upstream}"], in: repository).trimmed == "origin/topic", "remote reset: existing tracking configuration remains")
+
+        try fixture.git(["checkout", "main"], in: repository)
+        _ = try await source.loadSnapshot()
+        _ = try await source.checkout(RepositoryCheckoutRequest(
+            target: .remoteBranch(remote: "origin", branch: "topic", mode: .detached),
+            localChanges: .keep
+        ))
+        let state = try await source.loadMutationState()
+        let remoteID = try fixture.git(["rev-parse", "origin/topic"], in: repository).trimmed
+        try require(state.currentBranch == nil && state.headID == remoteID, "remote checkout: detached mode checks out the remote ref")
+
+        _ = try await source.checkout(RepositoryCheckoutRequest(target: .localBranch("main"), localChanges: .keep))
+        try require(try fixture.git(["symbolic-ref", "--short", "HEAD"], in: repository).trimmed == "main", "checkout: local branch restores symbolic HEAD from detached state")
+    }
+
+    private static func testBranchCreationAndValidation(_ fixture: MutationGitFixture) async throws {
+        let repository = try fixture.clone(named: "Branch creation repo")
+        let source = GitRepositoryBrowsingDataSource(repositoryURL: repository)
+        _ = try await source.loadSnapshot()
+        let main = try fixture.git(["rev-parse", "main"], in: repository).trimmed
+        let topic = try fixture.git(["rev-parse", "origin/topic"], in: repository).trimmed
+
+        _ = try await source.createBranch(RepositoryCreateBranchRequest(
+            name: "created-at-head",
+            sourceRevision: nil,
+            checkoutAfterCreation: false,
+            mode: .normal
+        ))
+        try require(try fixture.git(["rev-parse", "created-at-head"], in: repository).trimmed == main, "create branch: no-checkout branch points at HEAD")
+        try require(try fixture.git(["branch", "--show-current"], in: repository).trimmed == "main", "create branch: no-checkout leaves HEAD unchanged")
+
+        _ = try await source.createBranch(RepositoryCreateBranchRequest(
+            name: "created-at-topic",
+            sourceRevision: topic,
+            checkoutAfterCreation: true,
+            mode: .normal
+        ))
+        try require(try fixture.git(["branch", "--show-current"], in: repository).trimmed == "created-at-topic", "create branch: create-and-checkout updates symbolic HEAD")
+        try require(try fixture.git(["rev-parse", "HEAD"], in: repository).trimmed == topic, "create branch: selected source revision is honored")
+
+        do {
+            _ = try await source.createBranch(RepositoryCreateBranchRequest(name: "bad name", sourceRevision: main, checkoutAfterCreation: false, mode: .normal))
+            throw MutationFixtureError("create branch: invalid name was accepted")
+        } catch RepositoryMutationError.invalidBranchName(let name) {
+            try require(name == "bad name", "create branch: invalid name is preserved")
+        }
+        do {
+            _ = try await source.createBranch(RepositoryCreateBranchRequest(name: "created-at-head", sourceRevision: main, checkoutAfterCreation: false, mode: .normal))
+            throw MutationFixtureError("create branch: existing name was accepted")
+        } catch let error as GitError {
+            try require(error.errorDescription?.contains("already exists") == true, "create branch: collision preserves Git diagnostics")
+        }
+    }
+
+    private static func testOrphanBranchCreation(_ fixture: MutationGitFixture) async throws {
+        let repository = try fixture.clone(named: "Orphan branch repo")
+        let source = GitRepositoryBrowsingDataSource(repositoryURL: repository)
+        _ = try await source.loadSnapshot()
+        _ = try await source.createBranch(RepositoryCreateBranchRequest(
+            name: "orphan-docs",
+            sourceRevision: "HEAD",
+            checkoutAfterCreation: true,
+            mode: .orphan(clearWorkingDirectoryAndIndex: true)
+        ))
+        try require(try fixture.git(["branch", "--show-current"], in: repository).trimmed == "orphan-docs", "orphan branch: symbolic HEAD uses new name")
+        try require(try fixture.git(["status", "--porcelain"], in: repository).trimmed.isEmpty, "orphan branch: clearing removes tracked index/worktree files")
+
+        let unborn = fixture.rootURL.appendingPathComponent("Unborn branch repo", isDirectory: true)
+        try FileManager.default.createDirectory(at: unborn, withIntermediateDirectories: true)
+        try fixture.git(["init", "--initial-branch=main"], in: unborn)
+        try fixture.configureIdentity(in: unborn)
+        let unbornSource = GitRepositoryBrowsingDataSource(repositoryURL: unborn)
+        _ = try await unbornSource.loadSnapshot()
+        let unbornState = try await unbornSource.loadMutationState()
+        try require(unbornState.headID == nil, "orphan branch: empty repository is detected as unborn")
+        _ = try await unbornSource.createBranch(RepositoryCreateBranchRequest(
+            name: "first-branch",
+            sourceRevision: nil,
+            checkoutAfterCreation: true,
+            mode: .orphan(clearWorkingDirectoryAndIndex: false)
+        ))
+        try require(
+            try fixture.git(["symbolic-ref", "--short", "HEAD"], in: unborn).trimmed == "first-branch",
+            "orphan branch: empty repository changes its unborn symbolic HEAD"
+        )
+    }
+
+    private static func testBranchRename(_ fixture: MutationGitFixture) async throws {
+        let repository = try fixture.clone(named: "Branch rename repo")
+        try fixture.git(["branch", "rename-me"], in: repository)
+        try fixture.git(["branch", "collision"], in: repository)
+        let source = GitRepositoryBrowsingDataSource(repositoryURL: repository)
+        _ = try await source.loadSnapshot()
+        _ = try await source.renameBranch(RepositoryRenameBranchRequest(oldName: "rename-me", newName: "renamed"))
+        try require(try fixture.git(["show-ref", "--verify", "refs/heads/renamed"], in: repository).contains("refs/heads/renamed"), "rename branch: non-current ref is renamed")
+
+        _ = try await source.renameBranch(RepositoryRenameBranchRequest(oldName: "main", newName: "primary"))
+        try require(try fixture.git(["branch", "--show-current"], in: repository).trimmed == "primary", "rename branch: current symbolic HEAD is refreshed")
+        do {
+            _ = try await source.renameBranch(RepositoryRenameBranchRequest(oldName: "primary", newName: "collision"))
+            throw MutationFixtureError("rename branch: collision was accepted")
+        } catch let error as GitError {
+            try require(error.errorDescription?.contains("already exists") == true, "rename branch: collision retains Git diagnostics")
+        }
+    }
+
+    private static func testBranchDeletionSafety(_ fixture: MutationGitFixture) async throws {
+        let repository = try fixture.clone(named: "Branch deletion repo")
+        try fixture.git(["branch", "merged-one", "main"], in: repository)
+        try fixture.git(["branch", "merged-two", "main"], in: repository)
+        try fixture.git(["branch", "unmerged-topic", "origin/topic"], in: repository)
+        let source = GitRepositoryBrowsingDataSource(repositoryURL: repository)
+        _ = try await source.loadSnapshot()
+
+        let candidates = try await source.branchDeletionCandidates(names: ["merged-one", "unmerged-topic"])
+        try require(candidates.first(where: { $0.name == "merged-one" })?.isMergedIntoHEAD == true, "delete branch: merged branch is classified")
+        try require(candidates.first(where: { $0.name == "unmerged-topic" })?.isMergedIntoHEAD == false, "delete branch: unmerged branch is classified")
+        do {
+            _ = try await source.deleteBranches(RepositoryDeleteBranchesRequest(names: ["unmerged-topic"], allowUnmerged: false, removeLinkedWorktrees: false))
+            throw MutationFixtureError("delete branch: unmerged branch bypassed confirmation gate")
+        } catch RepositoryBranchError.unmergedBranches(let names) {
+            try require(names == ["unmerged-topic"], "delete branch: unmerged error retains selected branch")
+        }
+        _ = try await source.deleteBranches(RepositoryDeleteBranchesRequest(names: ["merged-one", "merged-two"], allowUnmerged: false, removeLinkedWorktrees: false))
+        try require((try? fixture.git(["show-ref", "--verify", "refs/heads/merged-one"], in: repository)) == nil, "delete branch: merged ref is removed")
+        _ = try await source.deleteBranches(RepositoryDeleteBranchesRequest(names: ["unmerged-topic"], allowUnmerged: true, removeLinkedWorktrees: false))
+        try require((try? fixture.git(["show-ref", "--verify", "refs/heads/unmerged-topic"], in: repository)) == nil, "delete branch: confirmed force path removes unmerged ref")
+
+        do {
+            _ = try await source.deleteBranches(RepositoryDeleteBranchesRequest(names: ["main"], allowUnmerged: true, removeLinkedWorktrees: false))
+            throw MutationFixtureError("delete branch: current branch was accepted")
+        } catch RepositoryMutationError.currentBranch(let name) {
+            try require(name == "main", "delete branch: current restriction retains branch name")
+        }
+        do {
+            _ = try await source.branchDeletionCandidates(names: ["does-not-exist"])
+            throw MutationFixtureError("delete branch: missing branch was accepted")
+        } catch RepositoryBranchError.branchNotFound(let name) {
+            try require(name == "does-not-exist", "delete branch: missing name is retained")
+        }
+    }
+
+    private static func testBareBranchRename(_ fixture: MutationGitFixture) async throws {
+        let repository = fixture.rootURL.appendingPathComponent("Bare rename repo.git", isDirectory: true)
+        try fixture.git(["clone", "--bare", fixture.templateURL.path, repository.path], in: fixture.rootURL)
+        let source = GitRepositoryBrowsingDataSource(repositoryURL: repository)
+        _ = try await source.loadSnapshot()
+        _ = try await source.renameBranch(RepositoryRenameBranchRequest(oldName: "main", newName: "primary"))
+        try require(try fixture.git(["show-ref", "--verify", "refs/heads/primary"], in: repository).contains("refs/heads/primary"), "rename branch: bare repository ref is renamed")
+    }
+
+    private static func testBranchDeletionInLinkedWorktree(_ fixture: MutationGitFixture) async throws {
+        let repository = try fixture.clone(named: "Branch worktree deletion repo")
+        let worktree = fixture.rootURL.appendingPathComponent("Linked branch worktree", isDirectory: true)
+        try fixture.git(["worktree", "add", "-b", "linked-delete", worktree.path, "main"], in: repository)
+        let source = GitRepositoryBrowsingDataSource(repositoryURL: repository)
+        _ = try await source.loadSnapshot()
+        let preview = try await source.branchDeletionCandidates(names: ["linked-delete"])
+        let expectedPath = worktree.resolvingSymlinksInPath().path
+        try require(preview.first.map { URL(fileURLWithPath: $0.worktreePath ?? "").resolvingSymlinksInPath().path } == expectedPath, "delete branch: linked worktree path is detected")
+
+        let linkedSource = GitRepositoryBrowsingDataSource(repositoryURL: worktree)
+        _ = try await linkedSource.loadSnapshot()
+        let mainPreview = try await linkedSource.branchDeletionCandidates(names: ["main"])
+        try require(mainPreview.first?.isMainWorktree == true, "delete branch: the primary worktree is distinguished from linked worktrees")
+        do {
+            _ = try await linkedSource.deleteBranches(RepositoryDeleteBranchesRequest(names: ["main"], allowUnmerged: true, removeLinkedWorktrees: true))
+            throw MutationFixtureError("delete branch: main worktree branch was accepted from a linked worktree")
+        } catch RepositoryBranchError.branchCheckedOutInMainWorktree(let name, _) {
+            try require(name == "main", "delete branch: main worktree restriction retains branch name")
+        }
+        do {
+            _ = try await source.deleteBranches(RepositoryDeleteBranchesRequest(names: ["linked-delete"], allowUnmerged: false, removeLinkedWorktrees: false))
+            throw MutationFixtureError("delete branch: linked worktree bypassed confirmation gate")
+        } catch RepositoryBranchError.branchCheckedOut(let name, let path) {
+            try require(name == "linked-delete" && URL(fileURLWithPath: path).resolvingSymlinksInPath().path == expectedPath, "delete branch: linked worktree diagnostics retain name/path")
+        }
+        _ = try await source.deleteBranches(RepositoryDeleteBranchesRequest(names: ["linked-delete"], allowUnmerged: false, removeLinkedWorktrees: true))
+        try require(!FileManager.default.fileExists(atPath: worktree.path), "delete branch: confirmed linked worktree is removed")
+        try require((try? fixture.git(["show-ref", "--verify", "refs/heads/linked-delete"], in: repository)) == nil, "delete branch: linked ref is removed")
     }
 
     private static func testFileStaging(_ fixture: MutationGitFixture) async throws {

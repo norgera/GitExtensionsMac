@@ -52,6 +52,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
     private var fetchWindowController: NSWindowController?
     private var remoteWindowController: NSWindowController?
     private var remoteBranchDeleteWindowController: NSWindowController?
+    private var checkoutBranchWorkflowCoordinator: CheckoutBranchWorkflowCoordinator?
     private var operationStateTask: Task<Void, Never>?
     private let rebaseBanner = NSView()
     private let rebaseBannerLabel = NSTextField(labelWithString: "")
@@ -742,6 +743,16 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
                 return
             }
             beginMerge(initialTarget: nil)
+        case .createBranch:
+            let commit = snapshot?.commits.first(where: { $0.id == selectedCommitID && !$0.isArtificial })
+            beginCreateBranch(sourceRevision: commit)
+        case .deleteBranch:
+            beginDeleteBranches(initiallySelected: [])
+        case .checkoutBranch:
+            beginCheckoutBranch(initialTarget: nil)
+        case .checkoutRevision:
+            guard let commit = snapshot?.commits.first(where: { $0.id == selectedCommitID && !$0.isArtificial }) else { return }
+            beginCheckoutRevision(commit)
         case .manageStashes: beginManageStashes()
         case .solveMergeConflicts: beginResolveConflicts()
         case .cherryPick:
@@ -891,6 +902,13 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         )
         self.snapshot = snapshot
         BrowserCommandAvailability.shared.canMerge = false
+        let canManageBranches = !snapshot.currentRepository.isBare
+            && dataSource is any RepositoryCheckoutBranchDataSource
+        BrowserCommandAvailability.shared.canCreateBranch = canManageBranches
+        BrowserCommandAvailability.shared.canDeleteBranch = canManageBranches && !snapshot.branches.isEmpty
+        BrowserCommandAvailability.shared.canCheckoutBranch = canManageBranches
+            && (!snapshot.branches.isEmpty || snapshot.remotes.contains { !$0.branches.isEmpty })
+        BrowserCommandAvailability.shared.canCheckoutRevision = false
         outlineController.apply(snapshot: snapshot)
         revisionGridController.apply(commits: snapshot.commits, preferredCommitID: restoredSelectionID)
 
@@ -910,9 +928,11 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         )
 
         branchPopUp.removeAllItems()
+        branchPopUp.addItem(withTitle: "Checkout branch…")
+        branchPopUp.menu?.addItem(.separator())
         snapshot.branches.forEach { branchPopUp.addItem(withTitle: $0.name) }
         let branchImage = AppKitFactory.resourceImage("Branch", accessibilityDescription: "Branches")
-        branchPopUp.itemArray.forEach { $0.image = branchImage }
+        branchPopUp.itemArray.filter { !$0.isSeparatorItem }.forEach { $0.image = branchImage }
         if let current = snapshot.branches.first(where: \.isCurrent) {
             branchPopUp.selectItem(withTitle: current.name)
         }
@@ -945,6 +965,10 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             && !snapshot.currentRepository.isBare
             && revisionGridController.selectedCommitCount == 1
             && dataSource is any RepositoryMergingDataSource
+        BrowserCommandAvailability.shared.canCheckoutRevision = !commit.isArtificial
+            && !snapshot.currentRepository.isBare
+            && revisionGridController.selectedCommitCount == 1
+            && dataSource is any RepositoryCheckoutBranchDataSource
         revisionDetailsTask?.cancel()
         let relations = CommitRelationsResolver.resolve(commit: commit, history: snapshot.commits)
         let comparisonCommit = commit.parentIDs.first.flatMap { parentID in
@@ -1175,7 +1199,15 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
 
     @objc private func selectBranch() {
         guard let snapshot,
-              let title = branchPopUp.titleOfSelectedItem,
+              let title = branchPopUp.titleOfSelectedItem else { return }
+        if title == "Checkout branch…" {
+            if let current = snapshot.branches.first(where: \.isCurrent) {
+                branchPopUp.selectItem(withTitle: current.name)
+            }
+            beginCheckoutBranch(initialTarget: nil)
+            return
+        }
+        guard
               let branch = snapshot.branches.first(where: { $0.name == title }) else { return }
         guard !branch.isCurrent else { return }
         beginCheckout(.local(branch))
@@ -1292,7 +1324,15 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
     private func performRepositoryCommand(_ identifier: String, node: RepositoryTreeNode) {
         switch (identifier, node.kind) {
         case ("repository.branch.checkout", .branch(let branch)):
-            beginCheckout(.local(branch))
+            beginCheckout(.local(branch), confirmDirectCheckout: true)
+        case ("repository.branch.create", .branch(let branch)):
+            guard let commit = snapshot?.commits.first(where: { $0.id == branch.commitID }) else { return }
+            beginCreateBranch(sourceRevision: commit)
+        case ("repository.branch.rename", .branch(let branch)):
+            beginRenameBranch(branch.name)
+        case ("repository.branch.delete", .branch(let branch)):
+            guard !branch.isCurrent else { return }
+            beginDeleteBranches(initiallySelected: [branch.name])
         case ("repository.branch.push", .branch(let branch)):
             guard let snapshot else { return }
             presentNetworkWindow(kind: .push, initialAction: .merge, pushBranch: branch.name, snapshot: snapshot)
@@ -1300,15 +1340,31 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             guard !branch.isCurrent else { return }
             beginMerge(initialTarget: branch.name)
         case ("repository.remoteBranch.checkout", .remoteBranch(let branch)):
-            beginCheckout(.remote(branch))
+            beginCheckout(.remote(branch), confirmDirectCheckout: true)
+        case ("repository.remoteBranch.create", .remoteBranch(let branch)):
+            guard let commit = snapshot?.commits.first(where: { $0.id == branch.commitID }) else { return }
+            beginCreateBranch(sourceRevision: commit)
         case ("repository.remoteBranch.merge", .remoteBranch(let branch)):
             guard let remote = branch.remoteName else { return }
             beginMerge(initialTarget: "\(remote)/\(branch.name)")
         case ("repository.remoteBranch.delete", .remoteBranch(let branch)):
             presentRemoteBranchDeleteWindow(branch)
+        case ("repository.remoteBranch.fetch", .remoteBranch(let branch)):
+            beginFetchRemoteBranch(branch, followUp: .none)
+        case ("repository.remoteBranch.fetchCheckout", .remoteBranch(let branch)):
+            beginFetchRemoteBranch(branch, followUp: .checkout)
+        case ("repository.remoteBranch.fetchCreate", .remoteBranch(let branch)):
+            beginFetchRemoteBranch(branch, followUp: .create)
         case ("repository.tag.checkout", .tag(let tag)):
             guard let commit = snapshot?.commits.first(where: { $0.id == tag.commitID }) else { return }
             beginCheckout(.revision(commit))
+        case ("repository.tag.createBranch", .tag(let tag)):
+            guard let commit = snapshot?.commits.first(where: { $0.id == tag.commitID }) else { return }
+            beginCreateBranch(sourceRevision: commit)
+        case ("repository.folder.create", .folder(let prefix, false)):
+            beginCreateBranch(sourceRevision: nil, suggestedPrefix: prefix + "/")
+        case ("repository.folder.deleteAll", .folder(_, false)):
+            beginDeleteBranches(initiallySelected: localBranchNames(in: node))
         case ("repository.tag.merge", .tag(let tag)):
             beginMerge(initialTarget: tag.name)
         case ("repository.branch.rebase", .branch(let branch)),
@@ -1335,6 +1391,18 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         default:
             showPlaceholderStatus(for: identifier)
         }
+    }
+
+    private func localBranchNames(in node: RepositoryTreeNode) -> [String] {
+        var result: [String] = []
+        func appendBranches(_ candidate: RepositoryTreeNode) {
+            if case .branch(let branch) = candidate.kind, !branch.isRemote {
+                result.append(branch.name)
+            }
+            candidate.children.forEach(appendBranches)
+        }
+        appendBranches(node)
+        return result
     }
 
     private func presentRemoteBranchDeleteWindow(_ branch: Branch) {
@@ -1453,6 +1521,11 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             beginCheckout(.revision(focused))
             return
         }
+        if identifier == "revision.branch.create" {
+            guard !focused.isArtificial else { return }
+            beginCreateBranch(sourceRevision: focused)
+            return
+        }
 
         let prefix = "revision.branch.checkout.ref."
         if identifier.hasPrefix(prefix) {
@@ -1489,74 +1562,98 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         let deletePrefix = "revision.branch.delete.ref."
         if identifier.hasPrefix(deletePrefix) {
             let referenceID = String(identifier.dropFirst(deletePrefix.count))
-            guard let reference = focused.references.first(where: { $0.id == referenceID }),
-                  reference.kind == .remoteBranch,
-                  let slash = reference.name.firstIndex(of: "/"),
-                  let snapshot
-            else { return }
+            guard let reference = focused.references.first(where: { $0.id == referenceID }) else { return }
+            if reference.kind == .localBranch {
+                beginDeleteBranches(initiallySelected: [reference.name])
+                return
+            }
+            guard reference.kind == .remoteBranch,
+                  let slash = reference.name.firstIndex(of: "/"), let snapshot else { return }
             let remote = String(reference.name[..<slash])
             let name = String(reference.name[reference.name.index(after: slash)...])
-            guard let branch = snapshot.branches.first(where: {
-                $0.isRemote && $0.remoteName == remote && $0.name == name
-            }) else { return }
+            guard let branch = snapshot.remotes
+                .first(where: { $0.name == remote })?
+                .branches.first(where: { $0.name == name }) else { return }
             presentRemoteBranchDeleteWindow(branch)
+            return
+        }
+        let renamePrefix = "revision.branch.rename.ref."
+        if identifier.hasPrefix(renamePrefix) {
+            let referenceID = String(identifier.dropFirst(renamePrefix.count))
+            guard let reference = focused.references.first(where: { $0.id == referenceID }),
+                  reference.kind == .localBranch || reference.kind == .currentBranch else { return }
+            beginRenameBranch(reference.name)
             return
         }
         showPlaceholderStatus(for: identifier)
     }
 
-    private func beginCheckout(_ target: CheckoutDialogTarget) {
-        guard let mutationSource = dataSource as? any RepositoryMutatingDataSource,
+    private func checkoutBranchCoordinator() -> CheckoutBranchWorkflowCoordinator? {
+        guard let source = dataSource as? any RepositoryCheckoutBranchDataSource,
               let window = view.window,
-              let snapshot else {
-            showPlaceholderStatus(for: "Checkout is unavailable for mock data")
-            return
-        }
-
-        let previousSelection = selectedCommitID
-        mutationTask?.cancel()
-        mutationTask = Task { @MainActor [weak self, weak window] in
-            guard let self, let window else { return }
-            do {
-                statusLabel.stringValue = "Checking repository state…"
-                let state = try await mutationSource.loadMutationState()
-                guard !Task.isCancelled else { return }
-                guard let request = await MutationDialogs.checkoutRequest(
-                    target: target,
-                    state: state,
-                    localBranches: snapshot.branches,
-                    window: window
-                ) else {
-                    if let current = snapshot.branches.first(where: \.isCurrent) {
-                        branchPopUp.selectItem(withTitle: current.name)
-                    }
-                    statusLabel.stringValue = "Checkout cancelled"
-                    return
-                }
-
-                statusLabel.stringValue = "Checking out…"
-                revisionDetailsTask?.cancel()
-                let result = try await mutationSource.checkout(request)
-                guard !Task.isCancelled else { return }
-                apply(snapshot: result.snapshot, preferredCommitID: result.selectedCommitID)
-                switch result.outcome {
-                case .completed:
-                    statusLabel.stringValue = result.message
-                case .conflicts(let paths):
-                    statusLabel.stringValue = "Checkout completed with conflicts in \(paths.count) path(s)"
-                case .paused(let reason):
-                    statusLabel.stringValue = reason
-                }
-            } catch is CancellationError {
-                return
-            } catch {
-                if let refreshed = try? await mutationSource.loadSnapshot(), !Task.isCancelled {
-                    apply(snapshot: refreshed, preferredCommitID: previousSelection)
-                }
-                statusLabel.stringValue = error.localizedDescription
-                await MutationDialogs.showError(error, title: "Checkout failed", window: window)
+              let snapshot else { return nil }
+        let coordinator = CheckoutBranchWorkflowCoordinator(
+            source: source,
+            stashSource: dataSource as? any RepositoryStashDataSource,
+            pullSource: dataSource as? any RepositoryPullingDataSource,
+            snapshot: snapshot,
+            owner: window,
+            onSnapshot: { [weak self] updated, selectedCommitID in
+                guard let self else { return }
+                self.apply(
+                    snapshot: updated,
+                    preferredCommitID: selectedCommitID ?? self.selectedCommitID
+                )
+            },
+            onStatus: { [weak self] message in
+                self?.statusLabel.stringValue = message
+            },
+            onConflicts: { [weak self] in
+                self?.beginResolveConflicts()
             }
-        }
+        )
+        checkoutBranchWorkflowCoordinator = coordinator
+        return coordinator
+    }
+
+    private func beginCheckout(_ target: CheckoutDialogTarget, confirmDirectCheckout: Bool = false) {
+        checkoutBranchCoordinator()?.checkout(target, confirmDirectCheckout: confirmDirectCheckout)
+    }
+
+    private func beginFetchRemoteBranch(
+        _ branch: Branch,
+        followUp: CheckoutBranchFetchFollowUp
+    ) {
+        checkoutBranchCoordinator()?.fetchRemoteBranch(branch, then: followUp)
+    }
+
+    private func beginCheckoutBranch(
+        initialTarget: CheckoutDialogTarget?,
+        confirmDirectCheckout: Bool = false
+    ) {
+        checkoutBranchCoordinator()?.checkoutBranch(
+            initialTarget: initialTarget,
+            confirmDirectCheckout: confirmDirectCheckout
+        )
+    }
+
+    private func beginCheckoutRevision(_ commit: Commit) {
+        checkoutBranchCoordinator()?.checkoutRevision(commit)
+    }
+
+    private func beginCreateBranch(sourceRevision: Commit?, suggestedPrefix: String? = nil) {
+        checkoutBranchCoordinator()?.createBranch(
+            sourceRevision: sourceRevision,
+            suggestedPrefix: suggestedPrefix
+        )
+    }
+
+    private func beginDeleteBranches(initiallySelected: [String]) {
+        checkoutBranchCoordinator()?.deleteBranches(initiallySelected: initiallySelected)
+    }
+
+    private func beginRenameBranch(_ name: String) {
+        checkoutBranchCoordinator()?.renameBranch(name)
     }
 
     private func beginMerge(initialTarget: String?) {

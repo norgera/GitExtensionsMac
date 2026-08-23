@@ -83,6 +83,31 @@ struct MergePreferences: Codable, Equatable, Sendable {
     var closeProcessOnSuccess = false
 }
 
+enum CheckoutLocalChangesPreference: String, Codable, CaseIterable, Sendable {
+    case keep
+    case merge
+    case stash
+    case force
+}
+
+struct CheckoutBranchPreferences: Codable, Equatable, Sendable {
+    var checkForUncommittedChanges = true
+    var alwaysShowDialog = false
+    var localChangesAction: CheckoutLocalChangesPreference = .keep
+    var useDefaultLocalChangesAction = false
+    var createLocalBranchForRemote = false
+    var autoPopStash: PullAutoPopPreference = .ask
+    var confirmDirectCheckout = false
+    var dontConfirmDeleteUnmerged = false
+    var autoNormaliseBranchName = true
+    var branchNameReplacement = "_"
+    var updateSubmodulesOnCheckout: Bool? = nil
+    var checkoutWindowWidth = 626.0
+    var createWindowWidth = 580.0
+    var deleteWindowWidth = 420.0
+    var renameWindowWidth = 484.0
+}
+
 enum PushRejectedActionPreference: String, Codable, CaseIterable, Sendable {
     case ask
     case none
@@ -341,6 +366,7 @@ final class AppSettingsStore {
         static let cherryPickPreferences = "GitExtensionsMac.cherryPickPreferences.v1"
         static let stashPreferences = "GitExtensionsMac.stashPreferences.v1"
         static let mergePreferences = "GitExtensionsMac.mergePreferences.v1"
+        static let checkoutBranchPreferences = "GitExtensionsMac.checkoutBranchPreferences.v1"
     }
 
     private let defaults: UserDefaults
@@ -354,6 +380,7 @@ final class AppSettingsStore {
     private(set) var cherryPickPreferences: CherryPickPreferences
     private(set) var stashPreferences: StashPreferences
     private(set) var mergePreferences: MergePreferences
+    private(set) var checkoutBranchPreferences: CheckoutBranchPreferences
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -388,6 +415,9 @@ final class AppSettingsStore {
         mergePreferences = defaults.data(forKey: Key.mergePreferences)
             .flatMap { try? decoder.decode(MergePreferences.self, from: $0) }
             ?? MergePreferences()
+        checkoutBranchPreferences = defaults.data(forKey: Key.checkoutBranchPreferences)
+            .flatMap { try? decoder.decode(CheckoutBranchPreferences.self, from: $0) }
+            ?? CheckoutBranchPreferences()
         recentRepositories.removeAll { !FileManager.default.fileExists(atPath: $0.path) }
         applyAppearance()
     }
@@ -446,6 +476,11 @@ final class AppSettingsStore {
     func saveMergePreferences(_ preferences: MergePreferences) {
         mergePreferences = preferences
         defaults.set(try? JSONEncoder().encode(preferences), forKey: Key.mergePreferences)
+    }
+
+    func saveCheckoutBranchPreferences(_ preferences: CheckoutBranchPreferences) {
+        checkoutBranchPreferences = preferences
+        defaults.set(try? JSONEncoder().encode(preferences), forKey: Key.checkoutBranchPreferences)
     }
 
     func recordPullURL(_ value: String) {

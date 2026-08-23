@@ -116,9 +116,14 @@ private struct GitExtensionsMenuCommands: Commands {
             Button("Reset changes…") { perform(.unavailable("Reset changes")) }
             Button("Clean working directory…") { perform(.unavailable("Clean working directory")) }
             Divider()
-            Button("Create branch…") { perform(.unavailable("Create branch")) }
-            Button("Delete branch…") { perform(.unavailable("Delete branch")) }
-            Button("Checkout branch…") { perform(.unavailable("Checkout branch")) }
+            Button("Create branch…") { perform(.createBranch) }
+                .keyboardShortcut("b", modifiers: .control)
+                .disabled(!availability.canCreateBranch)
+            Button("Delete branch…") { perform(.deleteBranch) }
+                .disabled(!availability.canDeleteBranch)
+            Button("Checkout branch…") { perform(.checkoutBranch) }
+                .keyboardShortcut(".", modifiers: .control)
+                .disabled(!availability.canCheckoutBranch)
             Button("Merge branches…") { perform(.mergeBranches) }
                 .keyboardShortcut("m", modifiers: .control)
                 .disabled(!availability.canMerge)
@@ -130,7 +135,8 @@ private struct GitExtensionsMenuCommands: Commands {
             Divider()
             Button("Cherry pick…") { perform(.cherryPick) }
             Button("Archive revision…") { perform(.unavailable("Archive revision")) }
-            Button("Checkout revision…") { perform(.unavailable("Checkout revision")) }
+            Button("Checkout revision…") { perform(.checkoutRevision) }
+                .disabled(!availability.canCheckoutRevision)
             Button("Bisect…") { perform(.unavailable("Bisect")) }
             Button("Show reflog…") { perform(.unavailable("Show reflog")) }
             Divider()

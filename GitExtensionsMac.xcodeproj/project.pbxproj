@@ -14,6 +14,11 @@
 		AA7200000000000000000001 /* GitMerge.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB7200000000000000000001 /* GitMerge.swift */; };
 		AA7200000000000000000002 /* GitMerge.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB7200000000000000000001 /* GitMerge.swift */; };
 		AA7200000000000000000003 /* MergeDialog.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB7200000000000000000002 /* MergeDialog.swift */; };
+		AA7300000000000000000001 /* GitCheckoutBranches.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB7300000000000000000001 /* GitCheckoutBranches.swift */; };
+		AA7300000000000000000002 /* GitCheckoutBranches.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB7300000000000000000001 /* GitCheckoutBranches.swift */; };
+		AA7300000000000000000003 /* CheckoutBranchDialogs.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB7300000000000000000002 /* CheckoutBranchDialogs.swift */; };
+		AA7300000000000000000004 /* CheckoutBranchWorkflowCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB7300000000000000000003 /* CheckoutBranchWorkflowCoordinator.swift */; };
+		AA7300000000000000000005 /* CommitSummaryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB7300000000000000000004 /* CommitSummaryView.swift */; };
 		AA4000000000000000000001 /* AppSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB4000000000000000000001 /* AppSettings.swift */; };
 		AA4000000000000000000002 /* ApplicationShellDialogs.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB4000000000000000000002 /* ApplicationShellDialogs.swift */; };
 		AA4000000000000000000003 /* CommitWorkflowDialog.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB4000000000000000000003 /* CommitWorkflowDialog.swift */; };
@@ -141,6 +146,10 @@
 /* Begin PBXFileReference section */
 		A77C0DE20000000000000001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		BB0000000000000000000001 /* MutationDialogs.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MutationDialogs.swift; sourceTree = "<group>"; };
+		BB7300000000000000000001 /* GitCheckoutBranches.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GitCheckoutBranches.swift; sourceTree = "<group>"; };
+		BB7300000000000000000002 /* CheckoutBranchDialogs.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CheckoutBranchDialogs.swift; sourceTree = "<group>"; };
+		BB7300000000000000000003 /* CheckoutBranchWorkflowCoordinator.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CheckoutBranchWorkflowCoordinator.swift; sourceTree = "<group>"; };
+		BB7300000000000000000004 /* CommitSummaryView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CommitSummaryView.swift; sourceTree = "<group>"; };
 		BB4000000000000000000001 /* AppSettings.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AppSettings.swift; sourceTree = "<group>"; };
 		BB4000000000000000000002 /* ApplicationShellDialogs.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ApplicationShellDialogs.swift; sourceTree = "<group>"; };
 		BB4000000000000000000003 /* CommitWorkflowDialog.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CommitWorkflowDialog.swift; sourceTree = "<group>"; };
@@ -285,6 +294,7 @@
 				C00000000000000000000002 /* GitParsers.swift */,
 				C00000000000000000000003 /* GitRepositoryBrowsingDataSource.swift */,
 				C00000000000000000000004 /* GitRepositoryMutations.swift */,
+				BB7300000000000000000001 /* GitCheckoutBranches.swift */,
 				BB5000000000000000000001 /* GitRemoteManagement.swift */,
 				BB6000000000000000000001 /* GitPull.swift */,
 				BB6200000000000000000001 /* GitPush.swift */,
@@ -368,6 +378,9 @@
 				BB7000000000000000000001 /* CherryPickDialog.swift */,
 				BB7100000000000000000001 /* StashDialog.swift */,
 				BB7200000000000000000002 /* MergeDialog.swift */,
+				BB7300000000000000000002 /* CheckoutBranchDialogs.swift */,
+				BB7300000000000000000003 /* CheckoutBranchWorkflowCoordinator.swift */,
+				BB7300000000000000000004 /* CommitSummaryView.swift */,
 				CF33F0EB3F8DB1738220F2F0 /* CommitDetailViewController.swift */,
 				ADB4DF41D3F4ED3B37F9F318 /* DetailTabsViewController.swift */,
 				162693D4B6C7F5F8CFCDD4F0 /* RepositoryBrowserHost.swift */,
@@ -663,6 +676,7 @@
 				AA6100000000000000000001 /* GitPullTests.swift in Sources */,
 				AA6200000000000000000002 /* GitPush.swift in Sources */,
 				AA7200000000000000000002 /* GitMerge.swift in Sources */,
+				AA7300000000000000000002 /* GitCheckoutBranches.swift in Sources */,
 				AA6400000000000000000001 /* GitPushTests.swift in Sources */,
 				A102D2CBFE2A4EDBE423D9D1 /* RepositoryModels.swift in Sources */,
 				BC1066079E5693F97DE5212E /* RevisionGraphLayout.swift in Sources */,
@@ -679,6 +693,9 @@
 				AA7000000000000000000001 /* CherryPickDialog.swift in Sources */,
 				AA7100000000000000000001 /* StashDialog.swift in Sources */,
 				AA7200000000000000000003 /* MergeDialog.swift in Sources */,
+				AA7300000000000000000003 /* CheckoutBranchDialogs.swift in Sources */,
+				AA7300000000000000000004 /* CheckoutBranchWorkflowCoordinator.swift in Sources */,
+				AA7300000000000000000005 /* CommitSummaryView.swift in Sources */,
 				B00000000000000000000001 /* GitProcess.swift in Sources */,
 				B00000000000000000000002 /* GitParsers.swift in Sources */,
 				B00000000000000000000003 /* GitRepositoryBrowsingDataSource.swift in Sources */,
@@ -687,6 +704,7 @@
 				AA6000000000000000000001 /* GitPull.swift in Sources */,
 				AA6200000000000000000001 /* GitPush.swift in Sources */,
 				AA7200000000000000000001 /* GitMerge.swift in Sources */,
+				AA7300000000000000000001 /* GitCheckoutBranches.swift in Sources */,
 				C087A7DECAC7EE081ED36DFE /* GitExtensionsMacApp.swift in Sources */,
 				1D5C21DC7EA1BCED958BB331 /* ContextMenuState.swift in Sources */,
 				A4B464ED560B29A71D6D51A5 /* RepositoryModels.swift in Sources */,

@@ -10,6 +10,7 @@ enum AppSettingsTests {
         testPushPreferencesRoundTrip()
         testStashPreferencesRoundTrip()
         testMergePreferencesRoundTrip()
+        testCheckoutBranchPreferencesRoundTrip()
         testCommitPreferencesRoundTrip()
         testFileStatusListPreferencesRoundTrip()
         testCommitMessageRules()
@@ -101,6 +102,29 @@ enum AppSettingsTests {
             preferences.closeProcessOnSuccess = true
             store.saveMergePreferences(preferences)
             precondition(AppSettingsStore(defaults: defaults).mergePreferences == preferences)
+        }
+    }
+
+    private static func testCheckoutBranchPreferencesRoundTrip() {
+        withStore { store, defaults in
+            var preferences = store.checkoutBranchPreferences
+            preferences.checkForUncommittedChanges = false
+            preferences.alwaysShowDialog = true
+            preferences.localChangesAction = .stash
+            preferences.useDefaultLocalChangesAction = true
+            preferences.createLocalBranchForRemote = true
+            preferences.autoPopStash = .always
+            preferences.confirmDirectCheckout = true
+            preferences.dontConfirmDeleteUnmerged = true
+            preferences.autoNormaliseBranchName = true
+            preferences.branchNameReplacement = "-"
+            preferences.updateSubmodulesOnCheckout = false
+            preferences.checkoutWindowWidth = 720
+            preferences.createWindowWidth = 640
+            preferences.deleteWindowWidth = 560
+            preferences.renameWindowWidth = 520
+            store.saveCheckoutBranchPreferences(preferences)
+            precondition(AppSettingsStore(defaults: defaults).checkoutBranchPreferences == preferences)
         }
     }
 

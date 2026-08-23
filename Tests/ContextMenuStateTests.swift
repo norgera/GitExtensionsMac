@@ -12,6 +12,7 @@ enum ContextMenuStateTests {
         testRevisionNavigation()
         testCurrentBranchTreeCommands()
         testMergeTreeCommands()
+        testCheckoutBranchTreeCommands()
         testTreeMultiSelection()
         testCurrentWorktreeCommands()
         testStashTreeCommands()
@@ -105,6 +106,7 @@ enum ContextMenuStateTests {
             "revision: artificial revisions cannot be cherry-picked"
         )
         expect(menu.entry(id: "revision.branch.merge") == nil, "revision: artificial revisions cannot be merged")
+        expect(menu.entry(id: "revision.branch.create") == nil, "revision: artificial revisions cannot create branches")
     }
 
     private static func testRevisionStashCommands() {
@@ -196,11 +198,12 @@ enum ContextMenuStateTests {
 
         expect(menu.entry(id: "repository.copy")?.isEnabled == true, "tree: branch copy appears")
         expect(menu.entry(id: "repository.filter")?.isEnabled == true, "tree: branch filtering appears")
-        expect(menu.entry(id: "repository.branch.checkout")?.isEnabled == false, "tree: current branch checkout disabled")
-        expect(menu.entry(id: "repository.branch.merge")?.isEnabled == false, "tree: current branch self-merge disabled")
+        expect(menu.entry(id: "repository.branch.checkout") == nil, "tree: current branch checkout is omitted")
+        expect(menu.entry(id: "repository.branch.merge") == nil, "tree: current branch self-merge is omitted")
         expect(menu.entry(id: "repository.branch.create")?.isEnabled == true, "tree: create from current branch enabled")
         expect(menu.entry(id: "repository.branch.rename")?.isEnabled == true, "tree: current branch rename enabled")
-        expect(menu.entry(id: "repository.branch.delete")?.isEnabled == false, "tree: current branch delete disabled")
+        expect(menu.entry(id: "repository.branch.delete") == nil, "tree: current branch delete is omitted")
+        expect(menu.entry(id: "repository.branch.push") == nil, "tree: current branch push is omitted")
     }
 
     private static func testMergeTreeCommands() {
@@ -222,6 +225,49 @@ enum ContextMenuStateTests {
             menu = RepositoryContextMenuBuilder.build(context)
             expect(menu.entry(id: identifier)?.isEnabled == false, "tree: \(identifier) is disabled in a bare repository")
         }
+    }
+
+    private static func testCheckoutBranchTreeCommands() {
+        var remoteContext = RepositoryContextMenuContext(
+            focused: .remoteBranch,
+            selected: [.remoteBranch],
+            selectedHaveChildren: false,
+            selectedHaveExpandableChildren: false,
+            selectedHaveCollapsibleChildren: false
+        )
+        var menu = RepositoryContextMenuBuilder.build(remoteContext)
+        expect(menu.entry(id: "repository.remoteBranch.checkout")?.isEnabled == true, "tree: remote branch checkout is enabled")
+        expect(menu.entry(id: "repository.remoteBranch.create")?.isEnabled == true, "tree: create from remote branch is enabled")
+        expect(menu.entry(id: "repository.remoteBranch.fetchCheckout")?.isEnabled == true, "tree: fetch-and-checkout is enabled")
+        expect(menu.entry(id: "repository.remoteBranch.fetchCreate")?.isEnabled == true, "tree: fetch-and-create is enabled")
+        remoteContext.isBareRepository = true
+        menu = RepositoryContextMenuBuilder.build(remoteContext)
+        expect(menu.entry(id: "repository.remoteBranch.checkout")?.isEnabled == false, "tree: remote checkout is disabled in bare repositories")
+        expect(menu.entry(id: "repository.remoteBranch.create")?.isEnabled == false, "tree: remote create is disabled in bare repositories")
+
+        var folderContext = RepositoryContextMenuContext(
+            focused: .branchFolder,
+            selected: [.branchFolder],
+            selectedHaveChildren: true,
+            selectedHaveExpandableChildren: true,
+            selectedHaveCollapsibleChildren: false
+        )
+        menu = RepositoryContextMenuBuilder.build(folderContext)
+        expect(menu.entry(id: "repository.folder.create")?.isEnabled == true, "tree: local branch folder can create with a prefix")
+        expect(menu.entry(id: "repository.folder.deleteAll")?.isEnabled == true, "tree: local branch folder can delete descendants")
+        folderContext.isBareRepository = true
+        menu = RepositoryContextMenuBuilder.build(folderContext)
+        expect(menu.entry(id: "repository.folder.create")?.isEnabled == false, "tree: local branch folder creation is disabled when bare")
+
+        let remoteFolder = RepositoryMenuNodeKind.remoteBranchFolder
+        menu = RepositoryContextMenuBuilder.build(.init(
+            focused: remoteFolder,
+            selected: [remoteFolder],
+            selectedHaveChildren: true,
+            selectedHaveExpandableChildren: true,
+            selectedHaveCollapsibleChildren: false
+        ))
+        expect(menu.entry(id: "repository.folder.create") == nil, "tree: remote path folders do not expose local-folder commands")
     }
 
     private static func testTreeMultiSelection() {

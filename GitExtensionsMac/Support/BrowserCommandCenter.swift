@@ -26,6 +26,10 @@ enum BrowserCommand: Equatable, Sendable {
     case fetchAndPruneAll
     case remoteRepositories
     case mergeBranches
+    case createBranch
+    case deleteBranch
+    case checkoutBranch
+    case checkoutRevision
     case manageStashes
     case solveMergeConflicts
     case cherryPick
@@ -69,6 +73,10 @@ final class BrowserCommandAvailability: ObservableObject {
     static let shared = BrowserCommandAvailability()
 
     @Published var canMerge = false
+    @Published var canCreateBranch = false
+    @Published var canDeleteBranch = false
+    @Published var canCheckoutBranch = false
+    @Published var canCheckoutRevision = false
 
     private init() {}
 }

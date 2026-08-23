@@ -191,7 +191,7 @@ enum RevisionContextMenuBuilder {
         }
         entries.append(.separator)
 
-        if !context.isBareRepository {
+        if !revision.isArtificial && !context.isBareRepository {
             entries.append(command("revision.branch.create", "Create new branch here…"))
             entries.append(command("revision.branch.resetOther", "Reset another branch to here…"))
         }
@@ -402,7 +402,8 @@ enum RepositoryMenuNodeKind: Hashable, Sendable {
     case stash
     case worktree(isCurrent: Bool, pathExists: Bool)
     case submodule
-    case folder
+    case branchFolder
+    case remoteBranchFolder
 
     var isRef: Bool {
         switch self {
@@ -482,6 +483,13 @@ enum RepositoryContextMenuBuilder {
     ) -> [ContextMenuEntry] {
         switch kind {
         case .localBranch(let isCurrent):
+            if isCurrent {
+                return [
+                    command("repository.branch.create", "Create branch…", enabled: !isBareRepository),
+                    .separator,
+                    command("repository.branch.rename", "Rename branch…")
+                ]
+            }
             let canMoveHEAD = !isCurrent && !isBareRepository
             return [
                 command("repository.branch.checkout", "Checkout branch…", enabled: canMoveHEAD),
@@ -489,7 +497,6 @@ enum RepositoryContextMenuBuilder {
                 command("repository.branch.rebase", "Rebase current branch on this branch…", enabled: canMoveHEAD),
                 command("repository.branch.create", "Create branch…", enabled: !isBareRepository),
                 command("repository.branch.reset", "Reset current branch to here…", enabled: canMoveHEAD),
-                command("repository.branch.push", "Push branch…"),
                 .separator,
                 command("repository.branch.rename", "Rename branch…"),
                 command("repository.branch.delete", "Delete branch…", enabled: canMoveHEAD)
@@ -561,11 +568,14 @@ enum RepositoryContextMenuBuilder {
                 command("repository.submodule.commit", "Commit submodule", enabled: !isBareRepository)
             ]
 
-        case .folder:
+        case .branchFolder:
             return [
                 command("repository.folder.create", "Create branch…", enabled: !isBareRepository),
                 command("repository.folder.deleteAll", "Delete all branches…", enabled: !isBareRepository)
             ]
+
+        case .remoteBranchFolder:
+            return []
 
         case .group(let group):
             switch group {
