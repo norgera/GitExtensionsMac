@@ -48,6 +48,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
     private var commitWindowController: NSWindowController?
     private var pullWindowController: NSWindowController?
     private var pushWindowController: NSWindowController?
+    private var mergeWindowController: NSWindowController?
     private var fetchWindowController: NSWindowController?
     private var remoteWindowController: NSWindowController?
     private var remoteBranchDeleteWindowController: NSWindowController?
@@ -731,8 +732,16 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         case .remoteRepositories:
             presentRemoteWindow(selectedRemote: nil)
         case .mergeBranches:
-            guard let snapshot else { return }
-            Task { await ApplicationShellDialogs.mergeShell(snapshot: snapshot, window: window) }
+            guard let snapshot,
+                  !snapshot.currentRepository.isBare,
+                  revisionGridController.selectedCommitCount == 1,
+                  let selectedCommitID,
+                  snapshot.commits.contains(where: { $0.id == selectedCommitID && !$0.isArtificial })
+            else {
+                statusLabel.stringValue = "Select one revision before opening Merge."
+                return
+            }
+            beginMerge(initialTarget: nil)
         case .manageStashes: beginManageStashes()
         case .solveMergeConflicts: beginResolveConflicts()
         case .cherryPick:
@@ -881,6 +890,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             refreshedCommits: snapshot.commits
         )
         self.snapshot = snapshot
+        BrowserCommandAvailability.shared.canMerge = false
         outlineController.apply(snapshot: snapshot)
         revisionGridController.apply(commits: snapshot.commits, preferredCommitID: restoredSelectionID)
 
@@ -931,6 +941,10 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
     private func select(commit: Commit) {
         guard let snapshot else { return }
         selectedCommitID = commit.id
+        BrowserCommandAvailability.shared.canMerge = !commit.isArtificial
+            && !snapshot.currentRepository.isBare
+            && revisionGridController.selectedCommitCount == 1
+            && dataSource is any RepositoryMergingDataSource
         revisionDetailsTask?.cancel()
         let relations = CommitRelationsResolver.resolve(commit: commit, history: snapshot.commits)
         let comparisonCommit = commit.parentIDs.first.flatMap { parentID in
@@ -1282,13 +1296,21 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         case ("repository.branch.push", .branch(let branch)):
             guard let snapshot else { return }
             presentNetworkWindow(kind: .push, initialAction: .merge, pushBranch: branch.name, snapshot: snapshot)
+        case ("repository.branch.merge", .branch(let branch)):
+            guard !branch.isCurrent else { return }
+            beginMerge(initialTarget: branch.name)
         case ("repository.remoteBranch.checkout", .remoteBranch(let branch)):
             beginCheckout(.remote(branch))
+        case ("repository.remoteBranch.merge", .remoteBranch(let branch)):
+            guard let remote = branch.remoteName else { return }
+            beginMerge(initialTarget: "\(remote)/\(branch.name)")
         case ("repository.remoteBranch.delete", .remoteBranch(let branch)):
             presentRemoteBranchDeleteWindow(branch)
         case ("repository.tag.checkout", .tag(let tag)):
             guard let commit = snapshot?.commits.first(where: { $0.id == tag.commitID }) else { return }
             beginCheckout(.revision(commit))
+        case ("repository.tag.merge", .tag(let tag)):
+            beginMerge(initialTarget: tag.name)
         case ("repository.branch.rebase", .branch(let branch)),
              ("repository.remoteBranch.rebase", .remoteBranch(let branch)):
             guard let commit = snapshot?.commits.first(where: { $0.id == branch.commitID }) else { return }
@@ -1390,6 +1412,18 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         }
         if identifier == "revision.commit.cherryPick" {
             beginCherryPick(selected.isEmpty ? [focused] : selected)
+            return
+        }
+        if identifier == "revision.branch.merge.commit" {
+            guard !focused.isArtificial else { return }
+            beginMerge(initialTarget: focused.id)
+            return
+        }
+        let mergePrefix = "revision.branch.merge.ref."
+        if identifier.hasPrefix(mergePrefix) {
+            let referenceID = String(identifier.dropFirst(mergePrefix.count))
+            guard let reference = focused.references.first(where: { $0.id == referenceID }) else { return }
+            beginMerge(initialTarget: reference.name)
             return
         }
         if identifier.hasPrefix("revision.stash."),
@@ -1523,6 +1557,37 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
                 await MutationDialogs.showError(error, title: "Checkout failed", window: window)
             }
         }
+    }
+
+    private func beginMerge(initialTarget: String?) {
+        guard let mergeSource = dataSource as? any RepositoryMergingDataSource,
+              let window = view.window,
+              let snapshot,
+              !snapshot.currentRepository.isBare else {
+            showPlaceholderStatus(for: "Merge is unavailable for this repository")
+            return
+        }
+        if let mergeWindowController {
+            mergeWindowController.window?.makeKeyAndOrderFront(nil)
+            return
+        }
+
+        let previousSelection = selectedCommitID
+        mergeWindowController = MergeDialog.present(
+            source: mergeSource,
+            snapshot: snapshot,
+            initialTarget: initialTarget,
+            owner: window,
+            onSnapshot: { [weak self] refreshed, selected in
+                guard let self else { return }
+                apply(snapshot: refreshed, preferredCommitID: selected ?? previousSelection)
+                statusLabel.stringValue = "Repository refreshed after Merge."
+                refreshOperationIndicators()
+            },
+            onClose: { [weak self] in
+                self?.mergeWindowController = nil
+            }
+        )
     }
 
     private func performFileMutation(

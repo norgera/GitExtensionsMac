@@ -447,9 +447,12 @@ final class RepositoryOutlineViewController: NSViewController, NSOutlineViewData
         let mutationCommands: Set<String> = [
             "repository.branch.checkout",
             "repository.branch.push",
+            "repository.branch.merge",
             "repository.remoteBranch.checkout",
+            "repository.remoteBranch.merge",
             "repository.remoteBranch.delete",
             "repository.tag.checkout",
+            "repository.tag.merge",
             "repository.branch.rebase",
             "repository.remoteBranch.rebase",
             "repository.tag.rebase",

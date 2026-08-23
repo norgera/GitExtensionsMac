@@ -101,7 +101,8 @@ enum RevisionContextMenuBuilder {
         let mergeRefs = (tags + allBranches).filter {
             $0.kind != .currentBranch && $0.name != context.currentBranchName
         }
-        let rebaseTargetExists = !context.isBareRepository
+        let rebaseTargetExists = !revision.isArtificial
+            && !context.isBareRepository
             && (!mergeRefs.isEmpty || !currentBranchPointsHere)
         let hasParentComparison = selected.count > 1 || !revision.parentIDs.isEmpty
         let selectedCount = selected.count
@@ -161,7 +162,9 @@ enum RevisionContextMenuBuilder {
                 refs: localBranches
             ))
         }
-        if !context.isBareRepository && (!mergeRefs.isEmpty || !currentBranchPointsHere) {
+        if !revision.isArtificial,
+           !context.isBareRepository,
+           (!mergeRefs.isEmpty || !currentBranchPointsHere) {
             let targets = mergeRefs.isEmpty
                 ? [command("revision.branch.merge.commit", revision.shortID)]
                 : refCommands(prefix: "revision.branch.merge", refs: mergeRefs)

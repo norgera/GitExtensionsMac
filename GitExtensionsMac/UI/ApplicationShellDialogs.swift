@@ -271,27 +271,6 @@ enum ApplicationShellDialogs {
         return windowController
     }
 
-    static func mergeShell(snapshot: RepositorySnapshot, window: NSWindow) async {
-        let alert = NSAlert()
-        alert.messageText = "Merge branch"
-        alert.informativeText = "Merge execution is not available in the typed backend yet."
-        alert.addButton(withTitle: "Merge")
-        alert.addButton(withTitle: "Cancel")
-        alert.buttons[0].isEnabled = false
-        let stack = formStack()
-        let branches = NSPopUpButton()
-        branches.addItems(withTitles: snapshot.branches.filter { !$0.isCurrent }.map(\.name))
-        stack.addArrangedSubview(labeled("Merge branch:", branches, width: 320))
-        stack.addArrangedSubview(labeled("Into current branch:", NSTextField(labelWithString: snapshot.branches.first(where: \.isCurrent)?.name ?? "Detached HEAD"), width: 320))
-        stack.addArrangedSubview(checkBox("Keep a single branch line if possible (fast forward)", true))
-        stack.addArrangedSubview(checkBox("Always create a new merge commit", false))
-        stack.addArrangedSubview(checkBox("Do not commit", false))
-        stack.addArrangedSubview(checkBox("Squash commits", false))
-        stack.addArrangedSubview(checkBox("Allow unrelated histories", false))
-        alert.accessoryView = accessory(for: stack, width: 500)
-        _ = await begin(alert, for: window)
-    }
-
     private static func formStack() -> NSStackView {
         let stack = NSStackView()
         stack.orientation = .vertical

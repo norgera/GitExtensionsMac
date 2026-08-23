@@ -11,6 +11,7 @@ enum ContextMenuStateTests {
         testSequencerCommands()
         testRevisionNavigation()
         testCurrentBranchTreeCommands()
+        testMergeTreeCommands()
         testTreeMultiSelection()
         testCurrentWorktreeCommands()
         testStashTreeCommands()
@@ -103,6 +104,7 @@ enum ContextMenuStateTests {
             menu.entry(id: "revision.commit.cherryPick")?.isEnabled == false,
             "revision: artificial revisions cannot be cherry-picked"
         )
+        expect(menu.entry(id: "revision.branch.merge") == nil, "revision: artificial revisions cannot be merged")
     }
 
     private static func testRevisionStashCommands() {
@@ -199,6 +201,27 @@ enum ContextMenuStateTests {
         expect(menu.entry(id: "repository.branch.create")?.isEnabled == true, "tree: create from current branch enabled")
         expect(menu.entry(id: "repository.branch.rename")?.isEnabled == true, "tree: current branch rename enabled")
         expect(menu.entry(id: "repository.branch.delete")?.isEnabled == false, "tree: current branch delete disabled")
+    }
+
+    private static func testMergeTreeCommands() {
+        for (kind, identifier) in [
+            (RepositoryMenuNodeKind.localBranch(isCurrent: false), "repository.branch.merge"),
+            (.remoteBranch, "repository.remoteBranch.merge"),
+            (.tag, "repository.tag.merge")
+        ] {
+            var context = RepositoryContextMenuContext(
+                focused: kind,
+                selected: [kind],
+                selectedHaveChildren: false,
+                selectedHaveExpandableChildren: false,
+                selectedHaveCollapsibleChildren: false
+            )
+            var menu = RepositoryContextMenuBuilder.build(context)
+            expect(menu.entry(id: identifier)?.isEnabled == true, "tree: \(identifier) is available in a working repository")
+            context.isBareRepository = true
+            menu = RepositoryContextMenuBuilder.build(context)
+            expect(menu.entry(id: identifier)?.isEnabled == false, "tree: \(identifier) is disabled in a bare repository")
+        }
     }
 
     private static func testTreeMultiSelection() {

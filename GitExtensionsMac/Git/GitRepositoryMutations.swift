@@ -301,6 +301,7 @@ struct RepositoryMutationState: Equatable, Sendable {
     let hasUnstagedChanges: Bool
     let hasUntrackedFiles: Bool
     let conflictedPaths: [String]
+    let mergeInProgress: Bool
     let cherryPickInProgress: Bool
     let rebaseInProgress: Bool
 
@@ -451,6 +452,8 @@ protocol RepositoryConflictDataSource: RepositoryMutationStateDataSource {
     func runMergeTool(paths: [String]) async throws -> RepositoryMutationResult
 }
 
+protocol RepositoryConflictResolutionDataSource: RepositoryCommitDataSource, RepositoryConflictDataSource {}
+
 protocol RepositoryCherryPickDataSource: RepositoryConflictDataSource {
     func cherryPick(_ request: RepositoryCherryPickRequest) async throws -> RepositoryMutationResult
     func continueCherryPick() async throws -> RepositoryMutationResult
@@ -474,7 +477,7 @@ protocol RepositoryRebaseDataSource: RepositoryConflictDataSource {
 
 protocol RepositoryMutatingDataSource:
     RepositoryCheckoutDataSource,
-    RepositoryCommitDataSource,
+    RepositoryConflictResolutionDataSource,
     RepositoryStashDataSource,
     RepositoryCherryPickDataSource,
     RepositoryRebaseDataSource {}
@@ -2099,6 +2102,9 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
             hasUnstagedChanges: records.contains { !$0.isUntracked && $0.worktreeStatus != "." && $0.worktreeStatus != " " },
             hasUntrackedFiles: records.contains { $0.isUntracked },
             conflictedPaths: records.filter(\.isConflict).map(\.path).sorted(),
+            mergeInProgress: FileManager.default.fileExists(
+                atPath: repository.gitDirectoryURL.appendingPathComponent("MERGE_HEAD").path
+            ),
             cherryPickInProgress: FileManager.default.fileExists(
                 atPath: repository.gitDirectoryURL.appendingPathComponent("CHERRY_PICK_HEAD").path
             ),

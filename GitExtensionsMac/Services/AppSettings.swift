@@ -74,6 +74,15 @@ struct StashPreferences: Codable, Equatable, Sendable {
     var dividerPosition = 280.0
 }
 
+struct MergePreferences: Codable, Equatable, Sendable {
+    var noCommit = false
+    var noFastForward = false
+    var addLogMessages = false
+    var logMessagesCount = 20
+    var helpExpanded = true
+    var closeProcessOnSuccess = false
+}
+
 enum PushRejectedActionPreference: String, Codable, CaseIterable, Sendable {
     case ask
     case none
@@ -331,6 +340,7 @@ final class AppSettingsStore {
         static let rebasePreferences = "GitExtensionsMac.rebasePreferences.v1"
         static let cherryPickPreferences = "GitExtensionsMac.cherryPickPreferences.v1"
         static let stashPreferences = "GitExtensionsMac.stashPreferences.v1"
+        static let mergePreferences = "GitExtensionsMac.mergePreferences.v1"
     }
 
     private let defaults: UserDefaults
@@ -343,6 +353,7 @@ final class AppSettingsStore {
     private(set) var rebasePreferences: RebasePreferences
     private(set) var cherryPickPreferences: CherryPickPreferences
     private(set) var stashPreferences: StashPreferences
+    private(set) var mergePreferences: MergePreferences
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -374,6 +385,9 @@ final class AppSettingsStore {
         stashPreferences = defaults.data(forKey: Key.stashPreferences)
             .flatMap { try? decoder.decode(StashPreferences.self, from: $0) }
             ?? StashPreferences()
+        mergePreferences = defaults.data(forKey: Key.mergePreferences)
+            .flatMap { try? decoder.decode(MergePreferences.self, from: $0) }
+            ?? MergePreferences()
         recentRepositories.removeAll { !FileManager.default.fileExists(atPath: $0.path) }
         applyAppearance()
     }
@@ -427,6 +441,11 @@ final class AppSettingsStore {
     func saveStashPreferences(_ preferences: StashPreferences) {
         stashPreferences = preferences
         defaults.set(try? JSONEncoder().encode(preferences), forKey: Key.stashPreferences)
+    }
+
+    func saveMergePreferences(_ preferences: MergePreferences) {
+        mergePreferences = preferences
+        defaults.set(try? JSONEncoder().encode(preferences), forKey: Key.mergePreferences)
     }
 
     func recordPullURL(_ value: String) {

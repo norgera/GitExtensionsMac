@@ -28,6 +28,7 @@ private enum RevisionGraphLayoutTests {
             try await GitRepositoryMutationTests.runCommitAndAmend()
             try await GitRepositoryMutationTests.runStash()
             try await GitRepositoryMutationTests.runCherryPick()
+            try await GitRepositoryMutationTests.runMerge()
             try await GitRepositoryMutationTests.runRebase()
             try await GitRepositoryMutationTests.runRemoteManagement()
             try await GitPullTests.run()

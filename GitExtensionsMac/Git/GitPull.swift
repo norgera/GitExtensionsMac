@@ -254,6 +254,7 @@ extension GitRepositoryBrowsingDataSource: RepositoryPullingDataSource {
                 hasUnstagedChanges: false,
                 hasUntrackedFiles: false,
                 conflictedPaths: [],
+                mergeInProgress: false,
                 cherryPickInProgress: false,
                 rebaseInProgress: false
             )

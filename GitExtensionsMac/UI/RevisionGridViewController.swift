@@ -2,6 +2,7 @@ import AppKit
 
 final class RevisionGridViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate {
     var onCommand: ((String, [Commit], Commit) -> Void)?
+    var selectedCommitCount: Int { tableView.selectedRowIndexes.count }
     var onSelection: ((Commit) -> Void)?
 
     private let tableView = RevisionTableView()
@@ -498,6 +499,7 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
                     || identifier == "revision.commit.reword"
                     || identifier.hasPrefix("revision.stash.")
                     || identifier.hasPrefix("revision.branch.checkout.ref.")
+                    || identifier.hasPrefix("revision.branch.merge.")
                     || identifier.hasPrefix("revision.branch.rebase.")
             },
             target: self,

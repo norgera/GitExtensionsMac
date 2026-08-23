@@ -11,6 +11,9 @@
 		AA0000000000000000000001 /* MutationDialogs.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000001 /* MutationDialogs.swift */; };
 		AA7000000000000000000001 /* CherryPickDialog.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB7000000000000000000001 /* CherryPickDialog.swift */; };
 		AA7100000000000000000001 /* StashDialog.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB7100000000000000000001 /* StashDialog.swift */; };
+		AA7200000000000000000001 /* GitMerge.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB7200000000000000000001 /* GitMerge.swift */; };
+		AA7200000000000000000002 /* GitMerge.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB7200000000000000000001 /* GitMerge.swift */; };
+		AA7200000000000000000003 /* MergeDialog.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB7200000000000000000002 /* MergeDialog.swift */; };
 		AA4000000000000000000001 /* AppSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB4000000000000000000001 /* AppSettings.swift */; };
 		AA4000000000000000000002 /* ApplicationShellDialogs.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB4000000000000000000002 /* ApplicationShellDialogs.swift */; };
 		AA4000000000000000000003 /* CommitWorkflowDialog.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB4000000000000000000003 /* CommitWorkflowDialog.swift */; };
@@ -33,6 +36,8 @@
 		EE5000000000000000000003 /* HelpPullMergeFastForward.png in Resources */ = {isa = PBXBuildFile; fileRef = FF5000000000000000000003 /* HelpPullMergeFastForward.png */; };
 		EE5000000000000000000004 /* HelpPullRebase.png in Resources */ = {isa = PBXBuildFile; fileRef = FF5000000000000000000004 /* HelpPullRebase.png */; };
 		EE500000000000000000000A /* HelpCommandRebase.png in Resources */ = {isa = PBXBuildFile; fileRef = FF500000000000000000000A /* HelpCommandRebase.png */; };
+		EE500000000000000000000B /* HelpCommandMerge.png in Resources */ = {isa = PBXBuildFile; fileRef = FF500000000000000000000B /* HelpCommandMerge.png */; };
+		EE500000000000000000000C /* HelpCommandMergeFastForward.png in Resources */ = {isa = PBXBuildFile; fileRef = FF500000000000000000000C /* HelpCommandMergeFastForward.png */; };
 		EE5000000000000000000005 /* RemoteAdd.png in Resources */ = {isa = PBXBuildFile; fileRef = FF5000000000000000000005 /* RemoteAdd.png */; };
 		EE5000000000000000000006 /* RemoteDelete.png in Resources */ = {isa = PBXBuildFile; fileRef = FF5000000000000000000006 /* RemoteDelete.png */; };
 		EE5000000000000000000007 /* RemoteEnableAndFetch.png in Resources */ = {isa = PBXBuildFile; fileRef = FF5000000000000000000007 /* RemoteEnableAndFetch.png */; };
@@ -149,11 +154,15 @@
 		BB6200000000000000000001 /* GitPush.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GitPush.swift; sourceTree = "<group>"; };
 		BB6300000000000000000001 /* PushDialog.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = PushDialog.swift; sourceTree = "<group>"; };
 		BB6400000000000000000001 /* GitPushTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GitPushTests.swift; sourceTree = "<group>"; };
+		BB7200000000000000000001 /* GitMerge.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GitMerge.swift; sourceTree = "<group>"; };
+		BB7200000000000000000002 /* MergeDialog.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MergeDialog.swift; sourceTree = "<group>"; };
 		FF5000000000000000000001 /* HelpPullFetch.png */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = image.png; path = HelpPullFetch.png; sourceTree = "<group>"; };
 		FF5000000000000000000002 /* HelpPullMerge.png */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = image.png; path = HelpPullMerge.png; sourceTree = "<group>"; };
 		FF5000000000000000000003 /* HelpPullMergeFastForward.png */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = image.png; path = HelpPullMergeFastForward.png; sourceTree = "<group>"; };
 		FF5000000000000000000004 /* HelpPullRebase.png */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = image.png; path = HelpPullRebase.png; sourceTree = "<group>"; };
 		FF500000000000000000000A /* HelpCommandRebase.png */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = image.png; path = HelpCommandRebase.png; sourceTree = "<group>"; };
+		FF500000000000000000000B /* HelpCommandMerge.png */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = image.png; path = HelpCommandMerge.png; sourceTree = "<group>"; };
+		FF500000000000000000000C /* HelpCommandMergeFastForward.png */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = image.png; path = HelpCommandMergeFastForward.png; sourceTree = "<group>"; };
 		FF5000000000000000000005 /* RemoteAdd.png */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = image.png; path = RemoteAdd.png; sourceTree = "<group>"; };
 		FF5000000000000000000006 /* RemoteDelete.png */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = image.png; path = RemoteDelete.png; sourceTree = "<group>"; };
 		FF5000000000000000000007 /* RemoteEnableAndFetch.png */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = image.png; path = RemoteEnableAndFetch.png; sourceTree = "<group>"; };
@@ -279,6 +288,7 @@
 				BB5000000000000000000001 /* GitRemoteManagement.swift */,
 				BB6000000000000000000001 /* GitPull.swift */,
 				BB6200000000000000000001 /* GitPush.swift */,
+				BB7200000000000000000001 /* GitMerge.swift */,
 			);
 			name = Git;
 			path = Git;
@@ -357,6 +367,7 @@
 			children = (
 				BB7000000000000000000001 /* CherryPickDialog.swift */,
 				BB7100000000000000000001 /* StashDialog.swift */,
+				BB7200000000000000000002 /* MergeDialog.swift */,
 				CF33F0EB3F8DB1738220F2F0 /* CommitDetailViewController.swift */,
 				ADB4DF41D3F4ED3B37F9F318 /* DetailTabsViewController.swift */,
 				162693D4B6C7F5F8CFCDD4F0 /* RepositoryBrowserHost.swift */,
@@ -412,6 +423,8 @@
 				FF5000000000000000000003 /* HelpPullMergeFastForward.png */,
 				FF5000000000000000000004 /* HelpPullRebase.png */,
 				FF500000000000000000000A /* HelpCommandRebase.png */,
+				FF500000000000000000000B /* HelpCommandMerge.png */,
+				FF500000000000000000000C /* HelpCommandMergeFastForward.png */,
 				497D0CD1BC2F6F2F3743AD99 /* LayoutFooter.png */,
 				31117DAF3496E7197DFA6B31 /* LayoutFooterTab.png */,
 				CA08AF52713A7090573C383A /* LayoutSidebarLeft.png */,
@@ -560,6 +573,8 @@
 				EE5000000000000000000003 /* HelpPullMergeFastForward.png in Resources */,
 				EE5000000000000000000004 /* HelpPullRebase.png in Resources */,
 				EE500000000000000000000A /* HelpCommandRebase.png in Resources */,
+				EE500000000000000000000B /* HelpCommandMerge.png in Resources */,
+				EE500000000000000000000C /* HelpCommandMergeFastForward.png in Resources */,
 				EE5000000000000000000008 /* Merge.png in Resources */,
 				EE5000000000000000000009 /* Rebase.png in Resources */,
 				EE5000000000000000000005 /* RemoteAdd.png in Resources */,
@@ -647,6 +662,7 @@
 				B00000000000000000000017 /* GitRepositoryMutationTests.swift in Sources */,
 				AA6100000000000000000001 /* GitPullTests.swift in Sources */,
 				AA6200000000000000000002 /* GitPush.swift in Sources */,
+				AA7200000000000000000002 /* GitMerge.swift in Sources */,
 				AA6400000000000000000001 /* GitPushTests.swift in Sources */,
 				A102D2CBFE2A4EDBE423D9D1 /* RepositoryModels.swift in Sources */,
 				BC1066079E5693F97DE5212E /* RevisionGraphLayout.swift in Sources */,
@@ -662,6 +678,7 @@
 			files = (
 				AA7000000000000000000001 /* CherryPickDialog.swift in Sources */,
 				AA7100000000000000000001 /* StashDialog.swift in Sources */,
+				AA7200000000000000000003 /* MergeDialog.swift in Sources */,
 				B00000000000000000000001 /* GitProcess.swift in Sources */,
 				B00000000000000000000002 /* GitParsers.swift in Sources */,
 				B00000000000000000000003 /* GitRepositoryBrowsingDataSource.swift in Sources */,
@@ -669,6 +686,7 @@
 				AA5000000000000000000001 /* GitRemoteManagement.swift in Sources */,
 				AA6000000000000000000001 /* GitPull.swift in Sources */,
 				AA6200000000000000000001 /* GitPush.swift in Sources */,
+				AA7200000000000000000001 /* GitMerge.swift in Sources */,
 				C087A7DECAC7EE081ED36DFE /* GitExtensionsMacApp.swift in Sources */,
 				1D5C21DC7EA1BCED958BB331 /* ContextMenuState.swift in Sources */,
 				A4B464ED560B29A71D6D51A5 /* RepositoryModels.swift in Sources */,

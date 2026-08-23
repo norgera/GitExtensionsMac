@@ -46,11 +46,27 @@ enum WorkflowManagementDialogs {
         await presentConflictResolver(source: source, window: window)
     }
 
-    private static func presentConflictResolver(
-        source: any RepositoryMutatingDataSource,
+    static func resolveMergeConflicts(
+        source: any RepositoryMergingDataSource,
+        offerCommit: Bool,
         window: NSWindow
     ) async -> ConflictResolutionResult {
-        let controller = ConflictResolverViewController(source: source)
+        await presentConflictResolver(
+            source: source,
+            window: window,
+            offerMergeCommit: offerCommit
+        )
+    }
+
+    private static func presentConflictResolver(
+        source: any RepositoryConflictResolutionDataSource,
+        window: NSWindow,
+        offerMergeCommit: Bool? = nil
+    ) async -> ConflictResolutionResult {
+        let controller = ConflictResolverViewController(
+            source: source,
+            offerMergeCommit: offerMergeCommit
+        )
         let panel = NSPanel(contentViewController: controller)
         panel.title = "Resolve merge conflicts"
         panel.styleMask = [.titled, .closable, .resizable]
@@ -619,7 +635,7 @@ private final class RebaseManagerViewController: NSViewController, NSTableViewDa
 private final class ConflictResolverViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSWindowDelegate {
     weak var panel: NSPanel?
     var onClose: ((ConflictResolutionResult) -> Void)?
-    private let source: any RepositoryMutatingDataSource
+    private let source: any RepositoryConflictResolutionDataSource
     private let table = NSTableView()
     private let descriptionLabel = NSTextField(labelWithString: "Select a file")
     private let status = NSTextField(labelWithString: "Scanning merge conflicts…")
@@ -636,8 +652,18 @@ private final class ConflictResolverViewController: NSViewController, NSTableVie
     private var task: Task<Void, Never>?
     private var didClose = false
     private var sequencerAction = ConflictSequencerAction.none
+    private let offerMergeCommit: Bool?
+    private var hadMergeConflicts = false
+    private var didOfferMergeCompletion = false
 
-    init(source: any RepositoryMutatingDataSource) { self.source = source; super.init(nibName: nil, bundle: nil) }
+    init(
+        source: any RepositoryConflictResolutionDataSource,
+        offerMergeCommit: Bool? = nil
+    ) {
+        self.source = source
+        self.offerMergeCommit = offerMergeCommit
+        super.init(nibName: nil, bundle: nil)
+    }
     required init?(coder: NSCoder) { nil }
     deinit { task?.cancel() }
 
@@ -693,13 +719,12 @@ private final class ConflictResolverViewController: NSViewController, NSTableVie
                 async let snapshot = source.loadSnapshot()
                 async let configuredMergeTool = source.loadMergeToolConfiguration()
                 let (state, refreshed, mergeTool) = try await (loadedState, snapshot, configuredMergeTool)
-                var pullState: RepositoryPullState?
-                if let pullSource = source as? any RepositoryPullingDataSource {
-                    pullState = try? await pullSource.loadPullState()
-                }
                 self.state = state
                 mergeToolConfiguration = mergeTool
-                mergeInProgress = pullState?.mergeInProgress ?? false
+                mergeInProgress = state.mergeInProgress
+                if mergeInProgress && !state.conflictedPaths.isEmpty {
+                    hadMergeConflicts = true
+                }
                 let selectedPaths = Set(self.table.selectedRowIndexes.compactMap {
                     $0 < self.paths.count ? self.paths[$0] : nil
                 })
@@ -719,7 +744,36 @@ private final class ConflictResolverViewController: NSViewController, NSTableVie
                 abortButton.isHidden = !(state.rebaseInProgress || state.cherryPickInProgress || mergeInProgress)
                 continueButton.isEnabled = paths.isEmpty
                 updateMergeToolButton()
+                if mergeInProgress,
+                   paths.isEmpty,
+                   hadMergeConflicts,
+                   offerMergeCommit != nil,
+                   !didOfferMergeCompletion {
+                    didOfferMergeCompletion = true
+                    await offerMergeCompletion()
+                }
             } catch { status.stringValue = error.localizedDescription }
+        }
+    }
+
+    private func offerMergeCompletion() async {
+        guard let panel, let offerMergeCommit else { return }
+        guard offerMergeCommit else {
+            finish(latestSnapshot)
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = "Commit"
+        alert.informativeText = "All merge conflicts are resolved, you can commit.\nDo you want to commit now?"
+        alert.addButton(withTitle: "Commit")
+        alert.addButton(withTitle: "Not now")
+        let response = await withCheckedContinuation { continuation in
+            alert.beginSheetModal(for: panel) { continuation.resume(returning: $0) }
+        }
+        if response == .alertFirstButtonReturn {
+            presentMergeCommit(closeWhenCommitWindowCloses: true)
+        } else {
+            finish(latestSnapshot)
         }
     }
     private func updateMergeToolButton() {
@@ -746,33 +800,41 @@ private final class ConflictResolverViewController: NSViewController, NSTableVie
     }
     @objc private func continueOperation() {
         guard let state else { return }
-        if state.rebaseInProgress { run(sequencerAction: .continued) { try await $0.continueRebase() } }
-        else if state.cherryPickInProgress { run(sequencerAction: .continued) { try await $0.continueCherryPick() } }
-        else if mergeInProgress { presentMergeCommit() }
+        if state.rebaseInProgress, let source = source as? any RepositoryRebaseDataSource {
+            run(sequencerAction: .continued) { _ in try await source.continueRebase() }
+        } else if state.cherryPickInProgress, let source = source as? any RepositoryCherryPickDataSource {
+            run(sequencerAction: .continued) { _ in try await source.continueCherryPick() }
+        }
+        else if mergeInProgress { presentMergeCommit(closeWhenCommitWindowCloses: false) }
     }
-    @objc private func skipOperation() { run { try await $0.skipRebase() } }
+    @objc private func skipOperation() {
+        guard let source = source as? any RepositoryRebaseDataSource else { return }
+        run { _ in try await source.skipRebase() }
+    }
     @objc private func abortOperation() {
         guard let state, let panel else { return }
         task = Task { @MainActor [weak self] in
             guard let self else { return }
-            if state.rebaseInProgress {
-                await execute(sequencerAction: .aborted) { try await $0.abortRebase() }
-            } else if state.cherryPickInProgress {
+            if state.rebaseInProgress, let source = source as? any RepositoryRebaseDataSource {
+                await execute(sequencerAction: .aborted) { _ in try await source.abortRebase() }
+            } else if state.cherryPickInProgress,
+                      let source = source as? any RepositoryCherryPickDataSource {
                 guard await MutationDialogs.confirmAbortCherryPick(window: panel) else { return }
-                await execute(sequencerAction: .aborted) { try await $0.abortCherryPick() }
+                await execute(sequencerAction: .aborted) { _ in try await source.abortCherryPick() }
             } else if mergeInProgress {
                 guard await MutationDialogs.confirmAbortMerge(window: panel) else { return }
                 await execute(sequencerAction: .aborted) { try await $0.abortMerge() }
             }
         }
     }
-    private func presentMergeCommit() {
+    private func presentMergeCommit(closeWhenCommitWindowCloses: Bool = false) {
         guard paths.isEmpty,
               commitWindowController == nil,
-              let panel else { return }
+              let panel,
+              let commitSource = source as? any RepositoryMutatingDataSource else { return }
         let head = latestSnapshot?.commits.first(where: \.isHEAD)
         commitWindowController = CommitWorkflowDialog.present(
-            source: source,
+            source: commitSource,
             initialMode: .normal,
             head: head,
             draft: nil,
@@ -783,9 +845,11 @@ private final class ConflictResolverViewController: NSViewController, NSTableVie
                 finish(snapshot)
             },
             onClose: { [weak self] in
-            guard let self else { return }
-            commitWindowController = nil
-        })
+                guard let self else { return }
+                commitWindowController = nil
+                if closeWhenCommitWindowCloses { finish(latestSnapshot) }
+            }
+        )
     }
     private func commitMerge(_ request: RepositoryCommitRequest) {
         task?.cancel()
@@ -804,7 +868,7 @@ private final class ConflictResolverViewController: NSViewController, NSTableVie
     }
     private func run(
         sequencerAction: ConflictSequencerAction = .none,
-        _ operation: @escaping @Sendable (any RepositoryMutatingDataSource) async throws -> RepositoryMutationResult
+        _ operation: @escaping @Sendable (any RepositoryConflictResolutionDataSource) async throws -> RepositoryMutationResult
     ) {
         task?.cancel()
         task = Task { @MainActor [weak self] in
@@ -814,13 +878,17 @@ private final class ConflictResolverViewController: NSViewController, NSTableVie
     }
     private func execute(
         sequencerAction: ConflictSequencerAction = .none,
-        _ operation: @escaping @Sendable (any RepositoryMutatingDataSource) async throws -> RepositoryMutationResult
+        _ operation: @escaping @Sendable (any RepositoryConflictResolutionDataSource) async throws -> RepositoryMutationResult
     ) async {
         do {
             status.stringValue = "Updating repository…"
             let result = try await operation(source)
             latestSnapshot = result.snapshot
             if sequencerAction != .none { self.sequencerAction = sequencerAction }
+            if sequencerAction == .aborted {
+                finish(result.snapshot)
+                return
+            }
             switch result.outcome {
             case .completed: status.stringValue = result.message
             case .conflicts(let values): status.stringValue = "\(values.count) conflicted path(s) remain."

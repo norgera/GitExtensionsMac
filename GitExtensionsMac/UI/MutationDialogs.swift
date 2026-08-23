@@ -383,6 +383,18 @@ enum MutationDialogs {
         return await begin(alert: alert, for: window) == .alertFirstButtonReturn
     }
 
+    static func confirmResolveMergeConflicts(paths: [String], window: NSWindow) async -> Bool {
+        let alert = NSAlert()
+        alert.messageText = "Resolve merge conflicts?"
+        alert.informativeText = paths.isEmpty
+            ? "The merge stopped with unresolved conflicts."
+            : "The merge stopped with conflicts in \(paths.count) path(s)."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Resolve conflicts")
+        alert.addButton(withTitle: "Later")
+        return await begin(alert: alert, for: window) == .alertFirstButtonReturn
+    }
+
     static func confirmAbortMerge(window: NSWindow) async -> Bool {
         let alert = NSAlert()
         alert.messageText = "Abort merge?"

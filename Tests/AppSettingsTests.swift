@@ -9,6 +9,7 @@ enum AppSettingsTests {
         testCherryPickPreferencesRoundTrip()
         testPushPreferencesRoundTrip()
         testStashPreferencesRoundTrip()
+        testMergePreferencesRoundTrip()
         testCommitPreferencesRoundTrip()
         testFileStatusListPreferencesRoundTrip()
         testCommitMessageRules()
@@ -87,6 +88,20 @@ enum AppSettingsTests {
         store.recordPushURL("ssh://example/push-repository")
         precondition(store.pushPreferences.recentURLs.first == "ssh://example/push-repository")
         precondition(store.pushPreferences.recentURLs.filter { $0 == "ssh://example/push-repository" }.count == 1)
+    }
+
+    private static func testMergePreferencesRoundTrip() {
+        withStore { store, defaults in
+            var preferences = store.mergePreferences
+            preferences.noCommit = true
+            preferences.noFastForward = true
+            preferences.addLogMessages = true
+            preferences.logMessagesCount = 37
+            preferences.helpExpanded = false
+            preferences.closeProcessOnSuccess = true
+            store.saveMergePreferences(preferences)
+            precondition(AppSettingsStore(defaults: defaults).mergePreferences == preferences)
+        }
     }
 
     private static func testRebasePreferencesRoundTrip() {

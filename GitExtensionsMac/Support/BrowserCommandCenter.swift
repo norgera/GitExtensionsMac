@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 
 extension Notification.Name {
     static let browserCommand = Notification.Name("GitExtensionsMac.browserCommand")
@@ -61,6 +62,15 @@ enum BrowserCommandCenter {
     static func command(from menuItem: NSMenuItem?) -> BrowserCommand? {
         (menuItem?.representedObject as? BrowserCommandPayload)?.command
     }
+}
+
+@MainActor
+final class BrowserCommandAvailability: ObservableObject {
+    static let shared = BrowserCommandAvailability()
+
+    @Published var canMerge = false
+
+    private init() {}
 }
 
 final class PlaceholderMenuTarget: NSObject {

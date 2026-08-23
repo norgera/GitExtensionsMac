@@ -43,6 +43,8 @@ struct GitExtensionsMacApp: App {
 }
 
 private struct GitExtensionsMenuCommands: Commands {
+    @ObservedObject private var availability = BrowserCommandAvailability.shared
+
     private func perform(_ command: BrowserCommand) {
         BrowserCommandCenter.perform(command)
     }
@@ -118,6 +120,8 @@ private struct GitExtensionsMenuCommands: Commands {
             Button("Delete branch…") { perform(.unavailable("Delete branch")) }
             Button("Checkout branch…") { perform(.unavailable("Checkout branch")) }
             Button("Merge branches…") { perform(.mergeBranches) }
+                .keyboardShortcut("m", modifiers: .control)
+                .disabled(!availability.canMerge)
             Button("Rebase…") { perform(.rebase) }
             Button("Solve merge conflicts…") { perform(.solveMergeConflicts) }
             Divider()

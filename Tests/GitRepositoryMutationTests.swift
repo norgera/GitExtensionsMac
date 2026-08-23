@@ -93,6 +93,22 @@ enum GitRepositoryMutationTests {
         print("GitRepositoryMutationTests.rebase: passed")
     }
 
+    static func runMerge() async throws {
+        let fixture = try MutationGitFixture.make()
+        defer { fixture.remove() }
+
+        try testMergeCommandConstruction()
+        try await testMergeFastForwardAndAlreadyUpToDate(fixture)
+        try await testMergeCommitOptions(fixture)
+        try await testMergeSquashAndNoCommit(fixture)
+        try await testMergeAdvancedTargets(fixture)
+        try await testMergeValidationAndDiagnostics(fixture)
+        try await testMergeConflictContinue(fixture)
+        try await testMergeConflictAbort(fixture)
+        try await testMergeCancellation(fixture)
+        print("GitRepositoryMutationTests.merge: passed")
+    }
+
     static func runRemoteManagement() async throws {
         let fixture = try MutationGitFixture.make()
         defer { fixture.remove() }
@@ -1671,6 +1687,347 @@ enum GitRepositoryMutationTests {
         }
     }
 
+    private static func testMergeCommandConstruction() throws {
+        let request = RepositoryMergeRequest(
+            targets: ["topic", "release-tag"],
+            allowFastForward: false,
+            noCommit: true,
+            strategy: "ours",
+            allowUnrelatedHistories: true,
+            message: "Merge topic",
+            logCount: 20
+        )
+        let arguments = try GitMergeCommandBuilder.arguments(
+            for: request,
+            messageFile: "/tmp/MERGE_MSG"
+        )
+        try require(arguments == [
+            "merge",
+            "--no-ff",
+            "--strategy=ours",
+            "--no-commit",
+            "--allow-unrelated-histories",
+            "-F", "/tmp/MERGE_MSG",
+            "--log=20",
+            "--no-edit",
+            "topic", "release-tag"
+        ], "merge command: argument order matches Git Extensions")
+
+        do {
+            _ = try GitMergeCommandBuilder.arguments(
+                for: RepositoryMergeRequest(targets: [" "]),
+                messageFile: nil
+            )
+            throw MutationFixtureError("merge command: an empty target was accepted")
+        } catch RepositoryMergeError.missingTarget {
+            // Expected.
+        }
+    }
+
+    private static func testMergeFastForwardAndAlreadyUpToDate(_ fixture: MutationGitFixture) async throws {
+        let repository = try fixture.clone(named: "Merge fast-forward repo")
+        let source = GitRepositoryBrowsingDataSource(repositoryURL: repository)
+        _ = try await source.loadSnapshot()
+        let topic = try fixture.git(["rev-parse", "origin/topic"], in: repository).trimmed
+        let result = try await source.performMerge(
+            RepositoryMergeRequest(targets: ["origin/topic"]),
+            output: { _ in }
+        )
+        let head = try fixture.git(["rev-parse", "HEAD"], in: repository).trimmed
+        try require(result.outcome == .completed, "merge fast-forward: operation completes")
+        try require(head == topic, "merge fast-forward: HEAD advances directly to the target")
+        try require(try fixture.git(["rev-list", "--parents", "-n", "1", "HEAD"], in: repository).split(separator: " ").count == 2, "merge fast-forward: no merge commit is created")
+        try require(result.selectedCommitID == head && result.snapshot.commits.first(where: \.isHEAD)?.id == head, "merge fast-forward: snapshot and selection follow HEAD")
+
+        let second = try await source.performMerge(
+            RepositoryMergeRequest(targets: ["origin/topic"]),
+            output: { _ in }
+        )
+        try require(second.outcome == .alreadyUpToDate, "merge: repeated target reports already up to date")
+        try require(try fixture.git(["status", "--porcelain"], in: repository).trimmed.isEmpty, "merge already-up-to-date: index and worktree stay clean")
+    }
+
+    private static func testMergeCommitOptions(_ fixture: MutationGitFixture) async throws {
+        let repository = try fixture.clone(named: "Merge commit options repo")
+        try fixture.write("main side\n", to: repository.appendingPathComponent("main-side.txt"))
+        try fixture.git(["add", "--all", "--"], in: repository)
+        try fixture.git(["commit", "-m", "Main side"], in: repository)
+        let before = try fixture.git(["rev-parse", "HEAD"], in: repository).trimmed
+        let topic = try fixture.git(["rev-parse", "origin/topic"], in: repository).trimmed
+        let source = GitRepositoryBrowsingDataSource(repositoryURL: repository)
+        _ = try await source.loadSnapshot()
+        let result = try await source.performMerge(
+            RepositoryMergeRequest(
+                targets: ["origin/topic"],
+                allowFastForward: false,
+                message: "Merge the topic\n\nTyped merge body",
+                logCount: 1
+            ),
+            output: { _ in }
+        )
+        try require(result.outcome == .completed, "merge commit: diverged histories complete")
+        let parents = try fixture.git(["show", "-s", "--format=%P", "HEAD"], in: repository).trimmed.split(separator: " ").map(String.init)
+        try require(
+            parents == [before, topic],
+            "merge commit: expected parents \([before, topic]), received \(parents)"
+        )
+        try require(try fixture.git(["log", "-1", "--format=%s"], in: repository).trimmed == "Merge the topic", "merge message: custom subject is used")
+        try require(try fixture.git(["log", "-1", "--format=%b"], in: repository).contains("Typed merge body"), "merge message: custom body is preserved")
+        let state = try await source.loadMutationState()
+        try require(!state.mergeInProgress && state.conflictedPaths.isEmpty && !state.hasStagedChanges, "merge commit: merge state, index, and worktree are clean")
+
+        let noFFRepository = try fixture.clone(named: "Merge no-ff fast-forward repo")
+        let noFFSource = GitRepositoryBrowsingDataSource(repositoryURL: noFFRepository)
+        _ = try await noFFSource.loadSnapshot()
+        _ = try await noFFSource.performMerge(
+            RepositoryMergeRequest(targets: ["origin/topic"], allowFastForward: false),
+            output: { _ in }
+        )
+        let noFFParents = try fixture.git(["show", "-s", "--format=%P", "HEAD"], in: noFFRepository).split(separator: " ")
+        try require(noFFParents.count == 2, "merge --no-ff: a merge commit is created even when fast-forward was possible")
+    }
+
+    private static func testMergeSquashAndNoCommit(_ fixture: MutationGitFixture) async throws {
+        let squashRepository = try fixture.clone(named: "Merge squash repo")
+        let squashHead = try fixture.git(["rev-parse", "HEAD"], in: squashRepository).trimmed
+        let squashSource = GitRepositoryBrowsingDataSource(repositoryURL: squashRepository)
+        _ = try await squashSource.loadSnapshot()
+        let squashed = try await squashSource.performMerge(
+            RepositoryMergeRequest(targets: ["origin/topic"], squash: true),
+            output: { _ in }
+        )
+        try require(squashed.outcome == .completed, "merge --squash: operation completes")
+        try require(try fixture.git(["rev-parse", "HEAD"], in: squashRepository).trimmed == squashHead, "merge --squash: HEAD does not move")
+        try require(Set(try fixture.git(["diff", "--cached", "--name-only"], in: squashRepository).split(separator: "\n").map(String.init)).isSuperset(of: ["shared.txt", "topic.txt"]), "merge --squash: target changes are staged")
+        try require(!FileManager.default.fileExists(atPath: squashRepository.appendingPathComponent(".git/MERGE_HEAD").path), "merge --squash: no merge state is left")
+
+        let noCommitRepository = try fixture.clone(named: "Merge no-commit repo")
+        try fixture.write("main divergence\n", to: noCommitRepository.appendingPathComponent("main-divergence.txt"))
+        try fixture.git(["add", "--all", "--"], in: noCommitRepository)
+        try fixture.git(["commit", "-m", "Main divergence"], in: noCommitRepository)
+        let noCommitHead = try fixture.git(["rev-parse", "HEAD"], in: noCommitRepository).trimmed
+        let noCommitSource = GitRepositoryBrowsingDataSource(repositoryURL: noCommitRepository)
+        _ = try await noCommitSource.loadSnapshot()
+        let pending = try await noCommitSource.performMerge(
+            RepositoryMergeRequest(targets: ["origin/topic"], noCommit: true),
+            output: { _ in }
+        )
+        try require(pending.outcome == .readyToCommit, "merge --no-commit: successful real merge is reported ready to commit")
+        try require(try fixture.git(["rev-parse", "HEAD"], in: noCommitRepository).trimmed == noCommitHead, "merge --no-commit: HEAD stays at the pre-merge commit")
+        try require(FileManager.default.fileExists(atPath: noCommitRepository.appendingPathComponent(".git/MERGE_HEAD").path), "merge --no-commit: MERGE_HEAD is retained")
+        try require(!fixture.git(["diff", "--cached", "--name-only"], in: noCommitRepository).trimmed.isEmpty, "merge --no-commit: merged changes remain staged")
+        let aborted = try await noCommitSource.abortMerge()
+        try require(aborted.outcome == .completed, "merge --no-commit: shared Abort succeeds")
+        try require(try fixture.git(["rev-parse", "HEAD"], in: noCommitRepository).trimmed == noCommitHead, "merge --no-commit Abort: original HEAD is retained")
+        try require(try fixture.git(["status", "--porcelain"], in: noCommitRepository).trimmed.isEmpty, "merge --no-commit Abort: index and worktree are restored")
+    }
+
+    private static func testMergeAdvancedTargets(_ fixture: MutationGitFixture) async throws {
+        let strategyRepository = try fixture.clone(named: "Merge ours strategy repo")
+        try fixture.write("ours\n", to: strategyRepository.appendingPathComponent("ours.txt"))
+        try fixture.git(["add", "--all", "--"], in: strategyRepository)
+        try fixture.git(["commit", "-m", "Ours side"], in: strategyRepository)
+        let strategySource = GitRepositoryBrowsingDataSource(repositoryURL: strategyRepository)
+        _ = try await strategySource.loadSnapshot()
+        let ours = try await strategySource.performMerge(
+            RepositoryMergeRequest(targets: ["origin/topic"], strategy: "ours"),
+            output: { _ in }
+        )
+        try require(ours.outcome == .completed, "merge strategy: ours completes")
+        try require(try fixture.git(["show", "-s", "--format=%P", "HEAD"], in: strategyRepository).split(separator: " ").count == 2, "merge strategy: ours still records both parents")
+        try require(!FileManager.default.fileExists(atPath: strategyRepository.appendingPathComponent("topic.txt").path), "merge strategy: ours retains the current tree")
+
+        let octopusRepository = try fixture.clone(named: "Merge multiple target repo")
+        try fixture.git(["checkout", "-b", "octopus-a"], in: octopusRepository)
+        try fixture.write("a\n", to: octopusRepository.appendingPathComponent("octopus-a.txt"))
+        try fixture.git(["add", "--all", "--"], in: octopusRepository)
+        try fixture.git(["commit", "-m", "Octopus A"], in: octopusRepository)
+        let octopusA = try fixture.git(["rev-parse", "HEAD"], in: octopusRepository).trimmed
+        try fixture.git(["checkout", "main"], in: octopusRepository)
+        try fixture.git(["checkout", "-b", "octopus-b"], in: octopusRepository)
+        try fixture.write("b\n", to: octopusRepository.appendingPathComponent("octopus-b.txt"))
+        try fixture.git(["add", "--all", "--"], in: octopusRepository)
+        try fixture.git(["commit", "-m", "Octopus B"], in: octopusRepository)
+        let octopusB = try fixture.git(["rev-parse", "HEAD"], in: octopusRepository).trimmed
+        try fixture.git(["checkout", "main"], in: octopusRepository)
+        let octopusSource = GitRepositoryBrowsingDataSource(repositoryURL: octopusRepository)
+        _ = try await octopusSource.loadSnapshot()
+        let octopus = try await octopusSource.performMerge(
+            RepositoryMergeRequest(targets: ["octopus-a", "octopus-b"]),
+            output: { _ in }
+        )
+        try require(octopus.outcome == .completed, "merge multiple targets: octopus merge completes")
+        let octopusParents = try fixture.git(["show", "-s", "--format=%P", "HEAD"], in: octopusRepository).trimmed.split(separator: " ").map(String.init)
+        try require(Set(octopusParents) == Set([octopusA, octopusB]), "merge multiple targets: Git records both non-redundant selected parents")
+        try require(FileManager.default.fileExists(atPath: octopusRepository.appendingPathComponent("octopus-a.txt").path) && FileManager.default.fileExists(atPath: octopusRepository.appendingPathComponent("octopus-b.txt").path), "merge multiple targets: both target trees are present")
+
+        let unrelatedRepository = try fixture.clone(named: "Merge unrelated histories repo")
+        try fixture.git(["checkout", "--orphan", "unrelated"], in: unrelatedRepository)
+        try fixture.git(["rm", "-rf", "--", "."], in: unrelatedRepository)
+        try fixture.write("unrelated\n", to: unrelatedRepository.appendingPathComponent("unrelated.txt"))
+        try fixture.git(["add", "--all", "--"], in: unrelatedRepository)
+        try fixture.git(["commit", "-m", "Unrelated root"], in: unrelatedRepository)
+        try fixture.git(["checkout", "main"], in: unrelatedRepository)
+        let unrelatedSource = GitRepositoryBrowsingDataSource(repositoryURL: unrelatedRepository)
+        _ = try await unrelatedSource.loadSnapshot()
+        let rejected = try await unrelatedSource.performMerge(
+            RepositoryMergeRequest(targets: ["unrelated"]),
+            output: { _ in }
+        )
+        try require(rejected.outcome == .failed && rejected.command.exitStatus != 0, "merge unrelated histories: Git rejects the target without the exposed option")
+        let accepted = try await unrelatedSource.performMerge(
+            RepositoryMergeRequest(targets: ["unrelated"], allowUnrelatedHistories: true),
+            output: { _ in }
+        )
+        try require(accepted.outcome == .completed, "merge unrelated histories: exposed option permits the merge")
+        try require(FileManager.default.fileExists(atPath: unrelatedRepository.appendingPathComponent("unrelated.txt").path), "merge unrelated histories: unrelated tree is merged")
+    }
+
+    private static func testMergeValidationAndDiagnostics(_ fixture: MutationGitFixture) async throws {
+        let repository = try fixture.clone(named: "Merge diagnostics repo")
+        let source = GitRepositoryBrowsingDataSource(repositoryURL: repository)
+        _ = try await source.loadSnapshot()
+        let before = try fixture.git(["rev-parse", "HEAD"], in: repository).trimmed
+        let invalid = try await source.performMerge(
+            RepositoryMergeRequest(targets: ["missing/revision"]),
+            output: { _ in }
+        )
+        try require(invalid.outcome == .failed, "merge invalid revision: failure is typed")
+        try require(invalid.command.exitStatus != 0 && !invalid.command.standardErrorString.trimmed.isEmpty, "merge invalid revision: exit status and stderr are preserved")
+        try require(try fixture.git(["rev-parse", "HEAD"], in: repository).trimmed == before, "merge invalid revision: HEAD is unchanged")
+
+        try fixture.write("dirty current worktree\n", to: repository.appendingPathComponent("shared.txt"))
+        let dirty = try await source.performMerge(
+            RepositoryMergeRequest(targets: ["origin/topic"]),
+            output: { _ in }
+        )
+        try require(dirty.outcome == .failed && dirty.command.exitStatus != 0, "merge dirty worktree: overlapping changes are rejected by Git")
+        try require(try String(contentsOf: repository.appendingPathComponent("shared.txt"), encoding: .utf8) == "dirty current worktree\n", "merge dirty worktree: local content is preserved")
+        try require(!dirty.message.trimmed.isEmpty, "merge dirty worktree: useful diagnostics survive")
+
+        let detachedRepository = try fixture.clone(named: "Merge detached HEAD repo")
+        try fixture.git(["checkout", "--detach", "HEAD"], in: detachedRepository)
+        let detachedSource = GitRepositoryBrowsingDataSource(repositoryURL: detachedRepository)
+        _ = try await detachedSource.loadSnapshot()
+        let detached = try await detachedSource.performMerge(
+            RepositoryMergeRequest(targets: ["origin/topic"]),
+            output: { _ in }
+        )
+        let detachedState = try await detachedSource.loadMutationState()
+        try require(detached.outcome == .completed && detachedState.currentBranch == nil, "merge detached HEAD: Git permits the merge and HEAD remains detached")
+    }
+
+    private static func testMergeConflictContinue(_ fixture: MutationGitFixture) async throws {
+        let setup = try makeMergeConflictRepository(fixture, name: "Merge conflict continue repo")
+        let source = GitRepositoryBrowsingDataSource(repositoryURL: setup.repository)
+        _ = try await source.loadSnapshot()
+        let conflicted = try await source.performMerge(
+            RepositoryMergeRequest(targets: [setup.target]),
+            output: { _ in }
+        )
+        guard case .conflicts(let paths) = conflicted.outcome else {
+            throw MutationFixtureError("merge conflict continue: conflict was not reported")
+        }
+        try require(paths == ["shared.txt"], "merge conflict continue: exact unresolved path is retained")
+        let state = try await source.loadMutationState()
+        try require(state.mergeInProgress && state.conflictedPaths == ["shared.txt"], "merge conflict continue: MERGE_HEAD and index conflict state are visible")
+
+        do {
+            _ = try await source.performMerge(
+                RepositoryMergeRequest(targets: [setup.target]),
+                output: { _ in }
+            )
+            throw MutationFixtureError("merge conflict continue: a second merge began over unresolved paths")
+        } catch RepositoryMergeError.unresolvedConflicts(let existing) {
+            try require(existing == ["shared.txt"], "merge conflict continue: validation reports the existing unresolved path")
+        }
+
+        try fixture.write("resolved merge\n", to: setup.repository.appendingPathComponent("shared.txt"))
+        _ = try await source.stage(paths: ["shared.txt"])
+        let resolvedState = try await source.loadMutationState()
+        try require(resolvedState.mergeInProgress && resolvedState.conflictedPaths.isEmpty, "merge conflict continue: staging clears conflicts while retaining merge state")
+        let committed = try await source.commit(RepositoryCommitRequest(
+            message: "Resolve merge",
+            mode: .normal,
+            stageAllBeforeCommit: false,
+            allowEmpty: false,
+            signOff: false,
+            author: nil,
+            resetAuthor: false
+        ))
+        try require(committed.outcome == .completed, "merge conflict continue: shared Commit workflow completes the merge")
+        let parents = try fixture.git(["show", "-s", "--format=%P", "HEAD"], in: setup.repository).trimmed.split(separator: " ").map(String.init)
+        try require(parents == [setup.originalHead, setup.target], "merge conflict continue: committed merge records both expected parents")
+        let finalState = try await source.loadMutationState()
+        try require(!finalState.mergeInProgress && finalState.conflictedPaths.isEmpty && !finalState.hasStagedChanges, "merge conflict continue: merge files, index, and worktree finish cleanly")
+    }
+
+    private static func testMergeConflictAbort(_ fixture: MutationGitFixture) async throws {
+        let setup = try makeMergeConflictRepository(fixture, name: "Merge conflict abort repo")
+        let originalContent = try String(contentsOf: setup.repository.appendingPathComponent("shared.txt"), encoding: .utf8)
+        let source = GitRepositoryBrowsingDataSource(repositoryURL: setup.repository)
+        _ = try await source.loadSnapshot()
+        let conflicted = try await source.performMerge(
+            RepositoryMergeRequest(targets: [setup.target]),
+            output: { _ in }
+        )
+        guard case .conflicts = conflicted.outcome else {
+            throw MutationFixtureError("merge conflict abort: conflict was not created")
+        }
+        let aborted = try await source.abortMerge()
+        try require(aborted.outcome == .completed, "merge conflict abort: shared Abort completes")
+        try require(try fixture.git(["rev-parse", "HEAD"], in: setup.repository).trimmed == setup.originalHead, "merge conflict abort: original HEAD is restored")
+        try require(try String(contentsOf: setup.repository.appendingPathComponent("shared.txt"), encoding: .utf8) == originalContent, "merge conflict abort: original worktree is restored")
+        try require(try fixture.git(["status", "--porcelain"], in: setup.repository).trimmed.isEmpty, "merge conflict abort: index and worktree are clean")
+        let state = try await source.loadMutationState()
+        try require(!state.mergeInProgress && state.conflictedPaths.isEmpty, "merge conflict abort: merge state files and unmerged entries are removed")
+    }
+
+    private static func testMergeCancellation(_ fixture: MutationGitFixture) async throws {
+        let repository = try fixture.clone(named: "Merge cancellation repo")
+        let before = try fixture.git(["rev-parse", "HEAD"], in: repository).trimmed
+        let runner = CancellableMergeGitRunner()
+        let source = GitRepositoryBrowsingDataSource(repositoryURL: repository, git: runner)
+        _ = try await source.loadSnapshot()
+        let task = Task {
+            try await source.performMerge(
+                RepositoryMergeRequest(targets: ["origin/topic"]),
+                output: { _ in }
+            )
+        }
+        for _ in 0..<100 where !runner.didBeginMerge {
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        try require(runner.didBeginMerge, "merge cancellation: typed runner reached merge")
+        task.cancel()
+        do {
+            _ = try await task.value
+            throw MutationFixtureError("merge cancellation: cancelled operation completed")
+        } catch is CancellationError {
+            // Expected.
+        }
+        try require(try fixture.git(["rev-parse", "HEAD"], in: repository).trimmed == before, "merge cancellation: HEAD is unchanged")
+        try require(try fixture.git(["status", "--porcelain"], in: repository).trimmed.isEmpty, "merge cancellation: index and worktree are unchanged")
+    }
+
+    private static func makeMergeConflictRepository(
+        _ fixture: MutationGitFixture,
+        name: String
+    ) throws -> (repository: URL, target: String, originalHead: String) {
+        let repository = try fixture.clone(named: name)
+        try fixture.git(["checkout", "-b", "merge-conflict-topic"], in: repository)
+        try fixture.write("incoming merge conflict\n", to: repository.appendingPathComponent("shared.txt"))
+        try fixture.git(["add", "--all", "--"], in: repository)
+        try fixture.git(["commit", "-m", "Incoming merge conflict"], in: repository)
+        let target = try fixture.git(["rev-parse", "HEAD"], in: repository).trimmed
+        try fixture.git(["checkout", "main"], in: repository)
+        try fixture.write("current merge conflict\n", to: repository.appendingPathComponent("shared.txt"))
+        try fixture.git(["add", "--all", "--"], in: repository)
+        try fixture.git(["commit", "-m", "Current merge conflict"], in: repository)
+        let originalHead = try fixture.git(["rev-parse", "HEAD"], in: repository).trimmed
+        return (repository, target, originalHead)
+    }
+
     private static func testOrdinaryRebaseAndAutoStash(_ fixture: MutationGitFixture) async throws {
         let repository = try fixture.clone(named: "Ordinary rebase repo")
         try fixture.git(["checkout", "-b", "rebase-feature"], in: repository)
@@ -2314,6 +2671,35 @@ private final class CancellableRebaseGitRunner: GitCommandRunning, @unchecked Se
             return try await base.run(arguments: arguments, in: directory, standardInput: standardInput, environment: environment)
         }
         lock.withLock { beganRebase = true }
+        while true {
+            try Task.checkCancellation()
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+    }
+}
+
+private final class CancellableMergeGitRunner: GitCommandRunning, @unchecked Sendable {
+    private let base = GitProcess()
+    private let lock = NSLock()
+    private var beganMerge = false
+
+    var didBeginMerge: Bool { lock.withLock { beganMerge } }
+
+    func run(
+        arguments: [String],
+        in directory: URL,
+        standardInput: Data?,
+        environment: [String: String]
+    ) async throws -> GitCommandResult {
+        guard arguments.first == "merge" else {
+            return try await base.run(
+                arguments: arguments,
+                in: directory,
+                standardInput: standardInput,
+                environment: environment
+            )
+        }
+        lock.withLock { beganMerge = true }
         while true {
             try Task.checkCancellation()
             try await Task.sleep(nanoseconds: 10_000_000)
