@@ -1,3 +1,6 @@
+@testable import GitExtensionsCore
+@testable import GitCommands
+@testable import GitUI
 import Foundation
 
 @MainActor

@@ -1,3 +1,5 @@
+import GitExtensionsCore
+import GitCommands
 import AppKit
 
 final class RepositoryTreeNode: NSObject {
@@ -140,12 +142,16 @@ final class RepositoryOutlineViewController: NSViewController, NSOutlineViewData
         view = root
     }
 
-    func apply(snapshot: RepositorySnapshot) {
-        isBareRepository = snapshot.currentRepository.isBare
-        let localBranches = buildBranchTree(snapshot.branches, isRemote: false)
+    func apply(
+        identity: RepositoryIdentityState,
+        references: RepositoryReferenceState,
+        navigation: RepositoryNavigationState
+    ) {
+        isBareRepository = identity.currentRepository.isBare
+        let localBranches = buildBranchTree(references.branches, isRemote: false)
         let branchesRoot = RepositoryTreeNode(title: "Branches", kind: .group, symbolName: "LocalBranchRoot", children: localBranches)
 
-        let remoteNodes = snapshot.remotes.map { remote in
+        let remoteNodes = navigation.remotes.map { remote in
             RepositoryTreeNode(
                 title: remote.name,
                 kind: .remote(remote),
@@ -159,7 +165,7 @@ final class RepositoryOutlineViewController: NSViewController, NSOutlineViewData
             title: "Worktrees",
             kind: .group,
             symbolName: "WorkTree",
-            children: snapshot.worktrees.map {
+            children: navigation.worktrees.map {
                 RepositoryTreeNode(
                     title: $0.name,
                     kind: .worktree($0),
@@ -172,14 +178,14 @@ final class RepositoryOutlineViewController: NSViewController, NSOutlineViewData
             title: "Tags",
             kind: .group,
             symbolName: "TagHorizontal",
-            children: snapshot.tags.map { RepositoryTreeNode(title: $0.name, kind: .tag($0), symbolName: "Tag") }
+            children: references.tags.map { RepositoryTreeNode(title: $0.name, kind: .tag($0), symbolName: "Tag") }
         )
 
         let submoduleRoot = RepositoryTreeNode(
             title: "Submodules",
             kind: .group,
             symbolName: "FolderSubmodule",
-            children: snapshot.submodules.map { submodule in
+            children: navigation.submodules.map { submodule in
                 let suffix: String = switch submodule.state {
                 case .clean: ""
                 case .uninitialized: " (not initialized)"
@@ -199,7 +205,7 @@ final class RepositoryOutlineViewController: NSViewController, NSOutlineViewData
             title: "Stashes",
             kind: .group,
             symbolName: "stash",
-            children: snapshot.stashes.map {
+            children: navigation.stashes.map {
                 RepositoryTreeNode(title: "\($0.selector): \($0.subject)", kind: .stash($0), symbolName: "stash")
             }
         )

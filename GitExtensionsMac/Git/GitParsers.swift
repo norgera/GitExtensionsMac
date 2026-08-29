@@ -1,101 +1,106 @@
+import GitExtensionsCore
 import Foundation
 
-struct GitLogRecord: Sendable {
-    let objectID: String
-    let parentIDs: [String]
-    let authorDate: Date
-    let commitDate: Date
-    let authorName: String
-    let authorEmail: String
-    let committerName: String
-    let committerEmail: String
-    let body: String
+package struct GitLogRecord: Sendable {
+    package let objectID: ObjectID
+    package let parentIDs: [ObjectID]
+    package let authorDate: Date
+    package let commitDate: Date
+    package let authorName: String
+    package let authorEmail: String
+    package let committerName: String
+    package let committerEmail: String
+    package let body: String
 }
 
-struct GitRefRecord: Sendable {
-    let objectID: String
-    let fullName: String
-    let peeledObjectID: String?
-    let upstreamRemote: String?
-    let upstreamRef: String?
-    let upstreamTrack: String?
+package struct GitRefRecord: Sendable {
+    package let objectID: ObjectID
+    package let fullName: String
+    package let peeledObjectID: ObjectID?
+    package let upstreamRemote: String?
+    package let upstreamRef: String?
+    package let upstreamTrack: String?
 }
 
-struct GitStatusRecord: Sendable {
-    let path: String
-    let oldPath: String?
-    let indexStatus: Character
-    let worktreeStatus: Character
-    let isUntracked: Bool
-    let isConflict: Bool
+package struct GitStatusRecord: Sendable {
+    package let path: String
+    package let oldPath: String?
+    package let indexStatus: Character
+    package let worktreeStatus: Character
+    package let isUntracked: Bool
+    package let isConflict: Bool
 }
 
-struct GitChangedPath: Sendable {
-    let path: String
-    let oldPath: String?
-    let type: FileChangeType
+package struct GitChangedPath: Sendable {
+    package let path: String
+    package let oldPath: String?
+    package let type: FileChangeType
 }
 
-struct GitTreeRecord: Sendable {
-    let mode: String
-    let objectType: String
-    let objectID: String
-    let byteCount: Int
-    let path: String
+package struct GitTreeRecord: Sendable {
+    package let mode: String
+    package let objectType: String
+    package let objectID: ObjectID?
+    package let byteCount: Int
+    package let path: String
 }
 
-struct GitWorktreeRecord: Sendable {
-    let path: String
-    let headID: String?
-    let branchRef: String?
-    let isBare: Bool
-    let isDetached: Bool
-    let isPrunable: Bool
+package struct GitWorktreeRecord: Sendable {
+    package let path: String
+    package let headID: ObjectID?
+    package let branchRef: String?
+    package let isBare: Bool
+    package let isDetached: Bool
+    package let isPrunable: Bool
 }
 
-struct GitStashRecord: Sendable {
-    let selector: String
-    let objectID: String
-    let parentIDs: [String]
-    let authorDate: Date
-    let commitDate: Date
-    let authorName: String
-    let authorEmail: String
-    let committerName: String
-    let committerEmail: String
-    let subject: String
+package struct GitStashRecord: Sendable {
+    package let selector: String
+    package let objectID: ObjectID
+    package let parentIDs: [ObjectID]
+    package let authorDate: Date
+    package let commitDate: Date
+    package let authorName: String
+    package let authorEmail: String
+    package let committerName: String
+    package let committerEmail: String
+    package let subject: String
 }
 
-enum GitOutputParser {
-    static func parseLog(_ data: Data) throws -> [GitLogRecord] {
+package enum GitOutputParser {
+    package static func parseLog(_ data: Data) throws -> [GitLogRecord] {
         let fields = nulFields(data)
         guard fields.count % 9 == 0 else {
             throw GitError.malformedOutput(command: "log", detail: "expected groups of 9 NUL-delimited fields, got \(fields.count)")
         }
 
         return try stride(from: 0, to: fields.count, by: 9).map { index in
-            let objectID = fields[index]
-            guard isObjectID(objectID),
-                  let authorSeconds = TimeInterval(fields[index + 2]),
-                  let commitSeconds = TimeInterval(fields[index + 3])
-            else {
-                throw GitError.malformedOutput(command: "log", detail: "invalid object ID or timestamp near record \(index / 9)")
-            }
-            return GitLogRecord(
-                objectID: objectID,
-                parentIDs: fields[index + 1].split(separator: " ").map(String.init),
-                authorDate: Date(timeIntervalSince1970: authorSeconds),
-                commitDate: Date(timeIntervalSince1970: commitSeconds),
-                authorName: fields[index + 4],
-                authorEmail: fields[index + 5],
-                committerName: fields[index + 6],
-                committerEmail: fields[index + 7],
-                body: fields[index + 8].trimmingCharacters(in: .newlines)
-            )
+            try parseLogRecord(Array(fields[index..<(index + 9)]), recordIndex: index / 9)
         }
     }
 
-    static func parseRefs(_ data: Data) throws -> [GitRefRecord] {
+    package static func parseLogRecord(_ fields: [String], recordIndex: Int) throws -> GitLogRecord {
+        guard fields.count == 9,
+              let objectID = try? ObjectID.parse(fields[0]),
+              let authorSeconds = TimeInterval(fields[2]),
+              let commitSeconds = TimeInterval(fields[3])
+        else {
+            throw GitError.malformedOutput(command: "log", detail: "invalid object ID or timestamp near record \(recordIndex)")
+        }
+        return GitLogRecord(
+            objectID: objectID,
+            parentIDs: try fields[1].split(separator: " ").map { try ObjectID.parse(String($0)) },
+            authorDate: Date(timeIntervalSince1970: authorSeconds),
+            commitDate: Date(timeIntervalSince1970: commitSeconds),
+            authorName: fields[4],
+            authorEmail: fields[5],
+            committerName: fields[6],
+            committerEmail: fields[7],
+            body: fields[8].trimmingCharacters(in: .newlines)
+        )
+    }
+
+    package static func parseRefs(_ data: Data) throws -> [GitRefRecord] {
         var fields = nulFields(data, trimRecordNewlines: true)
         if fields.last?.isEmpty == true { fields.removeLast() }
         guard fields.count % 6 == 0 else {
@@ -103,13 +108,13 @@ enum GitOutputParser {
         }
 
         return try stride(from: 0, to: fields.count, by: 6).map { index in
-            guard isObjectID(fields[index]) else {
+            guard let objectID = try? ObjectID.parse(fields[index]) else {
                 throw GitError.malformedOutput(command: "for-each-ref", detail: "invalid object ID \(fields[index])")
             }
             return GitRefRecord(
-                objectID: fields[index],
+                objectID: objectID,
                 fullName: fields[index + 1],
-                peeledObjectID: nilIfEmpty(fields[index + 2]),
+                peeledObjectID: try ObjectID.parseIfPresent(nilIfEmpty(fields[index + 2])),
                 upstreamRemote: nilIfEmpty(fields[index + 3]),
                 upstreamRef: nilIfEmpty(fields[index + 4]),
                 upstreamTrack: nilIfEmpty(fields[index + 5])
@@ -117,7 +122,7 @@ enum GitOutputParser {
         }
     }
 
-    static func parsePorcelainV2(_ data: Data) throws -> [GitStatusRecord] {
+    package static func parsePorcelainV2(_ data: Data) throws -> [GitStatusRecord] {
         let records = rawNulFields(data)
         var result: [GitStatusRecord] = []
         var index = 0
@@ -166,7 +171,7 @@ enum GitOutputParser {
         return result
     }
 
-    static func parseNameStatus(_ data: Data) throws -> [GitChangedPath] {
+    package static func parseNameStatus(_ data: Data) throws -> [GitChangedPath] {
         let fields = nulFields(data)
         var result: [GitChangedPath] = []
         var index = 0
@@ -194,7 +199,7 @@ enum GitOutputParser {
         return result
     }
 
-    static func parseNumstat(_ data: Data) -> [String: (Int, Int)] {
+    package static func parseNumstat(_ data: Data) -> [String: (Int, Int)] {
         let fields = nulFields(data)
         var result: [String: (Int, Int)] = [:]
         var index = 0
@@ -216,7 +221,7 @@ enum GitOutputParser {
         return result
     }
 
-    static func parseUnifiedDiff(_ data: Data, files: [ChangedFile]) -> [String: FileDiff] {
+    package static func parseUnifiedDiff(_ data: Data, files: [ChangedFile]) -> [String: FileDiff] {
         let text = String(decoding: data, as: UTF8.self)
         let sections = splitDiffSections(text)
         var result: [String: FileDiff] = [:]
@@ -230,7 +235,7 @@ enum GitOutputParser {
         return result
     }
 
-    static func parseTree(_ data: Data) throws -> [GitTreeRecord] {
+    package static func parseTree(_ data: Data) throws -> [GitTreeRecord] {
         try nulFields(data).map { record in
             guard let tab = record.firstIndex(of: "\t") else {
                 throw GitError.malformedOutput(command: "ls-tree", detail: "missing path separator")
@@ -242,14 +247,14 @@ enum GitOutputParser {
             return GitTreeRecord(
                 mode: String(header[0]),
                 objectType: String(header[1]),
-                objectID: String(header[2]),
+                objectID: try ObjectID.parse(String(header[2])),
                 byteCount: header.count > 3 ? Int(header[3]) ?? 0 : 0,
                 path: String(record[record.index(after: tab)...])
             )
         }
     }
 
-    static func parseIndexTree(_ data: Data) throws -> [GitTreeRecord] {
+    package static func parseIndexTree(_ data: Data) throws -> [GitTreeRecord] {
         try nulFields(data).compactMap { record in
             guard let tab = record.firstIndex(of: "\t") else {
                 throw GitError.malformedOutput(command: "ls-files -s", detail: "missing path separator")
@@ -262,24 +267,24 @@ enum GitOutputParser {
             return GitTreeRecord(
                 mode: String(header[0]),
                 objectType: "blob",
-                objectID: String(header[1]),
+                objectID: try ObjectID.parse(String(header[1])),
                 byteCount: 0,
                 path: String(record[record.index(after: tab)...])
             )
         }
     }
 
-    static func parseWorktrees(_ data: Data) throws -> [GitWorktreeRecord] {
+    package static func parseWorktrees(_ data: Data) throws -> [GitWorktreeRecord] {
         let fields = rawNulFields(data).map(decode)
         var result: [GitWorktreeRecord] = []
         var values: [String: String] = [:]
         var flags: Set<String> = []
 
-        func finish() {
+        func finish() throws {
             guard let path = values["worktree"] else { return }
             result.append(GitWorktreeRecord(
                 path: path,
-                headID: values["HEAD"],
+                headID: try ObjectID.parseIfPresent(values["HEAD"]),
                 branchRef: values["branch"],
                 isBare: flags.contains("bare"),
                 isDetached: flags.contains("detached"),
@@ -291,7 +296,7 @@ enum GitOutputParser {
 
         for field in fields {
             if field.isEmpty {
-                finish()
+                try finish()
                 continue
             }
             if let space = field.firstIndex(of: " ") {
@@ -300,17 +305,17 @@ enum GitOutputParser {
                 flags.insert(field)
             }
         }
-        finish()
+        try finish()
         return result
     }
 
-    static func parseStashes(_ data: Data) throws -> [GitStashRecord] {
+    package static func parseStashes(_ data: Data) throws -> [GitStashRecord] {
         let fields = nulFields(data)
         guard fields.count % 10 == 0 else {
             throw GitError.malformedOutput(command: "stash list", detail: "expected groups of 10 fields, got \(fields.count)")
         }
         return try stride(from: 0, to: fields.count, by: 10).map { index in
-            guard isObjectID(fields[index + 1]),
+            guard let objectID = try? ObjectID.parse(fields[index + 1]),
                   let authorSeconds = TimeInterval(fields[index + 3]),
                   let commitSeconds = TimeInterval(fields[index + 4])
             else {
@@ -318,8 +323,8 @@ enum GitOutputParser {
             }
             return GitStashRecord(
                 selector: fields[index],
-                objectID: fields[index + 1],
-                parentIDs: fields[index + 2].split(separator: " ").map(String.init),
+                objectID: objectID,
+                parentIDs: try fields[index + 2].split(separator: " ").map { try ObjectID.parse(String($0)) },
                 authorDate: Date(timeIntervalSince1970: authorSeconds),
                 commitDate: Date(timeIntervalSince1970: commitSeconds),
                 authorName: fields[index + 5],
@@ -331,7 +336,7 @@ enum GitOutputParser {
         }
     }
 
-    static func fileChangeType(for status: Character) -> FileChangeType {
+    package static func fileChangeType(for status: Character) -> FileChangeType {
         changeType(status)
     }
 
@@ -439,7 +444,4 @@ enum GitOutputParser {
         value.isEmpty ? nil : value
     }
 
-    private static func isObjectID(_ value: String) -> Bool {
-        (40...64).contains(value.count) && value.allSatisfy(\.isHexDigit)
-    }
 }

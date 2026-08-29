@@ -1,27 +1,29 @@
+import GitExtensionsCore
+import GitCommands
 import AppKit
 
 @MainActor
 enum PushDialog {
     static func present(
         source: any RepositoryPushingDataSource,
-        snapshot: RepositorySnapshot,
+        context: RepositoryNetworkContext,
         initialBranch: String? = nil,
         executeImmediately: Bool = false,
         initialForceWithLease: Bool = false,
-        onSnapshot: @escaping (RepositorySnapshot, String?) -> Void,
+        onRepositoryChanged: @escaping (RevisionID?) -> Void,
         onCompletion: ((Bool) -> Void)? = nil,
         onClose: @escaping () -> Void
     ) -> NSWindowController {
         let controller = PushDialogViewController(
             source: source,
-            snapshot: snapshot,
+            context: context,
             initialBranch: initialBranch,
             executeImmediately: executeImmediately,
             initialForceWithLease: initialForceWithLease,
-            onSnapshot: onSnapshot
+            onRepositoryChanged: onRepositoryChanged
         )
         let window = NSWindow(contentViewController: controller)
-        window.title = "Push (\(snapshot.currentRepository.path))"
+        window.title = "Push (\(context.repository.path))"
         window.styleMask = [.titled, .closable, .resizable]
         window.setContentSize(NSSize(width: 584, height: 290))
         window.minSize = NSSize(width: 600, height: 329)
@@ -48,11 +50,11 @@ private final class PushDialogViewController: NSViewController,
     var onCompletion: ((Bool) -> Void)?
 
     private let source: any RepositoryPushingDataSource
-    private var snapshot: RepositorySnapshot
+    private var context: RepositoryNetworkContext
     private let initialBranch: String?
     private let executeImmediately: Bool
     private let initialForceWithLease: Bool
-    private let onSnapshot: (RepositorySnapshot, String?) -> Void
+    private let onRepositoryChanged: (RevisionID?) -> Void
     private let settings = AppSettingsStore.shared
     private var pushState: RepositoryPushState?
     private var didClose = false
@@ -89,18 +91,18 @@ private final class PushDialogViewController: NSViewController,
 
     init(
         source: any RepositoryPushingDataSource,
-        snapshot: RepositorySnapshot,
+        context: RepositoryNetworkContext,
         initialBranch: String?,
         executeImmediately: Bool,
         initialForceWithLease: Bool,
-        onSnapshot: @escaping (RepositorySnapshot, String?) -> Void
+        onRepositoryChanged: @escaping (RevisionID?) -> Void
     ) {
         self.source = source
-        self.snapshot = snapshot
+        self.context = context
         self.initialBranch = initialBranch
         self.executeImmediately = executeImmediately
         self.initialForceWithLease = initialForceWithLease
-        self.onSnapshot = onSnapshot
+        self.onRepositoryChanged = onRepositoryChanged
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -696,10 +698,9 @@ private final class PushDialogViewController: NSViewController,
         remoteWindowController = RemoteManagementDialog.present(
             source: source,
             selectedRemote: remoteCombo.stringValue.isEmpty ? nil : remoteCombo.stringValue,
-            onSnapshot: { [weak self] snapshot in
+            onRepositoryChanged: { [weak self] in
                 guard let self else { return }
-                self.snapshot = snapshot
-                self.onSnapshot(snapshot, nil)
+                self.onRepositoryChanged(nil)
                 self.reloadRepositoryState(selectRemote: self.remoteCombo.stringValue)
             },
             onClose: { [weak self] in self?.remoteWindowController = nil }
@@ -711,12 +712,11 @@ private final class PushDialogViewController: NSViewController,
         pullWindowController = ApplicationShellDialogs.presentPullWindow(
             initialAction: .merge,
             executeImmediately: false,
-            snapshot: snapshot,
+            context: context,
             source: source,
-            onSnapshot: { [weak self] updated, selected in
+            onRepositoryChanged: { [weak self] selected in
                 guard let self else { return }
-                self.snapshot = updated
-                self.onSnapshot(updated, selected)
+                self.onRepositoryChanged(selected)
                 self.reloadRepositoryState(selectRemote: self.remoteCombo.stringValue)
             },
             onClose: { [weak self] in self?.pullWindowController = nil }
@@ -748,15 +748,11 @@ private final class PushDialogViewController: NSViewController,
                     case .failure(let error):
                         if error is CancellationError { statusLabel.stringValue = "Push aborted" }
                         else { statusLabel.stringValue = error.localizedDescription }
-                        if let refreshed = try? await source.loadSnapshot() {
-                            snapshot = refreshed
-                            onSnapshot(refreshed, refreshed.commits.first(where: \.isHEAD)?.id)
-                        }
+                        onRepositoryChanged(context.headID.map(RevisionID.object))
                         operationTask = nil
                         return
                     case .success(let result):
-                        snapshot = result.snapshot
-                        onSnapshot(result.snapshot, result.selectedCommitID)
+                        onRepositoryChanged(result.selectedCommitID)
                         statusLabel.stringValue = result.message
                         if result.outcome == .completed {
                             lastPushCompleted = true
@@ -994,8 +990,7 @@ private final class PushDialogViewController: NSViewController,
         guard let pullResult = await PullProcessDialog.run(request: pullRequest, source: source, parent: window) else { return nil }
         switch pullResult {
         case .success(let value) where value.outcome == .completed:
-            snapshot = value.snapshot
-            onSnapshot(value.snapshot, value.selectedCommitID)
+            onRepositoryChanged(value.selectedCommitID)
             return request
         default:
             return nil
@@ -1138,14 +1133,14 @@ enum RemoteBranchDeleteDialog {
         source: any RepositoryPushingDataSource,
         initialRemote: String,
         initialBranch: String,
-        onSnapshot: @escaping (RepositorySnapshot, String?) -> Void,
+        onRepositoryChanged: @escaping (RevisionID?) -> Void,
         onClose: @escaping () -> Void
     ) -> NSWindowController {
         let controller = RemoteBranchDeleteViewController(
             source: source,
             initialRemote: initialRemote,
             initialBranch: initialBranch,
-            onSnapshot: onSnapshot,
+            onRepositoryChanged: onRepositoryChanged,
             onClose: onClose
         )
         let window = NSWindow(contentViewController: controller)
@@ -1169,7 +1164,7 @@ private final class RemoteBranchDeleteViewController: NSViewController, NSWindow
     private let source: any RepositoryPushingDataSource
     private let initialRemote: String
     private let initialBranch: String
-    private let onSnapshot: (RepositorySnapshot, String?) -> Void
+    private let onRepositoryChanged: (RevisionID?) -> Void
     private let onClose: () -> Void
     private let branchesButton = NSPopUpButton()
     private let deleteRemote = NSButton(checkboxWithTitle: "Delete branch(es) from remote repository", target: nil, action: nil)
@@ -1187,13 +1182,13 @@ private final class RemoteBranchDeleteViewController: NSViewController, NSWindow
         source: any RepositoryPushingDataSource,
         initialRemote: String,
         initialBranch: String,
-        onSnapshot: @escaping (RepositorySnapshot, String?) -> Void,
+        onRepositoryChanged: @escaping (RevisionID?) -> Void,
         onClose: @escaping () -> Void
     ) {
         self.source = source
         self.initialRemote = initialRemote
         self.initialBranch = initialBranch
-        self.onSnapshot = onSnapshot
+        self.onRepositoryChanged = onRepositoryChanged
         self.onClose = onClose
         super.init(nibName: nil, bundle: nil)
     }
@@ -1411,7 +1406,7 @@ private final class RemoteBranchDeleteViewController: NSViewController, NSWindow
                 }
                 switch processResult {
                 case .success(let result) where result.outcome == .completed:
-                    onSnapshot(result.snapshot, result.selectedCommitID)
+                    onRepositoryChanged(result.selectedCommitID)
                 case .success(let result):
                     status.stringValue = result.message
                     task = nil
@@ -1428,8 +1423,8 @@ private final class RemoteBranchDeleteViewController: NSViewController, NSWindow
             if deleteTracking.state == .on {
                 let candidates = localTrackingCandidates()
                 do {
-                    let snapshot = try await source.deleteLocalTrackingBranches(candidates, force: false)
-                    onSnapshot(snapshot, snapshot.commits.first(where: \.isHEAD)?.id)
+                    try await source.deleteLocalTrackingBranches(candidates, force: false)
+                    onRepositoryChanged(state?.headID.map(RevisionID.object))
                 } catch {
                     let alert = NSAlert()
                     alert.alertStyle = .critical
@@ -1442,8 +1437,8 @@ private final class RemoteBranchDeleteViewController: NSViewController, NSWindow
                         return
                     }
                     do {
-                        let snapshot = try await source.deleteLocalTrackingBranches(candidates, force: true)
-                        onSnapshot(snapshot, snapshot.commits.first(where: \.isHEAD)?.id)
+                        try await source.deleteLocalTrackingBranches(candidates, force: true)
+                        onRepositoryChanged(state?.headID.map(RevisionID.object))
                     } catch {
                         await showError(error, window: window)
                     }

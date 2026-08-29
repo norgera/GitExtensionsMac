@@ -1,3 +1,5 @@
+import GitExtensionsCore
+import GitCommands
 import Foundation
 
 indirect enum ContextMenuEntry: Hashable, Sendable {
@@ -311,7 +313,7 @@ enum RevisionContextMenuBuilder {
 
     private static func navigateMenu(_ context: RevisionContextMenuContext) -> ContextMenuEntry {
         let commit = context.focusedCommit
-        let children = context.history.filter { $0.parentIDs.contains(commit.id) }
+        let children = context.history.filter { $0.graphParentIDs.contains(commit.id) }
         return submenu(
             "revision.navigate",
             "Navigate",
@@ -346,19 +348,19 @@ enum RevisionContextMenuBuilder {
 }
 
 enum RevisionNavigationResolver {
-    static func childID(of commit: Commit, in history: [Commit]) -> String? {
-        history.first(where: { $0.parentIDs.contains(commit.id) })?.id
+    static func childID(of commit: Commit, in history: [Commit]) -> RevisionID? {
+        history.first(where: { $0.graphParentIDs.contains(commit.id) })?.id
     }
 
-    static func parentID(of commit: Commit, last: Bool = false) -> String? {
-        last ? commit.parentIDs.last : commit.parentIDs.first
+    static func parentID(of commit: Commit, last: Bool = false) -> RevisionID? {
+        (last ? commit.parentIDs.last : commit.parentIDs.first).map(RevisionID.object)
     }
 
     static func mergeBaseID(
         selectedCommits: [Commit],
         history: [Commit],
         headCommit: Commit?
-    ) -> String? {
+    ) -> RevisionID? {
         var selected = selectedCommits
         if selected.count == 1,
            let headCommit,
@@ -368,12 +370,12 @@ enum RevisionNavigationResolver {
         guard !selected.isEmpty else { return nil }
 
         let commitsByID = Dictionary(uniqueKeysWithValues: history.map { ($0.id, $0) })
-        let ancestorSets = selected.map { commit -> Set<String> in
-            var ancestors = Set<String>()
+        let ancestorSets = selected.map { commit -> Set<RevisionID> in
+            var ancestors = Set<RevisionID>()
             var pending = [commit.id]
             while let id = pending.popLast() {
                 guard ancestors.insert(id).inserted else { continue }
-                pending.append(contentsOf: commitsByID[id]?.parentIDs ?? [])
+                pending.append(contentsOf: commitsByID[id]?.graphParentIDs ?? [])
             }
             return ancestors
         }

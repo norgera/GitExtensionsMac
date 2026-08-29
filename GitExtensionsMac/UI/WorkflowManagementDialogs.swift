@@ -1,3 +1,5 @@
+import GitExtensionsCore
+import GitCommands
 import AppKit
 
 enum ConflictSequencerAction: Equatable, Sendable {
@@ -7,22 +9,22 @@ enum ConflictSequencerAction: Equatable, Sendable {
 }
 
 struct ConflictResolutionResult: Sendable {
-    let snapshot: RepositorySnapshot?
+    let repositoryChanged: Bool
     let sequencerAction: ConflictSequencerAction
 }
 
 @MainActor
 enum WorkflowManagementDialogs {
     static func manageStashes(
-        source: any RepositoryMutatingDataSource,
-        snapshot: RepositorySnapshot,
+        source: any RepositoryStashWorkflowDataSource,
+        context: RepositoryStashContext,
         window: NSWindow,
         manageStashes: Bool = true,
         initialStash: String? = nil
     ) async -> StashDialogResult {
         await StashDialog.present(
             source: source,
-            snapshot: snapshot,
+            context: context,
             manageStashes: manageStashes,
             initialStash: initialStash,
             owner: window,
@@ -33,14 +35,14 @@ enum WorkflowManagementDialogs {
     }
 
     static func resolveConflicts(
-        source: any RepositoryMutatingDataSource,
+        source: any RepositoryConflictResolutionDataSource,
         window: NSWindow
-    ) async -> RepositorySnapshot? {
-        await presentConflictResolver(source: source, window: window).snapshot
+    ) async -> Bool {
+        await presentConflictResolver(source: source, window: window).repositoryChanged
     }
 
     static func resolveCherryPickConflicts(
-        source: any RepositoryMutatingDataSource,
+        source: any RepositoryCherryPickDataSource,
         window: NSWindow
     ) async -> ConflictResolutionResult {
         await presentConflictResolver(source: source, window: window)
@@ -84,9 +86,9 @@ enum WorkflowManagementDialogs {
     }
 
     static func manageRebase(
-        source: any RepositoryMutatingDataSource,
+        source: any RepositoryRebaseDataSource,
         window: NSWindow
-    ) async -> RepositorySnapshot? {
+    ) async -> Bool {
         let controller = RebaseManagerViewController(source: source)
         let panel = NSPanel(contentViewController: controller)
         panel.title = "Rebase"
@@ -97,23 +99,23 @@ enum WorkflowManagementDialogs {
         controller.panel = panel
         panel.delegate = controller
         return await withCheckedContinuation { continuation in
-            controller.onClose = { snapshot in
+            controller.onClose = { changed in
                 window.endSheet(panel)
-                continuation.resume(returning: snapshot)
+                continuation.resume(returning: changed)
             }
             window.beginSheet(panel)
         }
     }
 
     static func startRebase(
-        source: any RepositoryMutatingDataSource,
+        source: any RepositoryRebaseDataSource,
         target: Commit,
         interactive: Bool,
-        initialActions: [String: RepositoryRebaseTodoAction],
+        initialActions: [ObjectID: RepositoryRebaseTodoAction],
         advancedFrom: String?,
         showAdvancedOptions: Bool,
         window: NSWindow
-    ) async -> RepositorySnapshot? {
+    ) async -> Bool {
         let controller = RebaseManagerViewController(
             source: source,
             target: target,
@@ -130,7 +132,7 @@ enum WorkflowManagementDialogs {
         panel.setFrameAutosaveName("GitExtensionsMac.Rebase")
         controller.panel = panel; panel.delegate = controller
         return await withCheckedContinuation { continuation in
-            controller.onClose = { snapshot in window.endSheet(panel); continuation.resume(returning: snapshot) }
+            controller.onClose = { changed in window.endSheet(panel); continuation.resume(returning: changed) }
             window.beginSheet(panel)
         }
     }
@@ -139,11 +141,11 @@ enum WorkflowManagementDialogs {
 @MainActor
 private final class RebaseManagerViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSWindowDelegate {
     weak var panel: NSPanel?
-    var onClose: ((RepositorySnapshot?) -> Void)?
-    private let source: any RepositoryMutatingDataSource
+    var onClose: ((Bool) -> Void)?
+    private let source: any RepositoryRebaseDataSource
     private let target: Commit?
     private let initiallyInteractive: Bool
-    private let initialActions: [String: RepositoryRebaseTodoAction]
+    private let initialActions: [ObjectID: RepositoryRebaseTodoAction]
     private let advancedFrom: String?
     private let showsAdvancedOptions: Bool
     private let table = NSTableView()
@@ -183,7 +185,7 @@ private final class RebaseManagerViewController: NSViewController, NSTableViewDa
     private var helpExpanded = AppSettingsStore.shared.rebasePreferences.helpExpanded
     private var rebaseState = RepositoryRebaseState(inProgress: false, hasConflicts: false, currentBranch: nil, currentCommitID: nil, patches: [], canEditTodo: false, hasAutoStash: false)
     private var rebaseConfiguration: RepositoryRebaseConfiguration?
-    private var latestSnapshot: RepositorySnapshot?
+    private var repositoryChanged = false
     private var task: Task<Void, Never>?
     private var commitWindowController: NSWindowController?
     private var skippedCommitIDs = Set<String>()
@@ -191,10 +193,10 @@ private final class RebaseManagerViewController: NSViewController, NSTableViewDa
     private var didAutoStart = false
 
     init(
-        source: any RepositoryMutatingDataSource,
+        source: any RepositoryRebaseDataSource,
         target: Commit? = nil,
         interactive: Bool = false,
-        initialActions: [String: RepositoryRebaseTodoAction] = [:],
+        initialActions: [ObjectID: RepositoryRebaseTodoAction] = [:],
         advancedFrom: String? = nil,
         showAdvancedOptions: Bool = false
     ) {
@@ -271,7 +273,7 @@ private final class RebaseManagerViewController: NSViewController, NSTableViewDa
     }
 
     private func configureIdleOptions() {
-        targetField.stringValue = target?.id ?? ""
+        targetField.stringValue = target?.objectID?.string ?? ""
         targetField.completes = true; targetField.numberOfVisibleItems = 12
         targetField.widthAnchor.constraint(equalToConstant: 270).isActive = true
         interactiveOption.state = initiallyInteractive ? .on : .off
@@ -367,11 +369,11 @@ private final class RebaseManagerViewController: NSViewController, NSTableViewDa
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         let patch = rebaseState.patches[row]
         let value: String = switch tableColumn?.identifier.rawValue {
-        case "Status": skippedCommitIDs.contains(patch.commitID) && patch.status == .applied ? RepositoryRebasePatchStatus.skipped.rawValue : patch.status.rawValue
+        case "Status": skippedCommitIDs.contains(patch.revisionToken) && patch.status == .applied ? RepositoryRebasePatchStatus.skipped.rawValue : patch.status.rawValue
         case "Action": patch.action
         case "Author": patch.author
         case "Date": patch.date
-        case "Hash": String(patch.commitID.prefix(10))
+        case "Hash": String(patch.revisionToken.prefix(10))
         default: patch.subject
         }
         let cell = NSTableCellView(); let label = NSTextField(labelWithString: value)
@@ -394,10 +396,10 @@ private final class RebaseManagerViewController: NSViewController, NSTableViewDa
     private func loadState() async {
         do {
             async let loadedState = source.loadRebaseState()
-            async let snapshot = source.loadSnapshot()
-            let (state, refreshed) = try await (loadedState, snapshot)
+            async let context = source.loadRepositoryState().rebaseContext
+            let (state, refreshedContext) = try await (loadedState, context)
             if rebaseConfiguration == nil { rebaseConfiguration = try await source.loadRebaseConfiguration() }
-            apply(state: state, snapshot: refreshed)
+            apply(state: state, context: refreshedContext)
         } catch is CancellationError {
             status.stringValue = "Rebase operation cancelled."
         } catch {
@@ -405,10 +407,10 @@ private final class RebaseManagerViewController: NSViewController, NSTableViewDa
         }
     }
 
-    private func apply(state: RepositoryRebaseState, snapshot: RepositorySnapshot) {
-        rebaseState = state; latestSnapshot = snapshot
+    private func apply(state: RepositoryRebaseState, context: RepositoryRebaseContext) {
+        rebaseState = state
         currentBranch.stringValue = "Current branch: \(state.currentBranch ?? "(detached HEAD)")"
-        populateReferences(from: snapshot)
+        populateReferences(from: context)
         if let configuration = rebaseConfiguration {
             if autosquashOption.state == .off { autosquashOption.state = configuration.autoSquash ? .on : .off }
             if updateRefsOption.state == .off { updateRefsOption.state = configuration.updateRefs ? .on : .off }
@@ -438,26 +440,26 @@ private final class RebaseManagerViewController: NSViewController, NSTableViewDa
         }
         optionChanged()
         if !active, target == nil {
-            finish(snapshot)
+            finish(repositoryChanged)
         } else if !active, !showsAdvancedOptions, !didAutoStart {
             didAutoStart = true
             DispatchQueue.main.async { [weak self] in self?.startRebase() }
         }
     }
 
-    private func populateReferences(from snapshot: RepositorySnapshot) {
-        let refs = Array(Set(snapshot.branches.map(\.name) + snapshot.tags.map(\.name))).sorted()
+    private func populateReferences(from context: RepositoryRebaseContext) {
+        let refs = Array(Set(context.branches.map(\.name) + context.tags.map(\.name))).sorted()
         let targetValue = targetField.stringValue
         let toValue = toField.stringValue
         targetField.removeAllItems(); targetField.addItems(withObjectValues: refs)
-        toField.removeAllItems(); toField.addItems(withObjectValues: snapshot.branches.filter { !$0.isRemote }.map(\.name).sorted())
+        toField.removeAllItems(); toField.addItems(withObjectValues: context.branches.filter { !$0.isRemote }.map(\.name).sorted())
         targetField.stringValue = targetValue
-        toField.stringValue = toValue.isEmpty ? (snapshot.branches.first(where: \.isCurrent)?.name ?? "HEAD") : toValue
+        toField.stringValue = toValue.isEmpty ? (context.branches.first(where: \.isCurrent)?.name ?? "HEAD") : toValue
     }
 
     private func execute(
         status runningStatus: String,
-        operation: @escaping @Sendable (any RepositoryMutatingDataSource) async throws -> RepositoryMutationResult
+        operation: @escaping @Sendable (any RepositoryRebaseDataSource) async throws -> RepositoryMutationResult
     ) {
         guard task == nil else { return }
         setBusy(true, status: runningStatus)
@@ -465,12 +467,12 @@ private final class RebaseManagerViewController: NSViewController, NSTableViewDa
             guard let self else { return }
             do {
                 let result = try await operation(source)
-                latestSnapshot = result.snapshot
+                repositoryChanged = true
                 if case .completed = result.outcome, !(try await source.loadRebaseState()).inProgress {
                     if result.message.localizedCaseInsensitiveContains("up to date"), let panel {
                         await MutationDialogs.showInformation(result.message, title: "Rebase", window: panel)
                     }
-                    task = nil; setBusy(false, status: result.message); finish(result.snapshot)
+                    task = nil; setBusy(false, status: result.message); finish(true)
                 } else {
                     await loadState(); task = nil; setBusy(false, status: result.message)
                 }
@@ -551,14 +553,14 @@ private final class RebaseManagerViewController: NSViewController, NSTableViewDa
                         if showsAdvancedOptions {
                             status.stringValue = "Rebase cancelled."
                         } else {
-                            finish(latestSnapshot)
+                            finish(repositoryChanged)
                         }
                         return
                     }
                     execute(status: "Rebasing interactively…") { try await $0.interactiveRebase(request) }
                 } catch is CancellationError {
                     task = nil; setBusy(false, status: "Rebase cancelled.")
-                    if !showsAdvancedOptions { finish(latestSnapshot) }
+                    if !showsAdvancedOptions { finish(repositoryChanged) }
                 } catch {
                     task = nil; setBusy(false, status: error.localizedDescription); await showError(error, title: "Rebase failed")
                 }
@@ -581,8 +583,8 @@ private final class RebaseManagerViewController: NSViewController, NSTableViewDa
 
     @objc private func continueRebase() { execute(status: "Continuing rebase…") { try await $0.continueRebase() } }
     @objc private func skipRebase() {
-        if let applying = rebaseState.patches.first(where: { $0.status == .applying }), !applying.commitID.isEmpty {
-            skippedCommitIDs.insert(applying.commitID)
+        if let applying = rebaseState.patches.first(where: { $0.status == .applying }), !applying.revisionToken.isEmpty {
+            skippedCommitIDs.insert(applying.revisionToken)
         }
         execute(status: "Skipping the current patch…") { try await $0.skipRebase() }
     }
@@ -608,26 +610,29 @@ private final class RebaseManagerViewController: NSViewController, NSTableViewDa
         guard let panel else { return }
         task = Task { @MainActor [weak self] in
             guard let self else { return }
-            if let snapshot = await WorkflowManagementDialogs.resolveConflicts(source: source, window: panel) { latestSnapshot = snapshot }
+            if await WorkflowManagementDialogs.resolveConflicts(source: source, window: panel) { repositoryChanged = true }
             task = nil; reload()
         }
     }
     @objc private func openCommit() {
-        guard let panel, commitWindowController == nil else { return }
+        guard let panel,
+              commitWindowController == nil,
+              let commitSource = source as? any RepositoryCommitWorkflowDataSource
+        else { return }
         commitWindowController = CommitWorkflowDialog.present(
-            source: source, initialMode: .normal, head: latestSnapshot?.commits.first(where: \.isHEAD), draft: nil, owner: panel,
-            onSnapshot: { [weak self] snapshot, _ in self?.latestSnapshot = snapshot; self?.reload() },
+            source: commitSource, initialMode: .normal, head: nil, draft: nil, owner: panel,
+            onRepositoryChanged: { [weak self] _ in self?.repositoryChanged = true; self?.reload() },
             onClose: { [weak self] in self?.commitWindowController = nil }
         )
     }
-    @objc private func close() { finish(latestSnapshot) }
-    func windowWillClose(_ notification: Notification) { finish(latestSnapshot) }
+    @objc private func close() { finish(repositoryChanged) }
+    func windowWillClose(_ notification: Notification) { finish(repositoryChanged) }
     private func showError(_ error: Error, title: String) async {
         guard let panel else { return }
         await MutationDialogs.showError(error, title: title, window: panel)
     }
-    private func finish(_ snapshot: RepositorySnapshot?) {
-        guard !didClose else { return }; didClose = true; task?.cancel(); commitWindowController?.close(); onClose?(snapshot)
+    private func finish(_ changed: Bool) {
+        guard !didClose else { return }; didClose = true; task?.cancel(); commitWindowController?.close(); onClose?(changed)
     }
 }
 
@@ -647,7 +652,7 @@ private final class ConflictResolverViewController: NSViewController, NSTableVie
     private var mergeToolConfiguration: RepositoryMergeToolConfiguration?
     private var mergeInProgress = false
     private var paths: [String] = []
-    private var latestSnapshot: RepositorySnapshot?
+    private var repositoryChanged = false
     private var commitWindowController: NSWindowController?
     private var task: Task<Void, Never>?
     private var didClose = false
@@ -716,9 +721,8 @@ private final class ConflictResolverViewController: NSViewController, NSTableVie
             guard let self else { return }
             do {
                 async let loadedState = source.loadMutationState()
-                async let snapshot = source.loadSnapshot()
                 async let configuredMergeTool = source.loadMergeToolConfiguration()
-                let (state, refreshed, mergeTool) = try await (loadedState, snapshot, configuredMergeTool)
+                let (state, mergeTool) = try await (loadedState, configuredMergeTool)
                 self.state = state
                 mergeToolConfiguration = mergeTool
                 mergeInProgress = state.mergeInProgress
@@ -728,7 +732,7 @@ private final class ConflictResolverViewController: NSViewController, NSTableVie
                 let selectedPaths = Set(self.table.selectedRowIndexes.compactMap {
                     $0 < self.paths.count ? self.paths[$0] : nil
                 })
-                latestSnapshot = refreshed; paths = state.conflictedPaths; table.reloadData()
+                paths = state.conflictedPaths; table.reloadData()
                 let restoredSelection = IndexSet(self.paths.indices.filter {
                     selectedPaths.contains(self.paths[$0])
                 })
@@ -759,7 +763,7 @@ private final class ConflictResolverViewController: NSViewController, NSTableVie
     private func offerMergeCompletion() async {
         guard let panel, let offerMergeCommit else { return }
         guard offerMergeCommit else {
-            finish(latestSnapshot)
+            finish(repositoryChanged)
             return
         }
         let alert = NSAlert()
@@ -773,7 +777,7 @@ private final class ConflictResolverViewController: NSViewController, NSTableVie
         if response == .alertFirstButtonReturn {
             presentMergeCommit(closeWhenCommitWindowCloses: true)
         } else {
-            finish(latestSnapshot)
+            finish(repositoryChanged)
         }
     }
     private func updateMergeToolButton() {
@@ -831,23 +835,22 @@ private final class ConflictResolverViewController: NSViewController, NSTableVie
         guard paths.isEmpty,
               commitWindowController == nil,
               let panel,
-              let commitSource = source as? any RepositoryMutatingDataSource else { return }
-        let head = latestSnapshot?.commits.first(where: \.isHEAD)
+              let commitSource = source as? any RepositoryCommitWorkflowDataSource else { return }
         commitWindowController = CommitWorkflowDialog.present(
             source: commitSource,
             initialMode: .normal,
-            head: head,
+            head: nil,
             draft: nil,
             owner: panel,
-            onSnapshot: { [weak self] snapshot, _ in
+            onRepositoryChanged: { [weak self] _ in
                 guard let self else { return }
-                latestSnapshot = snapshot
-                finish(snapshot)
+                repositoryChanged = true
+                finish(true)
             },
             onClose: { [weak self] in
                 guard let self else { return }
                 commitWindowController = nil
-                if closeWhenCommitWindowCloses { finish(latestSnapshot) }
+                if closeWhenCommitWindowCloses { finish(repositoryChanged) }
             }
         )
     }
@@ -857,9 +860,9 @@ private final class ConflictResolverViewController: NSViewController, NSTableVie
             guard let self else { return }
             do {
                 status.stringValue = "Committing merge…"
-                let result = try await source.commit(request)
-                latestSnapshot = result.snapshot
-                finish(result.snapshot)
+                _ = try await source.commit(request)
+                repositoryChanged = true
+                finish(true)
             } catch {
                 status.stringValue = error.localizedDescription
                 reloadState()
@@ -883,10 +886,10 @@ private final class ConflictResolverViewController: NSViewController, NSTableVie
         do {
             status.stringValue = "Updating repository…"
             let result = try await operation(source)
-            latestSnapshot = result.snapshot
+            repositoryChanged = true
             if sequencerAction != .none { self.sequencerAction = sequencerAction }
             if sequencerAction == .aborted {
-                finish(result.snapshot)
+                finish(true)
                 return
             }
             switch result.outcome {
@@ -897,12 +900,12 @@ private final class ConflictResolverViewController: NSViewController, NSTableVie
             reloadState()
         } catch { status.stringValue = error.localizedDescription }
     }
-    @objc private func close() { finish(latestSnapshot) }
-    func windowWillClose(_ notification: Notification) { finish(latestSnapshot) }
-    private func finish(_ value: RepositorySnapshot?) {
+    @objc private func close() { finish(repositoryChanged) }
+    func windowWillClose(_ notification: Notification) { finish(repositoryChanged) }
+    private func finish(_ changed: Bool) {
         guard !didClose else { return }
         didClose = true
         commitWindowController?.close()
-        onClose?(ConflictResolutionResult(snapshot: value, sequencerAction: sequencerAction))
+        onClose?(ConflictResolutionResult(repositoryChanged: changed, sequencerAction: sequencerAction))
     }
 }

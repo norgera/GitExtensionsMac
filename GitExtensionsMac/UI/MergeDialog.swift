@@ -1,20 +1,22 @@
+import GitExtensionsCore
+import GitCommands
 import AppKit
 
 @MainActor
 enum MergeDialog {
     static func present(
         source: any RepositoryMergingDataSource,
-        snapshot: RepositorySnapshot,
+        context: RepositoryMergeContext,
         initialTarget: String?,
         owner: NSWindow,
-        onSnapshot: @escaping (RepositorySnapshot, String?) -> Void,
+        onRepositoryChanged: @escaping (RevisionID?) -> Void,
         onClose: @escaping () -> Void
     ) -> NSWindowController {
         let controller = MergeDialogViewController(
             source: source,
-            snapshot: snapshot,
+            context: context,
             initialTarget: initialTarget,
-            onSnapshot: onSnapshot
+            onRepositoryChanged: onRepositoryChanged
         )
         let window = NSWindow(contentViewController: controller)
         window.title = "Merge branches"
@@ -54,8 +56,8 @@ private final class MergeDialogViewController: NSViewController, NSWindowDelegat
     var onClose: (() -> Void)?
 
     private let source: any RepositoryMergingDataSource
-    private var snapshot: RepositorySnapshot
-    private let onSnapshot: (RepositorySnapshot, String?) -> Void
+    private let context: RepositoryMergeContext
+    private let onRepositoryChanged: (RevisionID?) -> Void
     private let settings = AppSettingsStore.shared
     private let targets: [TargetChoice]
 
@@ -91,22 +93,22 @@ private final class MergeDialogViewController: NSViewController, NSWindowDelegat
 
     init(
         source: any RepositoryMergingDataSource,
-        snapshot: RepositorySnapshot,
+        context: RepositoryMergeContext,
         initialTarget: String?,
-        onSnapshot: @escaping (RepositorySnapshot, String?) -> Void
+        onRepositoryChanged: @escaping (RevisionID?) -> Void
     ) {
         self.source = source
-        self.snapshot = snapshot
-        self.onSnapshot = onSnapshot
-        self.targets = Self.makeTargets(snapshot)
+        self.context = context
+        self.onRepositoryChanged = onRepositoryChanged
+        self.targets = Self.makeTargets(context)
         self.isHelpExpanded = AppSettingsStore.shared.mergePreferences.helpExpanded
         super.init(nibName: nil, bundle: nil)
 
-        let current = snapshot.branches.first(where: \.isCurrent)
+        let current = context.branches.first(where: \.isCurrent)
         currentBranch.stringValue = current?.name ?? "Detached HEAD"
         currentBranch.font = .boldSystemFont(ofSize: NSFont.systemFontSize)
 
-        let defaultTarget = initialTarget ?? Self.trackingTarget(snapshot: snapshot, currentBranch: current)
+        let defaultTarget = initialTarget ?? Self.trackingTarget(context: context, currentBranch: current)
         targetCombo.stringValue = defaultTarget ?? ""
     }
 
@@ -522,7 +524,7 @@ private final class MergeDialogViewController: NSViewController, NSWindowDelegat
         setExecuting(true)
         operationTask = Task { @MainActor [weak self, weak window] in
             guard let self, let window else { return }
-            let updateSubmodules = await shouldUpdateSubmodules(afterMergeIn: snapshot, window: window)
+            let updateSubmodules = await shouldUpdateSubmodules(afterMergeIn: context, window: window)
             guard !Task.isCancelled else {
                 operationTask = nil
                 setExecuting(false)
@@ -549,8 +551,7 @@ private final class MergeDialogViewController: NSViewController, NSWindowDelegat
                     await MutationDialogs.showError(error, title: "Merge failed", window: window)
                 }
             case .success(let value):
-                snapshot = value.snapshot
-                onSnapshot(value.snapshot, value.selectedCommitID)
+                onRepositoryChanged(value.selectedCommitID)
                 switch value.outcome {
                 case .completed, .alreadyUpToDate, .readyToCommit:
                     finish()
@@ -564,10 +565,7 @@ private final class MergeDialogViewController: NSViewController, NSWindowDelegat
                             offerCommit: !request.noCommit,
                             window: window
                         )
-                        if let refreshed = resolution.snapshot {
-                            snapshot = refreshed
-                            onSnapshot(refreshed, refreshed.commits.first(where: \.isHEAD)?.id)
-                        }
+                        if resolution.repositoryChanged { onRepositoryChanged(value.selectedCommitID) }
                     }
                     finish()
                     self.window?.close()
@@ -577,17 +575,17 @@ private final class MergeDialogViewController: NSViewController, NSWindowDelegat
     }
 
     private func shouldUpdateSubmodules(
-        afterMergeIn snapshot: RepositorySnapshot,
+        afterMergeIn context: RepositoryMergeContext,
         window: NSWindow
     ) async -> Bool {
-        guard !snapshot.submodules.isEmpty else { return false }
+        guard !context.submodules.isEmpty else { return false }
         switch settings.pullPreferences.updateSubmodulesAfterPull {
         case true:
             return true
         case false:
             return false
         case nil:
-            let initializing = snapshot.submodules.contains(where: { $0.state == .uninitialized })
+            let initializing = context.submodules.contains(where: { $0.state == .uninitialized })
             let alert = NSAlert()
             alert.messageText = "Submodules"
             if initializing {
@@ -632,24 +630,23 @@ private final class MergeDialogViewController: NSViewController, NSWindowDelegat
         onClose?()
     }
 
-    private static func makeTargets(_ snapshot: RepositorySnapshot) -> [TargetChoice] {
-        var values: [TargetChoice] = snapshot.branches.filter { !$0.isRemote }.map {
+    private static func makeTargets(_ context: RepositoryMergeContext) -> [TargetChoice] {
+        var values: [TargetChoice] = context.branches.filter { !$0.isRemote }.map {
             TargetChoice(value: $0.name, title: $0.name)
         }
-        values += snapshot.branches.filter(\.isRemote).compactMap { branch in
+        values += context.branches.filter(\.isRemote).compactMap { branch in
             guard let remote = branch.remoteName else { return nil }
             let name = "\(remote)/\(branch.name)"
             return TargetChoice(value: name, title: name)
         }
-        values += snapshot.tags.map { TargetChoice(value: $0.name, title: $0.name) }
+        values += context.tags.map { TargetChoice(value: $0.name, title: $0.name) }
         var seen = Set<String>()
         return values.filter { seen.insert($0.value).inserted }
     }
 
-    private static func trackingTarget(snapshot: RepositorySnapshot, currentBranch: Branch?) -> String? {
+    private static func trackingTarget(context: RepositoryMergeContext, currentBranch: Branch?) -> String? {
         guard let currentBranch,
-              let currentCommit = snapshot.commits.first(where: { $0.id == currentBranch.commitID }),
-              let reference = currentCommit.references.first(where: {
+              let reference = context.referencesByCommit[currentBranch.commitID]?.first(where: {
                   ($0.kind == .currentBranch || $0.kind == .localBranch) && $0.name == currentBranch.name
               }),
               let remote = reference.trackingRemote,

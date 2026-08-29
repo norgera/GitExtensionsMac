@@ -1,41 +1,66 @@
+import GitExtensionsCore
 import Foundation
 
-struct RepositoryRemoteConfiguration: Identifiable, Hashable, Sendable {
-    var id: String { "\(isDisabled ? "disabled" : "active"):\(name)" }
-    let name: String
-    let fetchURL: String
-    let pushURL: String?
-    let puttyKeyFile: String?
-    let color: String?
-    let prefix: String?
-    let pushRefSpecs: [String]
-    let isDisabled: Bool
+package struct RepositoryRemoteConfiguration: Identifiable, Hashable, Sendable {
+    package var id: String { "\(isDisabled ? "disabled" : "active"):\(name)" }
+    package let name: String
+    package let fetchURL: String
+    package let pushURL: String?
+    package let puttyKeyFile: String?
+    package let color: String?
+    package let prefix: String?
+    package let pushRefSpecs: [String]
+    package let isDisabled: Bool
 }
 
-struct RepositoryRemoteSaveRequest: Hashable, Sendable {
-    let originalName: String?
-    let name: String
-    let fetchURL: String
-    let pushURL: String?
-    let puttyKeyFile: String?
-    let color: String?
-    let prefix: String?
+package struct RepositoryRemoteSaveRequest: Hashable, Sendable {
+    package let originalName: String?
+    package let name: String
+    package let fetchURL: String
+    package let pushURL: String?
+    package let puttyKeyFile: String?
+    package let color: String?
+    package let prefix: String?
+
+    package init(
+        originalName: String?,
+        name: String,
+        fetchURL: String,
+        pushURL: String?,
+        puttyKeyFile: String?,
+        color: String?,
+        prefix: String?
+    ) {
+        self.originalName = originalName
+        self.name = name
+        self.fetchURL = fetchURL
+        self.pushURL = pushURL
+        self.puttyKeyFile = puttyKeyFile
+        self.color = color
+        self.prefix = prefix
+    }
 }
 
-struct RepositoryBranchTrackingConfiguration: Identifiable, Hashable, Sendable {
-    var id: String { branchName }
-    let branchName: String
-    let remoteName: String?
-    let mergeBranch: String?
+package struct RepositoryBranchTrackingConfiguration: Identifiable, Hashable, Sendable {
+    package var id: String { branchName }
+    package let branchName: String
+    package let remoteName: String?
+    package let mergeBranch: String?
+
+    package init(branchName: String, remoteName: String?, mergeBranch: String?) {
+        self.branchName = branchName
+        self.remoteName = remoteName
+        self.mergeBranch = mergeBranch
+    }
 }
 
-enum RepositoryRemoteManagementError: LocalizedError, Sendable {
+package enum RepositoryRemoteManagementError: LocalizedError, Sendable {
     case invalidName
     case duplicateName(String)
     case disabledRemoteIsReadOnly
     case missingRemote(String)
 
-    var errorDescription: String? {
+    package var errorDescription: String? {
         switch self {
         case .invalidName:
             "Please enter a remote name."
@@ -49,18 +74,18 @@ enum RepositoryRemoteManagementError: LocalizedError, Sendable {
     }
 }
 
-protocol RepositoryRemoteManagingDataSource: RepositoryBrowsingDataSource {
+package protocol RepositoryRemoteManagingDataSource: RepositoryBrowsingDataSource {
     func loadRemoteConfigurations() async throws -> [RepositoryRemoteConfiguration]
     func loadRemoteBranchNames(named remoteName: String) async throws -> [String]
-    func saveRemote(_ request: RepositoryRemoteSaveRequest) async throws -> RepositorySnapshot
-    func deleteRemote(named name: String, disabled: Bool) async throws -> RepositorySnapshot
-    func setRemote(named name: String, disabled: Bool) async throws -> RepositorySnapshot
+    func saveRemote(_ request: RepositoryRemoteSaveRequest) async throws
+    func deleteRemote(named name: String, disabled: Bool) async throws
+    func setRemote(named name: String, disabled: Bool) async throws
     func loadBranchTrackingConfigurations() async throws -> [RepositoryBranchTrackingConfiguration]
-    func setBranchTracking(_ configuration: RepositoryBranchTrackingConfiguration) async throws -> RepositorySnapshot
+    func setBranchTracking(_ configuration: RepositoryBranchTrackingConfiguration) async throws
 }
 
-extension GitRepositoryBrowsingDataSource: RepositoryRemoteManagingDataSource {
-    func loadRemoteConfigurations() async throws -> [RepositoryRemoteConfiguration] {
+extension GitRepositoryModule: RepositoryRemoteManagingDataSource {
+    package func loadRemoteConfigurations() async throws -> [RepositoryRemoteConfiguration] {
         let repository = try remoteRepository()
         let entries = try await localConfigEntries(in: repository)
         var values: [RemoteIdentity: [String: [String]]] = [:]
@@ -85,7 +110,7 @@ extension GitRepositoryBrowsingDataSource: RepositoryRemoteManagingDataSource {
         }
     }
 
-    func loadRemoteBranchNames(named remoteName: String) async throws -> [String] {
+    package func loadRemoteBranchNames(named remoteName: String) async throws -> [String] {
         let repository = try remoteRepository()
         let configured = try await loadRemoteConfigurations()
         guard configured.contains(where: { $0.name == remoteName && !$0.isDisabled }) else {
@@ -106,7 +131,7 @@ extension GitRepositoryBrowsingDataSource: RepositoryRemoteManagingDataSource {
         return Array(Set(names)).sorted { $0.localizedStandardCompare($1) == .orderedAscending }
     }
 
-    func saveRemote(_ request: RepositoryRemoteSaveRequest) async throws -> RepositorySnapshot {
+    package func saveRemote(_ request: RepositoryRemoteSaveRequest) async throws {
         let repository = try remoteRepository()
         let name = request.name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else { throw RepositoryRemoteManagementError.invalidName }
@@ -137,20 +162,18 @@ extension GitRepositoryBrowsingDataSource: RepositoryRemoteManagingDataSource {
         try await setOptionalConfig("remote.\(name).puttykeyfile", value: request.puttyKeyFile, in: repository)
         try await setOptionalConfig("remote.\(name).color", value: request.color, in: repository)
         try await setOptionalConfig("remote.\(name).prefix", value: request.prefix, in: repository)
-        return try await loadSnapshot()
     }
 
-    func deleteRemote(named name: String, disabled: Bool) async throws -> RepositorySnapshot {
+    package func deleteRemote(named name: String, disabled: Bool) async throws {
         let repository = try remoteRepository()
         if disabled {
             _ = try await rawRemoteMutation(["config", "--local", "--remove-section", "--", "-remote.\(name)"], in: repository, acceptedStatuses: [0, 5])
         } else {
             _ = try await checkedRemoteMutation(["remote", "remove", name], in: repository)
         }
-        return try await loadSnapshot()
     }
 
-    func setRemote(named name: String, disabled: Bool) async throws -> RepositorySnapshot {
+    package func setRemote(named name: String, disabled: Bool) async throws {
         let repository = try remoteRepository()
         let remotes = try await loadRemoteConfigurations()
         let existingDisabled = !disabled
@@ -181,13 +204,12 @@ extension GitRepositoryBrowsingDataSource: RepositoryRemoteManagingDataSource {
         for (setting, value) in retained {
             _ = try await checkedRemoteMutation(["config", "--local", "--add", "--", "\(newSection).\(name).\(setting)", value], in: repository)
         }
-        return try await loadSnapshot()
     }
 
-    func loadBranchTrackingConfigurations() async throws -> [RepositoryBranchTrackingConfiguration] {
-        let snapshot = try await loadSnapshot()
-        return snapshot.branches.filter { !$0.isRemote }.map { branch in
-            let reference = snapshot.commits.lazy.flatMap(\.references).first {
+    package func loadBranchTrackingConfigurations() async throws -> [RepositoryBranchTrackingConfiguration] {
+        let references = try await loadRepositoryState().references
+        return references.branches.filter { !$0.isRemote }.map { branch in
+            let reference = references.references.first {
                 ($0.kind == .currentBranch || $0.kind == .localBranch) && $0.name == branch.name
             }
             return RepositoryBranchTrackingConfiguration(
@@ -198,13 +220,12 @@ extension GitRepositoryBrowsingDataSource: RepositoryRemoteManagingDataSource {
         }.sorted { $0.branchName.localizedCaseInsensitiveCompare($1.branchName) == .orderedAscending }
     }
 
-    func setBranchTracking(_ configuration: RepositoryBranchTrackingConfiguration) async throws -> RepositorySnapshot {
+    package func setBranchTracking(_ configuration: RepositoryBranchTrackingConfiguration) async throws {
         let repository = try remoteRepository()
         let prefix = "branch.\(configuration.branchName)."
         try await setOptionalConfig(prefix + "remote", value: configuration.remoteName, in: repository)
         let mergeValue = configuration.mergeBranch.flatMap { $0.isEmpty ? nil : "refs/heads/\($0)" }
         try await setOptionalConfig(prefix + "merge", value: mergeValue, in: repository)
-        return try await loadSnapshot()
     }
 
     private struct RemoteIdentity: Hashable {
@@ -272,7 +293,10 @@ extension GitRepositoryBrowsingDataSource: RepositoryRemoteManagingDataSource {
     }
 
     private func rawRemoteMutation(_ arguments: [String], in repository: ResolvedGitRepository, acceptedStatuses: Set<Int32>) async throws -> GitCommandResult {
-        let result = try await git.run(arguments: arguments, in: repository.rootURL)
+        let result = try await git.run(
+            GitCommand(arguments: arguments, accessesRemote: false, changesRepositoryState: true),
+            in: repository.rootURL
+        )
         guard acceptedStatuses.contains(result.exitStatus) else {
             throw GitError.commandFailed(
                 arguments: result.arguments,

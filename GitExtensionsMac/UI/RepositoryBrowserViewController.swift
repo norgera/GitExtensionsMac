@@ -1,3 +1,5 @@
+import GitExtensionsCore
+import GitCommands
 import AppKit
 
 final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelegate {
@@ -7,7 +9,8 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
     private static let minimumWindowWidth: CGFloat = 120
     private static let minimumWindowHeight: CGFloat = 120
 
-    private let dataSource: any RepositoryBrowsingDataSource
+    private let repositoryModule: any RepositoryBrowsingDataSource
+    private(set) var uiCommands: GitUICommands!
 
     private let outlineController = RepositoryOutlineViewController()
     private let revisionGridController = RevisionGridViewController()
@@ -23,7 +26,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
     private lazy var gridSplitItem = NSSplitViewItem(viewController: revisionGridController)
     private lazy var detailsSplitItem = NSSplitViewItem(viewController: detailTabs)
 
-    private let statusLabel = NSTextField(labelWithString: "Loading repository…")
+    let statusLabel = NSTextField(labelWithString: "Loading repository…")
     private let repositoryStateLabel = NSTextField(labelWithString: "")
     private let branchFilterField = NSTextField()
     private let revisionFilterField = NSTextField()
@@ -37,22 +40,76 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
     private let commitButton = NSButton()
     private var workingDirectoryWidthConstraint: NSLayoutConstraint?
     private var branchWidthConstraint: NSLayoutConstraint?
-    private var snapshot: RepositorySnapshot?
+    private(set) var repositoryIdentity: RepositoryIdentityState?
+    private(set) var repositoryReferences: RepositoryReferenceState?
+    private(set) var repositoryNavigation: RepositoryNavigationState?
+    private(set) var repositoryStatus: RepositoryStatusSummary?
+    var networkContext: RepositoryNetworkContext? {
+        guard let repositoryIdentity, let repositoryReferences, let repositoryNavigation else { return nil }
+        return RepositoryNetworkContext(
+            repository: repositoryIdentity.currentRepository,
+            headID: repositoryIdentity.headID,
+            branches: repositoryReferences.branches,
+            remotes: repositoryNavigation.remotes,
+            references: repositoryReferences.references,
+            submodules: repositoryNavigation.submodules
+        )
+    }
+    var branchContext: RepositoryBranchContext? {
+        guard let repositoryIdentity, let repositoryReferences, let repositoryNavigation else { return nil }
+        return RepositoryBranchContext(
+            repository: repositoryIdentity.currentRepository,
+            headID: repositoryIdentity.headID,
+            branches: repositoryReferences.branches,
+            remotes: repositoryNavigation.remotes,
+            referencesByCommit: repositoryReferences.referencesByCommit,
+            submodules: repositoryNavigation.submodules
+        )
+    }
+    var mergeContext: RepositoryMergeContext? {
+        guard let repositoryIdentity, let repositoryReferences, let repositoryNavigation else { return nil }
+        return RepositoryMergeContext(
+            repository: repositoryIdentity.currentRepository,
+            branches: repositoryReferences.branches,
+            tags: repositoryReferences.tags,
+            referencesByCommit: repositoryReferences.referencesByCommit,
+            submodules: repositoryNavigation.submodules
+        )
+    }
+    var commitContext: RepositoryCommitContext? {
+        guard let repositoryIdentity, let repositoryReferences else { return nil }
+        return RepositoryCommitContext(
+            repository: repositoryIdentity.currentRepository,
+            headID: repositoryIdentity.headID,
+            branches: repositoryReferences.branches,
+            submodules: repositoryNavigation?.submodules ?? []
+        )
+    }
+    var stashContext: RepositoryStashContext? {
+        guard let repositoryIdentity, let repositoryNavigation else { return nil }
+        return RepositoryStashContext(headID: repositoryIdentity.headID, stashes: repositoryNavigation.stashes)
+    }
+    var rebaseContext: RepositoryRebaseContext? {
+        guard let repositoryReferences else { return nil }
+        return RepositoryRebaseContext(branches: repositoryReferences.branches, tags: repositoryReferences.tags)
+    }
     private var placeholderObserver: NSObjectProtocol?
     private var windowScreenObserver: NSObjectProtocol?
     private weak var configuredWindow: NSWindow?
     private var didSetInitialDividerPositions = false
-    private var snapshotLoadTask: Task<Void, Never>?
-    private var revisionDetailsTask: Task<Void, Never>?
-    private var mutationTask: Task<Void, Never>?
-    private var commitWindowController: NSWindowController?
-    private var pullWindowController: NSWindowController?
-    private var pushWindowController: NSWindowController?
-    private var mergeWindowController: NSWindowController?
-    private var fetchWindowController: NSWindowController?
-    private var remoteWindowController: NSWindowController?
+    private var repositoryStateLoadTask: Task<Void, Never>?
+    private var activeRevisionReader: RevisionReader?
+    private var revisionReadTask: Task<Void, Never>?
+    private(set) var revisions: [Commit] = []
+    var revisionDetailsTask: Task<Void, Never>?
+    var mutationTask: Task<Void, Never>?
+    var commitWindowController: NSWindowController?
+    var pullWindowController: NSWindowController?
+    var pushWindowController: NSWindowController?
+    var mergeWindowController: NSWindowController?
+    var fetchWindowController: NSWindowController?
     private var remoteBranchDeleteWindowController: NSWindowController?
-    private var checkoutBranchWorkflowCoordinator: CheckoutBranchWorkflowCoordinator?
+    var checkoutBranchWorkflowCoordinator: CheckoutBranchWorkflowCoordinator?
     private var operationStateTask: Task<Void, Never>?
     private let rebaseBanner = NSView()
     private let rebaseBannerLabel = NSTextField(labelWithString: "")
@@ -61,18 +118,28 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
     private var rebaseBannerHeightConstraint: NSLayoutConstraint?
     private var preferencesObserver: NSObjectProtocol?
     private var pullPreferencesObserver: NSObjectProtocol?
-    private var selectedCommitID: String?
-    private var commitDraft: CommitDialogDraft?
+    private var repositoryChangeSubscription: RepositoryChangedSubscription?
+    private var notifierPreferredCommitID: RevisionID?
+    var selectedCommitID: RevisionID?
+    var commitDraft: CommitDialogDraft?
 
-    init(dataSource: any RepositoryBrowsingDataSource) {
-        self.dataSource = dataSource
+    init(repositoryModule: any RepositoryBrowsingDataSource) {
+        self.repositoryModule = repositoryModule
         super.init(nibName: nil, bundle: nil)
+        uiCommands = GitUICommands(repositoryModule: repositoryModule, browser: self)
+        repositoryChangeSubscription = uiCommands.repositoryChangedNotifier.subscribe { [weak self] _, _ in
+            guard let self else { return }
+            let preferredCommitID = self.notifierPreferredCommitID
+            self.notifierPreferredCommitID = nil
+            self.reloadRepositoryState(preferredCommitID: preferredCommitID)
+        }
     }
 
     required init?(coder: NSCoder) { nil }
 
     deinit {
-        snapshotLoadTask?.cancel()
+        repositoryStateLoadTask?.cancel()
+        revisionReadTask?.cancel()
         revisionDetailsTask?.cancel()
         mutationTask?.cancel()
         operationStateTask?.cancel()
@@ -88,6 +155,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         if let pullPreferencesObserver {
             NotificationCenter.default.removeObserver(pullPreferencesObserver)
         }
+        repositoryChangeSubscription?.cancel()
     }
 
     override func loadView() {
@@ -144,7 +212,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         pullPreferencesObserver = NotificationCenter.default.addObserver(forName: .pullPreferencesDidChange, object: nil, queue: .main) { [weak self] _ in
             self?.rebuildPullMenu()
         }
-        loadSnapshot()
+        reloadRepositoryState()
     }
 
     private func makeRebaseBanner() -> NSView {
@@ -510,8 +578,9 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         constraint?.constant = max(minimum, ceil(measuringPopUp.frame.width) + imageGutter)
     }
 
-    private func updateToolbarRepositoryState(_ snapshot: RepositorySnapshot) {
-        let count = snapshot.workingDirectoryChangeCount
+    private func updateToolbarRepositoryState() {
+        guard let repositoryIdentity, let repositoryReferences, let repositoryNavigation, let repositoryStatus else { return }
+        let count = repositoryStatus.workingDirectoryChangeCount
         commitButton.title = "Commit (\(count))"
         commitButton.image = AppKitFactory.resourceImage(
             "RepoStateClean",
@@ -519,17 +588,17 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         )
         commitButton.toolTip = count == 1 ? "Commit — 1 changed file" : "Commit — \(count) changed files"
 
-        let stashCount = snapshot.stashes.count
-        let showStashCount = AppSettingsStore.shared.stashPreferences.showStashCount && !snapshot.currentRepository.isBare
+        let stashCount = repositoryNavigation.stashes.count
+        let showStashCount = AppSettingsStore.shared.stashPreferences.showStashCount && !repositoryIdentity.currentRepository.isBare
         stashSplitButton.setLabel(showStashCount ? "(\(stashCount))" : "", forSegment: 0)
         stashSplitButton.setWidth(showStashCount ? CGFloat(41 + String(stashCount).count * 7) : 23, forSegment: 0)
         stashSplitButton.setToolTip(
             stashCount == 1 ? "Manage stashes — 1 stash" : "Manage stashes — \(stashCount) stashes",
             forSegment: 0
         )
-        stashSplitButton.isEnabled = !snapshot.currentRepository.isBare
+        stashSplitButton.isEnabled = !repositoryIdentity.currentRepository.isBare
 
-        guard let currentBranch = snapshot.branches.first(where: \.isCurrent) else {
+        guard let currentBranch = repositoryReferences.branches.first(where: \.isCurrent) else {
             pushButton.title = ""
             pushButton.image = AppKitFactory.resourceImage("Push", accessibilityDescription: "Push")
             pushButton.toolTip = "Push"
@@ -571,7 +640,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
     private func rebuildPullMenu() {
         guard isViewLoaded else { return }
         let preferences = AppSettingsStore.shared.pullPreferences
-        let hasMultipleRemotes = (snapshot?.remotes.count ?? 0) > 1
+        let hasMultipleRemotes = (repositoryNavigation?.remotes.count ?? 0) > 1
         let menu = NSMenu(title: "Pull")
 
         let primary = NSMenuItem(title: "Pull", action: #selector(pullMenuCommand(_:)), keyEquivalent: "")
@@ -649,8 +718,8 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         revisionGridController.onSelection = { [weak self] commit in
             self?.select(commit: commit)
         }
-        commitDetailController.onSelectRevision = { [weak self] revisionID in
-            self?.revisionGridController.selectCommit(id: revisionID)
+        commitDetailController.onSelectRevision = { [weak self] objectID in
+            self?.revisionGridController.selectCommit(id: .object(objectID))
         }
         outlineController.onSelection = { [weak self] node in
             self?.select(treeNode: node)
@@ -670,7 +739,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         detailTabs.onSelectionChanged = { [weak self] _ in
             self?.loadActiveDetailTab()
         }
-        let source = dataSource
+        let source = repositoryModule
         revisionDiffController.diffProvider = { commit, file in
             try await source.loadDiff(for: commit, file: file)
         }
@@ -692,81 +761,58 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         }
     }
 
-    private func performTopLevelCommand(_ command: BrowserCommand) {
+    func performTopLevelCommand(_ command: BrowserCommand) {
         guard let window = view.window else { return }
         switch command {
         case .openRepository: presentOpenRepositoryPanel()
-        case .refresh: loadSnapshot()
-        case .commit: beginCommit(initialMode: .normal)
-        case .pullFetch:
-            guard let snapshot else { return }
-            presentPullAction(AppSettingsStore.shared.pullPreferences.formAction, immediately: false, snapshot: snapshot)
-        case .pull:
-            guard let snapshot else { return }
-            let preferences = AppSettingsStore.shared.pullPreferences
-            if preferences.defaultAction == .openDialog {
-                presentPullAction(preferences.formAction, immediately: false, snapshot: snapshot)
-            } else {
-                presentPullAction(preferences.defaultAction, immediately: true, snapshot: snapshot)
-            }
-        case .openPullDialog:
-            guard let snapshot else { return }
-            presentPullAction(AppSettingsStore.shared.pullPreferences.formAction, immediately: false, snapshot: snapshot)
-        case .pullMerge:
-            guard let snapshot else { return }
-            presentPullAction(.merge, immediately: true, snapshot: snapshot)
-        case .pullRebase:
-            guard let snapshot else { return }
-            presentPullAction(.rebase, immediately: true, snapshot: snapshot)
-        case .push:
-            guard let snapshot else { return }
-            presentNetworkWindow(kind: .push, initialAction: .merge, snapshot: snapshot)
-        case .fetch:
-            guard let snapshot else { return }
-            presentPullAction(.fetch, immediately: true, snapshot: snapshot)
-        case .fetchAll:
-            guard let snapshot else { return }
-            presentPullAction(.fetchAll, immediately: true, snapshot: snapshot)
-        case .fetchAndPruneAll:
-            guard let snapshot else { return }
-            presentPullAction(.fetchPruneAll, immediately: true, snapshot: snapshot)
+        case .refresh: reloadRepositoryState()
+        case .commit: uiCommands.startCommit()
+        case .pullFetch: uiCommands.startPull(action: AppSettingsStore.shared.pullPreferences.formAction, immediately: false)
+        case .pull: uiCommands.startPull(action: AppSettingsStore.shared.pullPreferences.defaultAction, immediately: AppSettingsStore.shared.pullPreferences.defaultAction != .openDialog)
+        case .openPullDialog: uiCommands.startPull(action: AppSettingsStore.shared.pullPreferences.formAction, immediately: false)
+        case .pullMerge: uiCommands.startPull(action: .merge, immediately: true)
+        case .pullRebase: uiCommands.startPull(action: .rebase, immediately: true)
+        case .push: uiCommands.startPush()
+        case .fetch: uiCommands.startPull(action: .fetch, immediately: true)
+        case .fetchAll: uiCommands.startFetchAll(prune: false)
+        case .fetchAndPruneAll: uiCommands.startFetchAll(prune: true)
         case .remoteRepositories:
-            presentRemoteWindow(selectedRemote: nil)
+            uiCommands.startRemoteManagement()
         case .mergeBranches:
-            guard let snapshot,
-                  !snapshot.currentRepository.isBare,
+            guard let repositoryIdentity,
+                  !repositoryIdentity.currentRepository.isBare,
                   revisionGridController.selectedCommitCount == 1,
                   let selectedCommitID,
-                  snapshot.commits.contains(where: { $0.id == selectedCommitID && !$0.isArtificial })
+                  revisions.contains(where: { $0.id == selectedCommitID && !$0.isArtificial })
             else {
                 statusLabel.stringValue = "Select one revision before opening Merge."
                 return
             }
-            beginMerge(initialTarget: nil)
+            uiCommands.startMergeBranches(initialTarget: nil)
         case .createBranch:
-            let commit = snapshot?.commits.first(where: { $0.id == selectedCommitID && !$0.isArtificial })
-            beginCreateBranch(sourceRevision: commit)
+            let commit = revisions.first(where: { $0.id == selectedCommitID && !$0.isArtificial })
+            uiCommands.createBranch(sourceRevision: commit)
         case .deleteBranch:
-            beginDeleteBranches(initiallySelected: [])
+            uiCommands.deleteBranches(initiallySelected: [])
         case .checkoutBranch:
-            beginCheckoutBranch(initialTarget: nil)
+            uiCommands.startCheckoutBranch(initialTarget: nil)
         case .checkoutRevision:
-            guard let commit = snapshot?.commits.first(where: { $0.id == selectedCommitID && !$0.isArtificial }) else { return }
-            beginCheckoutRevision(commit)
-        case .manageStashes: beginManageStashes()
-        case .solveMergeConflicts: beginResolveConflicts()
+            guard let commit = revisions.first(where: { $0.id == selectedCommitID && !$0.isArtificial }) else { return }
+            uiCommands.startCheckoutRevision(commit)
+        case .manageStashes: uiCommands.startStashManagement()
+        case .solveMergeConflicts: uiCommands.startConflictResolution()
         case .cherryPick:
-            if let commit = snapshot?.commits.first(where: { $0.id == selectedCommitID && !$0.isArtificial }) {
-                beginCherryPick([commit])
+            if let commit = revisions.first(where: { $0.id == selectedCommitID && !$0.isArtificial }) {
+                uiCommands.startCherryPick([commit])
             }
         case .rebase:
-            if let commit = snapshot?.commits.first(where: { $0.id == selectedCommitID && !$0.isArtificial }) {
-                beginRebase(on: commit, interactive: false, showAdvancedOptions: true)
+            if let commit = revisions.first(where: { $0.id == selectedCommitID && !$0.isArtificial }) {
+                uiCommands.startRebase(on: commit, interactive: false, showAdvancedOptions: true)
             }
         case .settings:
             Task { @MainActor [weak self] in
                 await ApplicationShellDialogs.presentSettings(from: window)
-                if let snapshot = self?.snapshot { self?.updateToolbarRepositoryState(snapshot) }
+                self?.updateToolbarRepositoryState()
             }
         case .showStatus(let message):
             statusLabel.stringValue = message
@@ -777,112 +823,20 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         }
     }
 
-    private func presentPullAction(_ action: PullActionPreference, immediately: Bool, snapshot: RepositorySnapshot) {
-        let effectiveAction = action == .openDialog ? AppSettingsStore.shared.pullPreferences.formAction : action
-        let initialAction: NetworkDialogInitialAction = switch effectiveAction {
-        case .rebase: .rebase
-        case .fetch: .fetch
-        case .fetchAll: .fetchAll
-        case .fetchPruneAll: .fetchPruneAll
-        case .merge, .openDialog: .merge
-        }
-        let kind: NetworkOperationKind = switch initialAction {
-        case .fetch, .fetchAll, .fetchPruneAll: .fetch
-        case .merge, .rebase: .pull
-        }
-        presentNetworkWindow(kind: kind, initialAction: initialAction, executeImmediately: immediately, snapshot: snapshot)
+    func prepareNotifierRefresh(preferredCommitID: RevisionID?) {
+        notifierPreferredCommitID = preferredCommitID ?? notifierPreferredCommitID
     }
 
-    private func presentNetworkWindow(
-        kind: NetworkOperationKind,
-        initialAction: NetworkDialogInitialAction,
-        executeImmediately: Bool = false,
-        pushBranch: String? = nil,
-        snapshot: RepositorySnapshot
-    ) {
-        let existing: NSWindowController? = switch kind {
-        case .pull, .fetch: pullWindowController
-        case .push: pushWindowController
-        }
-        if let existing {
-            existing.window?.makeKeyAndOrderFront(nil)
-            return
-        }
-        let close: () -> Void = { [weak self] in
-            switch kind {
-            case .pull, .fetch:
-                self?.pullWindowController = nil
-                self?.fetchWindowController = nil
-            case .push: self?.pushWindowController = nil
-            }
-        }
-        let controller: NSWindowController
-        if kind == .push, let pushSource = dataSource as? any RepositoryPushingDataSource {
-            controller = PushDialog.present(
-                source: pushSource,
-                snapshot: snapshot,
-                initialBranch: pushBranch,
-                executeImmediately: executeImmediately,
-                onSnapshot: { [weak self] updated, preferredCommitID in
-                    self?.apply(snapshot: updated, preferredCommitID: preferredCommitID ?? self?.selectedCommitID)
-                },
-                onClose: close
-            )
-        } else if kind != .push, let pullSource = dataSource as? any RepositoryPullingDataSource {
-            controller = ApplicationShellDialogs.presentPullWindow(
-                initialAction: initialAction,
-                executeImmediately: executeImmediately,
-                snapshot: snapshot,
-                source: pullSource,
-                onSnapshot: { [weak self] updated, preferredCommitID in
-                    self?.apply(snapshot: updated, preferredCommitID: preferredCommitID ?? self?.selectedCommitID)
-                },
-                onClose: close
-            )
-        } else {
-            let remoteSource = dataSource as? any RepositoryRemoteManagingDataSource
-            controller = ApplicationShellDialogs.presentNetworkWindow(
-                kind: kind,
-                initialAction: initialAction,
-                snapshot: snapshot,
-                source: remoteSource,
-                onSnapshot: { [weak self] updated in self?.apply(snapshot: updated, preferredCommitID: self?.selectedCommitID) },
-                onClose: close
-            )
-        }
-        switch kind {
-        case .pull, .fetch: pullWindowController = controller
-        case .push: pushWindowController = controller
-        }
-    }
-
-    private func presentRemoteWindow(selectedRemote: String?) {
-        if let remoteWindowController {
-            remoteWindowController.window?.makeKeyAndOrderFront(nil)
-            return
-        }
-        guard let source = dataSource as? any RepositoryRemoteManagingDataSource else {
-            statusLabel.stringValue = "Remote management is unavailable for this data source."
-            return
-        }
-        remoteWindowController = RemoteManagementDialog.present(
-            source: source,
-            selectedRemote: selectedRemote,
-            onSnapshot: { [weak self] snapshot in self?.apply(snapshot: snapshot, preferredCommitID: self?.selectedCommitID) },
-            onClose: { [weak self] in self?.remoteWindowController = nil }
-        )
-    }
-
-    private func loadSnapshot() {
-        snapshotLoadTask?.cancel()
+    private func reloadRepositoryState(preferredCommitID: RevisionID? = nil) {
+        repositoryStateLoadTask?.cancel()
         revisionDetailsTask?.cancel()
         statusLabel.stringValue = "Loading repository…"
-        snapshotLoadTask = Task { @MainActor [weak self] in
+        repositoryStateLoadTask = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
-                let snapshot = try await dataSource.loadSnapshot()
+                let state = try await repositoryModule.loadRepositoryState()
                 guard !Task.isCancelled else { return }
-                apply(snapshot: snapshot)
+                apply(state: state, preferredCommitID: preferredCommitID)
             } catch is CancellationError {
                 return
             } catch {
@@ -891,38 +845,49 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         }
     }
 
-    private func apply(snapshot: RepositorySnapshot, preferredCommitID: String? = nil) {
-        let previousSnapshot = self.snapshot
-        let sameRepository = previousSnapshot?.currentRepository.id == snapshot.currentRepository.id
+    private func apply(state: RepositoryLoadState, preferredCommitID: RevisionID?) {
+        let previousRevisions = revisions
+        let previousRepositoryID = repositoryIdentity?.currentRepository.id
+        let sameRepository = previousRepositoryID == state.identity.currentRepository.id
         let requestedSelection = preferredCommitID ?? (sameRepository ? selectedCommitID : nil)
-        let restoredSelectionID = RevisionSelectionRestorer.restoredID(
-            requestedID: requestedSelection,
-            previousCommits: sameRepository ? previousSnapshot?.commits ?? [] : [],
-            refreshedCommits: snapshot.commits
+        applyRepositoryState(state)
+        startRevisionRead(
+            state.revisionReadRequest,
+            preferredCommitID: requestedSelection,
+            previousRevisions: sameRepository ? previousRevisions : []
         )
-        self.snapshot = snapshot
+    }
+
+    private func applyRepositoryState(_ state: RepositoryLoadState) {
+        repositoryIdentity = state.identity
+        repositoryReferences = state.references
+        repositoryNavigation = state.navigation
+        repositoryStatus = state.status
         BrowserCommandAvailability.shared.canMerge = false
-        let canManageBranches = !snapshot.currentRepository.isBare
-            && dataSource is any RepositoryCheckoutBranchDataSource
+        let canManageBranches = !state.identity.currentRepository.isBare
+            && repositoryModule is any RepositoryCheckoutBranchDataSource
         BrowserCommandAvailability.shared.canCreateBranch = canManageBranches
-        BrowserCommandAvailability.shared.canDeleteBranch = canManageBranches && !snapshot.branches.isEmpty
+        BrowserCommandAvailability.shared.canDeleteBranch = canManageBranches && !state.references.branches.isEmpty
         BrowserCommandAvailability.shared.canCheckoutBranch = canManageBranches
-            && (!snapshot.branches.isEmpty || snapshot.remotes.contains { !$0.branches.isEmpty })
+            && (!state.references.branches.isEmpty || state.navigation.remotes.contains { !$0.branches.isEmpty })
         BrowserCommandAvailability.shared.canCheckoutRevision = false
-        outlineController.apply(snapshot: snapshot)
-        revisionGridController.apply(commits: snapshot.commits, preferredCommitID: restoredSelectionID)
+        outlineController.apply(
+            identity: state.identity,
+            references: state.references,
+            navigation: state.navigation
+        )
 
         workingDirectoryPopUp.removeAllItems()
-        snapshot.repositories.forEach { repository in
-            workingDirectoryPopUp.addItem(withTitle: repository.id == snapshot.currentRepository.id
+        state.identity.repositories.forEach { repository in
+            workingDirectoryPopUp.addItem(withTitle: repository.id == state.identity.currentRepository.id
                 ? repositoryDisplayTitle(repository)
                 : repository.name)
         }
-        workingDirectoryPopUp.selectItem(at: snapshot.repositories.firstIndex(where: { $0.id == snapshot.currentRepository.id }) ?? 0)
+        workingDirectoryPopUp.selectItem(at: state.identity.repositories.firstIndex(where: { $0.id == state.identity.currentRepository.id }) ?? 0)
         updatePopUpWidth(
             workingDirectoryPopUp,
             constraint: workingDirectoryWidthConstraint,
-            title: workingDirectoryPopUp.titleOfSelectedItem ?? snapshot.currentRepository.name,
+            title: workingDirectoryPopUp.titleOfSelectedItem ?? state.identity.currentRepository.name,
             minimum: 83,
             includesLeadingImage: false
         )
@@ -930,10 +895,10 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         branchPopUp.removeAllItems()
         branchPopUp.addItem(withTitle: "Checkout branch…")
         branchPopUp.menu?.addItem(.separator())
-        snapshot.branches.forEach { branchPopUp.addItem(withTitle: $0.name) }
+        state.references.branches.forEach { branchPopUp.addItem(withTitle: $0.name) }
         let branchImage = AppKitFactory.resourceImage("Branch", accessibilityDescription: "Branches")
         branchPopUp.itemArray.filter { !$0.isSeparatorItem }.forEach { $0.image = branchImage }
-        if let current = snapshot.branches.first(where: \.isCurrent) {
+        if let current = state.references.branches.first(where: \.isCurrent) {
             branchPopUp.selectItem(withTitle: current.name)
         }
         updatePopUpWidth(
@@ -943,55 +908,101 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             minimum: 60,
             includesLeadingImage: true
         )
-        updateToolbarRepositoryState(snapshot)
+        updateToolbarRepositoryState()
         rebuildPullMenu()
 
         statusLabel.stringValue = "Ready"
-        let revisionCount = snapshot.commits.filter { !$0.isArtificial }.count
-        let branchState = snapshot.branches.first(where: \.isCurrent).map { branch in
+        let revisionCount = revisions.filter { !$0.isArtificial }.count
+        let branchState = state.references.branches.first(where: \.isCurrent).map { branch in
             let counts = branch.ahead > 0 || branch.behind > 0 ? " ↑\(branch.ahead) ↓\(branch.behind)" : ""
             return "   \(branch.name)\(counts)"
         } ?? "   Detached HEAD"
         repositoryStateLabel.stringValue = "\(revisionCount) revisions\(branchState)"
-        view.window?.title = "\(snapshot.currentRepository.name) — Git Extensions"
+        view.window?.title = "\(state.identity.currentRepository.name) — Git Extensions"
         refreshOperationIndicators()
         setInitialDividerPositionsIfNeeded()
     }
 
+    private func startRevisionRead(
+        _ request: RevisionReadRequest,
+        preferredCommitID: RevisionID?,
+        previousRevisions: [Commit]? = nil
+    ) {
+        revisionReadTask?.cancel()
+        let oldRevisions = previousRevisions ?? revisions
+        revisions = []
+        revisionGridController.beginIncrementalLoad(preferredCommitID: preferredCommitID)
+        activeRevisionReader = request.reader
+        revisionReadTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                await request.reader.cancel()
+                let batches = await request.reader.read(request.context)
+                for try await batch in batches {
+                    guard !Task.isCancelled, activeRevisionReader === request.reader else { return }
+                    revisions.append(contentsOf: batch)
+                    revisionGridController.appendIncrementalBatch(batch)
+                    updateRevisionCount()
+                }
+                guard !Task.isCancelled, activeRevisionReader === request.reader else { return }
+                let restored = RevisionSelectionRestorer.restoredID(
+                    requestedID: preferredCommitID,
+                    previousCommits: oldRevisions,
+                    refreshedCommits: revisions
+                )
+                if let restored { revisionGridController.selectCommit(id: restored) }
+            } catch is CancellationError {
+                return
+            } catch {
+                guard !Task.isCancelled else { return }
+                statusLabel.stringValue = error.localizedDescription
+            }
+        }
+    }
+
+    private func updateRevisionCount() {
+        guard let repositoryReferences else { return }
+        let revisionCount = revisions.filter { !$0.isArtificial }.count
+        let branchState = repositoryReferences.branches.first(where: \.isCurrent).map { branch in
+            let counts = branch.ahead > 0 || branch.behind > 0 ? " ↑\(branch.ahead) ↓\(branch.behind)" : ""
+            return "   \(branch.name)\(counts)"
+        } ?? "   Detached HEAD"
+        repositoryStateLabel.stringValue = "\(revisionCount) revisions\(branchState)"
+    }
+
     private func select(commit: Commit) {
-        guard let snapshot else { return }
+        guard let repositoryIdentity else { return }
         selectedCommitID = commit.id
         BrowserCommandAvailability.shared.canMerge = !commit.isArtificial
-            && !snapshot.currentRepository.isBare
+            && !repositoryIdentity.currentRepository.isBare
             && revisionGridController.selectedCommitCount == 1
-            && dataSource is any RepositoryMergingDataSource
+            && repositoryModule is any RepositoryMergingDataSource
         BrowserCommandAvailability.shared.canCheckoutRevision = !commit.isArtificial
-            && !snapshot.currentRepository.isBare
+            && !repositoryIdentity.currentRepository.isBare
             && revisionGridController.selectedCommitCount == 1
-            && dataSource is any RepositoryCheckoutBranchDataSource
+            && repositoryModule is any RepositoryCheckoutBranchDataSource
         revisionDetailsTask?.cancel()
-        let relations = CommitRelationsResolver.resolve(commit: commit, history: snapshot.commits)
+        let relations = CommitRelationsResolver.resolve(commit: commit, history: revisions)
         let comparisonCommit = commit.parentIDs.first.flatMap { parentID in
-            snapshot.commits.first(where: { $0.id == parentID })
+            revisions.first(where: { $0.id == .object(parentID) })
         }
-        commitDetailController.apply(commit: commit, relations: relations, history: snapshot.commits)
+        commitDetailController.apply(commit: commit, relations: relations, history: revisions)
         revisionDiffController.apply(commit: commit, comparisonCommit: comparisonCommit, files: [], diffsByFile: [:])
         fileTreeController.apply(commit: commit, files: [])
         gpgController.apply(commit: commit, info: nil)
         statusLabel.stringValue = commit.isArtificial ? "Selected \(commit.subject)" : "Selected \(commit.shortID): \(commit.subject)"
 
-        loadActiveDetailTab(commit: commit, snapshot: snapshot, comparisonCommit: comparisonCommit)
+        loadActiveDetailTab(commit: commit, comparisonCommit: comparisonCommit)
     }
 
     private func loadActiveDetailTab(
         commit: Commit? = nil,
-        snapshot: RepositorySnapshot? = nil,
         comparisonCommit: Commit? = nil
     ) {
-        guard let activeSnapshot = snapshot ?? self.snapshot else { return }
-        guard let activeCommit = commit ?? activeSnapshot.commits.first(where: { $0.id == selectedCommitID }) else { return }
+        guard repositoryIdentity != nil else { return }
+        guard let activeCommit = commit ?? revisions.first(where: { $0.id == selectedCommitID }) else { return }
         let activeComparisonCommit = comparisonCommit ?? activeCommit.parentIDs.first.flatMap { parentID in
-            activeSnapshot.commits.first(where: { $0.id == parentID })
+            revisions.first(where: { $0.id == .object(parentID) })
         }
 
         revisionDetailsTask?.cancel()
@@ -1000,7 +1011,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             revisionDetailsTask = Task { @MainActor [weak self] in
                 guard let self else { return }
                 do {
-                    let details = try await dataSource.loadRevisionDetails(for: activeCommit)
+                    let details = try await repositoryModule.loadRevisionDetails(for: activeCommit)
                     guard !Task.isCancelled, selectedCommitID == activeCommit.id else { return }
                     revisionDiffController.apply(
                         commit: activeCommit,
@@ -1008,7 +1019,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
                         files: details.files,
                         diffsByFile: details.diffsByFile
                     )
-                    let revisionCount = activeSnapshot.commits.filter { !$0.isArtificial }.count
+                    let revisionCount = revisions.filter { !$0.isArtificial }.count
                     repositoryStateLabel.stringValue = "\(details.files.count) changed files   \(revisionCount) revisions"
                 } catch is CancellationError {
                     return
@@ -1021,10 +1032,10 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             revisionDetailsTask = Task { @MainActor [weak self] in
                 guard let self else { return }
                 do {
-                    let files = try await dataSource.loadRepositoryFiles(for: activeCommit)
+                    let files = try await repositoryModule.loadRepositoryFiles(for: activeCommit)
                     guard !Task.isCancelled, selectedCommitID == activeCommit.id else { return }
                     fileTreeController.apply(commit: activeCommit, files: files)
-                    let revisionCount = activeSnapshot.commits.filter { !$0.isArtificial }.count
+                    let revisionCount = revisions.filter { !$0.isArtificial }.count
                     repositoryStateLabel.stringValue = "\(files.count) files   \(revisionCount) revisions"
                 } catch is CancellationError {
                     return
@@ -1041,13 +1052,13 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
     private func select(treeNode node: RepositoryTreeNode) {
         switch node.kind {
         case .branch(let branch), .remoteBranch(let branch):
-            revisionGridController.selectCommit(id: branch.commitID)
+            revisionGridController.selectCommit(id: .object(branch.commitID))
             statusLabel.stringValue = "Selected \(branch.isRemote ? "remote " : "")branch \(branch.name)"
         case .tag(let tag):
-            revisionGridController.selectCommit(id: tag.commitID)
+            revisionGridController.selectCommit(id: .object(tag.commitID))
             statusLabel.stringValue = "Selected tag \(tag.name)"
         case .stash(let stash):
-            revisionGridController.selectCommit(id: stash.commitID)
+            revisionGridController.selectCommit(id: .object(stash.commitID))
             statusLabel.stringValue = "Selected \(stash.selector)"
         case .worktree(let worktree):
             statusLabel.stringValue = "Worktree: \(worktree.path)"
@@ -1061,7 +1072,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
     }
 
     private func presentOpenRepositoryPanel() {
-        guard dataSource is any RepositoryOpeningDataSource else {
+        guard repositoryModule is any RepositoryOpeningDataSource else {
             showPlaceholderStatus(for: "Open repository is unavailable for mock data")
             return
         }
@@ -1078,18 +1089,18 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             guard response == .OK,
                   let self,
                   let url = panel.url,
-                  let openingSource = dataSource as? any RepositoryOpeningDataSource
+                  let openingSource = repositoryModule as? any RepositoryOpeningDataSource
             else { return }
 
-            snapshotLoadTask?.cancel()
+            repositoryStateLoadTask?.cancel()
             revisionDetailsTask?.cancel()
             statusLabel.stringValue = "Opening \(url.path)…"
-            snapshotLoadTask = Task { @MainActor [weak self] in
+            repositoryStateLoadTask = Task { @MainActor [weak self] in
                 guard let self else { return }
                 do {
                     let loaded = try await openingSource.openRepository(at: url)
                     guard !Task.isCancelled else { return }
-                    apply(snapshot: loaded)
+                    apply(state: loaded, preferredCommitID: nil)
                 } catch is CancellationError {
                     return
                 } catch {
@@ -1152,7 +1163,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
     }
 
     @objc private func refresh() {
-        loadSnapshot()
+        reloadRepositoryState()
     }
 
     @objc private func toggleLeftPanel() {
@@ -1198,19 +1209,19 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
     }
 
     @objc private func selectBranch() {
-        guard let snapshot,
+        guard let repositoryReferences,
               let title = branchPopUp.titleOfSelectedItem else { return }
         if title == "Checkout branch…" {
-            if let current = snapshot.branches.first(where: \.isCurrent) {
+            if let current = repositoryReferences.branches.first(where: \.isCurrent) {
                 branchPopUp.selectItem(withTitle: current.name)
             }
-            beginCheckoutBranch(initialTarget: nil)
+            uiCommands.startCheckoutBranch(initialTarget: nil)
             return
         }
         guard
-              let branch = snapshot.branches.first(where: { $0.name == title }) else { return }
+              let branch = repositoryReferences.branches.first(where: { $0.name == title }) else { return }
         guard !branch.isCurrent else { return }
-        beginCheckout(.local(branch))
+        uiCommands.checkout(.local(branch))
     }
 
     @objc private func selectPullAction() {
@@ -1235,7 +1246,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
 
     @objc private func selectStashSegment(_ sender: NSSegmentedControl) {
         if sender.selectedSegment == 0 {
-            beginManageStashes()
+            uiCommands.startStashManagement()
         } else if sender.selectedSegment == 1 {
             stashMenu.popUp(
                 positioning: nil,
@@ -1251,30 +1262,24 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         case "Stash":
             beginQuickStash()
         case "Create a stash…":
-            beginManageStashes(manageStashes: false)
+            uiCommands.startStashManagement(manageStashes: false)
         case "Stash staged":
             beginStashStaged()
         case "Stash pop":
             performLatestStashPop()
         case "Manage stashes…":
-            beginManageStashes()
+            uiCommands.startStashManagement()
         default:
             showPlaceholderStatus(for: selectedAction)
         }
     }
 
     @objc private func commitToolbarButton(_ sender: NSButton) {
-        beginCommit(initialMode: .normal)
+        uiCommands.startCommit(initialMode: .normal)
     }
 
     @objc private func pushToolbarButton(_ sender: NSButton) {
-        guard let snapshot else { return }
-        presentNetworkWindow(
-            kind: .push,
-            initialAction: .merge,
-            executeImmediately: NSEvent.modifierFlags.contains(.shift),
-            snapshot: snapshot
-        )
+        uiCommands.startPush(immediately: NSEvent.modifierFlags.contains(.shift))
     }
 
     @objc private func placeholderToolbarButton(_ sender: NSButton) {
@@ -1291,12 +1296,14 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
     }
 
     @objc private func changeBranchScope(_ sender: NSPopUpButton) {
-        if sender.indexOfSelectedItem == 1, let current = snapshot?.branches.first(where: \.isCurrent) {
+        if sender.indexOfSelectedItem == 1, let current = repositoryReferences?.branches.first(where: \.isCurrent) {
             branchFilterField.stringValue = current.name
             revisionGridController.setBranchFilter(current.name)
+            restartRevisionReadForFilterChange()
         } else if sender.indexOfSelectedItem == 0 {
             branchFilterField.stringValue = ""
             revisionGridController.setBranchFilter("")
+            restartRevisionReadForFilterChange()
         }
         showPlaceholderStatus(for: sender.titleOfSelectedItem ?? "Branch scope")
     }
@@ -1310,10 +1317,28 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         guard let field = obj.object as? NSTextField else { return }
         if field === branchFilterField {
             revisionGridController.setBranchFilter(field.stringValue)
+            restartRevisionReadForFilterChange()
             showPlaceholderStatus(for: field.stringValue.isEmpty ? "Branch filter cleared" : "Branch filter: \(field.stringValue)")
         } else if field === revisionFilterField {
             revisionGridController.setTextFilter(field.stringValue)
+            restartRevisionReadForFilterChange()
             showPlaceholderStatus(for: field.stringValue.isEmpty ? "Revision filter cleared" : "Revision filter: \(field.stringValue)")
+        }
+    }
+
+    private func restartRevisionReadForFilterChange() {
+        revisionReadTask?.cancel()
+        revisionReadTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let request = try await repositoryModule.revisionReadRequest()
+                guard !Task.isCancelled else { return }
+                startRevisionRead(request, preferredCommitID: selectedCommitID)
+            } catch is CancellationError {
+                return
+            } catch {
+                statusLabel.stringValue = error.localizedDescription
+            }
         }
     }
 
@@ -1324,56 +1349,55 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
     private func performRepositoryCommand(_ identifier: String, node: RepositoryTreeNode) {
         switch (identifier, node.kind) {
         case ("repository.branch.checkout", .branch(let branch)):
-            beginCheckout(.local(branch), confirmDirectCheckout: true)
+            uiCommands.checkout(.local(branch), confirmDirectCheckout: true)
         case ("repository.branch.create", .branch(let branch)):
-            guard let commit = snapshot?.commits.first(where: { $0.id == branch.commitID }) else { return }
-            beginCreateBranch(sourceRevision: commit)
+            guard let commit = revisions.first(where: { $0.id == .object(branch.commitID) }) else { return }
+            uiCommands.createBranch(sourceRevision: commit)
         case ("repository.branch.rename", .branch(let branch)):
-            beginRenameBranch(branch.name)
+            uiCommands.renameBranch(branch.name)
         case ("repository.branch.delete", .branch(let branch)):
             guard !branch.isCurrent else { return }
-            beginDeleteBranches(initiallySelected: [branch.name])
+            uiCommands.deleteBranches(initiallySelected: [branch.name])
         case ("repository.branch.push", .branch(let branch)):
-            guard let snapshot else { return }
-            presentNetworkWindow(kind: .push, initialAction: .merge, pushBranch: branch.name, snapshot: snapshot)
+            uiCommands.startPush(initialBranch: branch.name)
         case ("repository.branch.merge", .branch(let branch)):
             guard !branch.isCurrent else { return }
-            beginMerge(initialTarget: branch.name)
+            uiCommands.startMergeBranches(initialTarget: branch.name)
         case ("repository.remoteBranch.checkout", .remoteBranch(let branch)):
-            beginCheckout(.remote(branch), confirmDirectCheckout: true)
+            uiCommands.checkout(.remote(branch), confirmDirectCheckout: true)
         case ("repository.remoteBranch.create", .remoteBranch(let branch)):
-            guard let commit = snapshot?.commits.first(where: { $0.id == branch.commitID }) else { return }
-            beginCreateBranch(sourceRevision: commit)
+            guard let commit = revisions.first(where: { $0.id == .object(branch.commitID) }) else { return }
+            uiCommands.createBranch(sourceRevision: commit)
         case ("repository.remoteBranch.merge", .remoteBranch(let branch)):
             guard let remote = branch.remoteName else { return }
-            beginMerge(initialTarget: "\(remote)/\(branch.name)")
+            uiCommands.startMergeBranches(initialTarget: "\(remote)/\(branch.name)")
         case ("repository.remoteBranch.delete", .remoteBranch(let branch)):
             presentRemoteBranchDeleteWindow(branch)
         case ("repository.remoteBranch.fetch", .remoteBranch(let branch)):
-            beginFetchRemoteBranch(branch, followUp: .none)
+            uiCommands.fetchRemoteBranch(branch, then: .none)
         case ("repository.remoteBranch.fetchCheckout", .remoteBranch(let branch)):
-            beginFetchRemoteBranch(branch, followUp: .checkout)
+            uiCommands.fetchRemoteBranch(branch, then: .checkout)
         case ("repository.remoteBranch.fetchCreate", .remoteBranch(let branch)):
-            beginFetchRemoteBranch(branch, followUp: .create)
+            uiCommands.fetchRemoteBranch(branch, then: .create)
         case ("repository.tag.checkout", .tag(let tag)):
-            guard let commit = snapshot?.commits.first(where: { $0.id == tag.commitID }) else { return }
-            beginCheckout(.revision(commit))
+            guard let commit = revisions.first(where: { $0.id == .object(tag.commitID) }) else { return }
+            uiCommands.checkout(.revision(commit))
         case ("repository.tag.createBranch", .tag(let tag)):
-            guard let commit = snapshot?.commits.first(where: { $0.id == tag.commitID }) else { return }
-            beginCreateBranch(sourceRevision: commit)
+            guard let commit = revisions.first(where: { $0.id == .object(tag.commitID) }) else { return }
+            uiCommands.createBranch(sourceRevision: commit)
         case ("repository.folder.create", .folder(let prefix, false)):
-            beginCreateBranch(sourceRevision: nil, suggestedPrefix: prefix + "/")
+            uiCommands.createBranch(sourceRevision: nil, suggestedPrefix: prefix + "/")
         case ("repository.folder.deleteAll", .folder(_, false)):
-            beginDeleteBranches(initiallySelected: localBranchNames(in: node))
+            uiCommands.deleteBranches(initiallySelected: localBranchNames(in: node))
         case ("repository.tag.merge", .tag(let tag)):
-            beginMerge(initialTarget: tag.name)
+            uiCommands.startMergeBranches(initialTarget: tag.name)
         case ("repository.branch.rebase", .branch(let branch)),
              ("repository.remoteBranch.rebase", .remoteBranch(let branch)):
-            guard let commit = snapshot?.commits.first(where: { $0.id == branch.commitID }) else { return }
-            beginRebase(on: commit, interactive: false)
+            guard let commit = revisions.first(where: { $0.id == .object(branch.commitID) }) else { return }
+            uiCommands.startRebase(on: commit, interactive: false)
         case ("repository.tag.rebase", .tag(let tag)):
-            guard let commit = snapshot?.commits.first(where: { $0.id == tag.commitID }) else { return }
-            beginRebase(on: commit, interactive: false)
+            guard let commit = revisions.first(where: { $0.id == .object(tag.commitID) }) else { return }
+            uiCommands.startRebase(on: commit, interactive: false)
         case ("repository.stash.apply", .stash(let stash)):
             performStashMutation(.apply, stash: stash)
         case ("repository.stash.pop", .stash(let stash)):
@@ -1381,13 +1405,13 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         case ("repository.stash.drop", .stash(let stash)):
             beginDropStash(stash)
         case ("repository.stash.open", .stash(let stash)):
-            beginManageStashes(initialStash: stash.selector)
+            uiCommands.startStashManagement(initialStash: stash.selector)
         case ("repository.stashes.create", _):
             beginQuickStash()
         case ("repository.stashes.staged", _):
             beginStashStaged()
         case ("repository.stashes.manage", _):
-            beginManageStashes()
+            uiCommands.startStashManagement()
         default:
             showPlaceholderStatus(for: identifier)
         }
@@ -1406,7 +1430,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
     }
 
     private func presentRemoteBranchDeleteWindow(_ branch: Branch) {
-        guard let pushSource = dataSource as? any RepositoryPushingDataSource,
+        guard let pushSource = repositoryModule as? any RepositoryPushingDataSource,
               let remote = branch.remoteName
         else { return }
         if let remoteBranchDeleteWindowController {
@@ -1417,8 +1441,10 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             source: pushSource,
             initialRemote: remote,
             initialBranch: branch.name,
-            onSnapshot: { [weak self] updated, preferredCommitID in
-                self?.apply(snapshot: updated, preferredCommitID: preferredCommitID ?? self?.selectedCommitID)
+            onRepositoryChanged: { [weak self] preferredCommitID in
+                self?.uiCommands.notifyRepositoryChanged(
+                    preferredCommitID: preferredCommitID ?? self?.selectedCommitID
+                )
             },
             onClose: { [weak self] in self?.remoteBranchDeleteWindowController = nil }
         )
@@ -1443,29 +1469,30 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         }
         if identifier == "revision.branch.rebase.selected" {
             guard !focused.isArtificial else { return }
-            beginRebase(on: focused, interactive: false)
+            uiCommands.startRebase(on: focused, interactive: false)
             return
         }
         if identifier == "revision.branch.rebase.interactive" {
             guard !focused.isArtificial else { return }
-            beginRebase(on: focused, interactive: true)
+            uiCommands.startRebase(on: focused, interactive: true)
             return
         }
         if identifier == "revision.branch.rebase.advanced" {
             guard !focused.isArtificial else { return }
-            let boundary = selected.first(where: { $0.id != focused.id && !$0.isArtificial })?.id
-            beginRebase(on: focused, interactive: false, advancedFrom: boundary, showAdvancedOptions: true)
+            let boundary = selected.first(where: { $0.id != focused.id && !$0.isArtificial })?.objectID?.string
+            uiCommands.startRebase(on: focused, interactive: false, advancedFrom: boundary, showAdvancedOptions: true)
             return
         }
         if identifier == "revision.commit.edit" || identifier == "revision.commit.reword" {
             guard !focused.isArtificial,
                   let parentID = focused.parentIDs.first,
-                  let parent = snapshot?.commits.first(where: { $0.id == parentID })
+                  let parent = revisions.first(where: { $0.id == .object(parentID) }),
+                  let focusedObjectID = focused.objectID
             else { return }
             let action: RepositoryRebaseTodoAction = identifier == "revision.commit.edit"
                 ? .edit
                 : .reword(focused.subject + (focused.body.isEmpty ? "" : "\n\n\(focused.body)"))
-            beginRebase(on: parent, interactive: true, initialActions: [focused.id: action])
+            uiCommands.startRebase(on: parent, interactive: true, initialActions: [focusedObjectID: action])
             return
         }
         if identifier == "revision.cherryPick.continue" {
@@ -1479,23 +1506,23 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             return
         }
         if identifier == "revision.commit.cherryPick" {
-            beginCherryPick(selected.isEmpty ? [focused] : selected)
+            uiCommands.startCherryPick(selected.isEmpty ? [focused] : selected)
             return
         }
         if identifier == "revision.branch.merge.commit" {
             guard !focused.isArtificial else { return }
-            beginMerge(initialTarget: focused.id)
+            uiCommands.startMergeBranches(initialTarget: focused.objectID?.string)
             return
         }
         let mergePrefix = "revision.branch.merge.ref."
         if identifier.hasPrefix(mergePrefix) {
             let referenceID = String(identifier.dropFirst(mergePrefix.count))
             guard let reference = focused.references.first(where: { $0.id == referenceID }) else { return }
-            beginMerge(initialTarget: reference.name)
+            uiCommands.startMergeBranches(initialTarget: reference.name)
             return
         }
         if identifier.hasPrefix("revision.stash."),
-           let stash = snapshot?.stashes.first(where: { $0.commitID == focused.id }) {
+           let stash = repositoryNavigation?.stashes.first(where: { $0.commitID == focused.objectID }) {
             switch identifier {
             case "revision.stash.apply": performStashMutation(.apply, stash: stash)
             case "revision.stash.pop": performStashMutation(.pop, stash: stash)
@@ -1505,25 +1532,25 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             return
         }
         if identifier == "revision.commit.fixup" {
-            beginCommit(initialMode: .normal, specialKind: .fixup(focused))
+            uiCommands.startCommit(initialMode: .normal, specialKind: .fixup(focused))
             return
         }
         if identifier == "revision.commit.squash" {
-            beginCommit(initialMode: .normal, specialKind: .squash(focused))
+            uiCommands.startCommit(initialMode: .normal, specialKind: .squash(focused))
             return
         }
         if identifier == "revision.commit.amend" {
-            beginCommit(initialMode: .normal, specialKind: .amendAutosquash(focused))
+            uiCommands.startCommit(initialMode: .normal, specialKind: .amendAutosquash(focused))
             return
         }
         if identifier == "revision.commit.checkout" {
             guard !focused.isArtificial else { return }
-            beginCheckout(.revision(focused))
+            uiCommands.checkout(.revision(focused))
             return
         }
         if identifier == "revision.branch.create" {
             guard !focused.isArtificial else { return }
-            beginCreateBranch(sourceRevision: focused)
+            uiCommands.createBranch(sourceRevision: focused)
             return
         }
 
@@ -1535,15 +1562,15 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             case .currentBranch:
                 return
             case .localBranch:
-                if let branch = snapshot?.branches.first(where: { !$0.isRemote && $0.name == reference.name }) {
-                    beginCheckout(.local(branch))
+                if let branch = repositoryReferences?.branches.first(where: { !$0.isRemote && $0.name == reference.name }) {
+                    uiCommands.checkout(.local(branch))
                 }
             case .remoteBranch:
                 let parts = reference.name.split(separator: "/", maxSplits: 1).map(String.init)
                 guard parts.count == 2,
-                      let branch = snapshot?.remotes.first(where: { $0.name == parts[0] })?.branches.first(where: { $0.name == parts[1] })
+                      let branch = repositoryNavigation?.remotes.first(where: { $0.name == parts[0] })?.branches.first(where: { $0.name == parts[1] })
                 else { return }
-                beginCheckout(.remote(branch))
+                uiCommands.checkout(.remote(branch))
             default:
                 break
             }
@@ -1553,10 +1580,9 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         if identifier.hasPrefix(pushPrefix) {
             let referenceID = String(identifier.dropFirst(pushPrefix.count))
             guard let reference = focused.references.first(where: { $0.id == referenceID }),
-                  (reference.kind == .currentBranch || reference.kind == .localBranch),
-                  let snapshot
+                  (reference.kind == .currentBranch || reference.kind == .localBranch)
             else { return }
-            presentNetworkWindow(kind: .push, initialAction: .merge, pushBranch: reference.name, snapshot: snapshot)
+            uiCommands.startPush(initialBranch: reference.name)
             return
         }
         let deletePrefix = "revision.branch.delete.ref."
@@ -1564,14 +1590,14 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             let referenceID = String(identifier.dropFirst(deletePrefix.count))
             guard let reference = focused.references.first(where: { $0.id == referenceID }) else { return }
             if reference.kind == .localBranch {
-                beginDeleteBranches(initiallySelected: [reference.name])
+                uiCommands.deleteBranches(initiallySelected: [reference.name])
                 return
             }
             guard reference.kind == .remoteBranch,
-                  let slash = reference.name.firstIndex(of: "/"), let snapshot else { return }
+                  let slash = reference.name.firstIndex(of: "/"), let repositoryNavigation else { return }
             let remote = String(reference.name[..<slash])
             let name = String(reference.name[reference.name.index(after: slash)...])
-            guard let branch = snapshot.remotes
+            guard let branch = repositoryNavigation.remotes
                 .first(where: { $0.name == remote })?
                 .branches.first(where: { $0.name == name }) else { return }
             presentRemoteBranchDeleteWindow(branch)
@@ -1582,109 +1608,10 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             let referenceID = String(identifier.dropFirst(renamePrefix.count))
             guard let reference = focused.references.first(where: { $0.id == referenceID }),
                   reference.kind == .localBranch || reference.kind == .currentBranch else { return }
-            beginRenameBranch(reference.name)
+            uiCommands.renameBranch(reference.name)
             return
         }
         showPlaceholderStatus(for: identifier)
-    }
-
-    private func checkoutBranchCoordinator() -> CheckoutBranchWorkflowCoordinator? {
-        guard let source = dataSource as? any RepositoryCheckoutBranchDataSource,
-              let window = view.window,
-              let snapshot else { return nil }
-        let coordinator = CheckoutBranchWorkflowCoordinator(
-            source: source,
-            stashSource: dataSource as? any RepositoryStashDataSource,
-            pullSource: dataSource as? any RepositoryPullingDataSource,
-            snapshot: snapshot,
-            owner: window,
-            onSnapshot: { [weak self] updated, selectedCommitID in
-                guard let self else { return }
-                self.apply(
-                    snapshot: updated,
-                    preferredCommitID: selectedCommitID ?? self.selectedCommitID
-                )
-            },
-            onStatus: { [weak self] message in
-                self?.statusLabel.stringValue = message
-            },
-            onConflicts: { [weak self] in
-                self?.beginResolveConflicts()
-            }
-        )
-        checkoutBranchWorkflowCoordinator = coordinator
-        return coordinator
-    }
-
-    private func beginCheckout(_ target: CheckoutDialogTarget, confirmDirectCheckout: Bool = false) {
-        checkoutBranchCoordinator()?.checkout(target, confirmDirectCheckout: confirmDirectCheckout)
-    }
-
-    private func beginFetchRemoteBranch(
-        _ branch: Branch,
-        followUp: CheckoutBranchFetchFollowUp
-    ) {
-        checkoutBranchCoordinator()?.fetchRemoteBranch(branch, then: followUp)
-    }
-
-    private func beginCheckoutBranch(
-        initialTarget: CheckoutDialogTarget?,
-        confirmDirectCheckout: Bool = false
-    ) {
-        checkoutBranchCoordinator()?.checkoutBranch(
-            initialTarget: initialTarget,
-            confirmDirectCheckout: confirmDirectCheckout
-        )
-    }
-
-    private func beginCheckoutRevision(_ commit: Commit) {
-        checkoutBranchCoordinator()?.checkoutRevision(commit)
-    }
-
-    private func beginCreateBranch(sourceRevision: Commit?, suggestedPrefix: String? = nil) {
-        checkoutBranchCoordinator()?.createBranch(
-            sourceRevision: sourceRevision,
-            suggestedPrefix: suggestedPrefix
-        )
-    }
-
-    private func beginDeleteBranches(initiallySelected: [String]) {
-        checkoutBranchCoordinator()?.deleteBranches(initiallySelected: initiallySelected)
-    }
-
-    private func beginRenameBranch(_ name: String) {
-        checkoutBranchCoordinator()?.renameBranch(name)
-    }
-
-    private func beginMerge(initialTarget: String?) {
-        guard let mergeSource = dataSource as? any RepositoryMergingDataSource,
-              let window = view.window,
-              let snapshot,
-              !snapshot.currentRepository.isBare else {
-            showPlaceholderStatus(for: "Merge is unavailable for this repository")
-            return
-        }
-        if let mergeWindowController {
-            mergeWindowController.window?.makeKeyAndOrderFront(nil)
-            return
-        }
-
-        let previousSelection = selectedCommitID
-        mergeWindowController = MergeDialog.present(
-            source: mergeSource,
-            snapshot: snapshot,
-            initialTarget: initialTarget,
-            owner: window,
-            onSnapshot: { [weak self] refreshed, selected in
-                guard let self else { return }
-                apply(snapshot: refreshed, preferredCommitID: selected ?? previousSelection)
-                statusLabel.stringValue = "Repository refreshed after Merge."
-                refreshOperationIndicators()
-            },
-            onClose: { [weak self] in
-                self?.mergeWindowController = nil
-            }
-        )
     }
 
     private func performFileMutation(
@@ -1716,87 +1643,68 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         }
     }
 
-    private func beginCommit(
-        initialMode: RepositoryCommitMode,
-        specialKind: CommitWorkflowSpecialKind? = nil
-    ) {
-        guard let mutationSource = dataSource as? any RepositoryMutatingDataSource,
-              let window = view.window else {
-            showPlaceholderStatus(for: "Commit is unavailable for mock data")
-            return
-        }
-
-        if let commitWindowController {
-            commitWindowController.showWindow(nil)
-            commitWindowController.window?.makeKeyAndOrderFront(nil)
-            return
-        }
-
-        window.makeKeyAndOrderFront(nil)
-        let previousSelection = selectedCommitID
-        let head = snapshot?.commits.first(where: \.isHEAD)
-            ?? snapshot?.commits.first(where: { !$0.isArtificial })
-        commitWindowController = CommitWorkflowDialog.present(
-            source: mutationSource,
-            pushSource: dataSource as? any RepositoryPushingDataSource,
-            initialMode: initialMode,
-            specialKind: specialKind,
-            head: head,
-            draft: commitDraft,
-            owner: window,
-            onSnapshot: { [weak self] snapshot, selected in
-                guard let self else { return }
-                commitDraft = nil
-                apply(snapshot: snapshot, preferredCommitID: selected ?? previousSelection)
-                statusLabel.stringValue = "Repository refreshed after Commit"
-            },
-            onClose: { [weak self] in
-            guard let self else { return }
-            self.commitWindowController = nil
-            self.statusLabel.stringValue = "Commit window closed"
-        })
-    }
-
     private enum StashMutationKind {
         case apply
         case pop
     }
 
-    private func beginManageStashes(
-        manageStashes: Bool = true,
-        initialStash: String? = nil
-    ) {
-        guard let source = dataSource as? any RepositoryMutatingDataSource,
-              let snapshot,
-              let window = view.window else {
-            showPlaceholderStatus(for: "Stash manager is unavailable for mock data")
-            return
-        }
-        Task { @MainActor [weak self, weak window] in
-            guard let self, let window else { return }
-            let result = await WorkflowManagementDialogs.manageStashes(
-                source: source,
-                snapshot: snapshot,
-                window: window,
-                manageStashes: manageStashes,
-                initialStash: initialStash
-            )
-            apply(snapshot: result.snapshot, preferredCommitID: result.selectedCommitID ?? selectedCommitID)
-        }
+    func presentMergeDialog(
+        source: any RepositoryMergingDataSource,
+        context: RepositoryMergeContext,
+        initialTarget: String?,
+        previousSelection: RevisionID?,
+        owner: NSWindow
+    ) -> NSWindowController {
+        MergeDialog.present(
+            source: source,
+            context: context,
+            initialTarget: initialTarget,
+            owner: owner,
+            onRepositoryChanged: { [weak self] selected in
+                guard let self else { return }
+                uiCommands.notifyRepositoryChanged(preferredCommitID: selected ?? previousSelection)
+                statusLabel.stringValue = "Repository refreshed after Merge."
+                refreshOperationIndicators()
+            },
+            onClose: { [weak self] in
+                self?.mergeWindowController = nil
+            }
+        )
     }
 
-    private func beginResolveConflicts() {
-        guard let source = dataSource as? any RepositoryMutatingDataSource,
-              let window = view.window else {
-            showPlaceholderStatus(for: "Conflict resolver is unavailable for mock data")
-            return
-        }
-        Task { @MainActor [weak self, weak window] in
-            guard let self, let window else { return }
-            if let refreshed = await WorkflowManagementDialogs.resolveConflicts(source: source, window: window) {
-                apply(snapshot: refreshed, preferredCommitID: selectedCommitID)
+    func presentCommitDialog(
+        source: any RepositoryCommitWorkflowDataSource,
+        pushSource: (any RepositoryPushingDataSource)?,
+        initialMode: RepositoryCommitMode,
+        specialKind: CommitWorkflowSpecialKind?,
+        head: Commit?,
+        draft: CommitDialogDraft?,
+        owner: NSWindow,
+        previousSelection: RevisionID?
+    ) -> NSWindowController {
+        CommitWorkflowDialog.present(
+            source: source,
+            pushSource: pushSource,
+            initialMode: initialMode,
+            specialKind: specialKind,
+            head: head,
+            draft: draft,
+            owner: owner,
+            onRepositoryChanged: { [weak self] selected in
+                guard let self else { return }
+                commitDraft = nil
+                uiCommands.notifyRepositoryChanged(preferredCommitID: selected ?? previousSelection)
+                statusLabel.stringValue = "Repository refreshed after Commit"
+            },
+            onClose: { [weak self] in
+                self?.commitWindowController = nil
+                self?.statusLabel.stringValue = "Commit window closed"
             }
-        }
+        )
+    }
+
+    func showPlaceholderStatus(_ title: String) {
+        showPlaceholderStatus(for: title)
     }
 
     private func performStashMutation(_ kind: StashMutationKind, stash: Stash) {
@@ -1839,9 +1747,9 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
 
     private func performStashOperation(
         errorTitle: String,
-        operation: @escaping @Sendable (any RepositoryMutatingDataSource) async throws -> RepositoryMutationResult
+        operation: @escaping @Sendable (any RepositoryStashWorkflowDataSource) async throws -> RepositoryMutationResult
     ) {
-        guard let mutationSource = dataSource as? any RepositoryMutatingDataSource,
+        guard let mutationSource = repositoryModule as? any RepositoryStashWorkflowDataSource,
               let window = view.window else {
             showPlaceholderStatus(for: "Stash is unavailable for mock data")
             return
@@ -1855,15 +1763,15 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
                 revisionDetailsTask?.cancel()
                 let result = try await operation(mutationSource)
                 guard !Task.isCancelled else { return }
-                apply(snapshot: result.snapshot, preferredCommitID: result.selectedCommitID ?? previousSelection)
+                uiCommands.notifyRepositoryChanged(preferredCommitID: result.selectedCommitID ?? previousSelection)
                 switch result.outcome {
                 case .completed:
                     statusLabel.stringValue = result.message
                 case .conflicts(let paths):
                     statusLabel.stringValue = "\(result.message) \(paths.count) conflicted path(s) remain."
                     if await MutationDialogs.confirmResolveStashConflicts(paths: paths, window: window),
-                       let resolved = await WorkflowManagementDialogs.resolveConflicts(source: mutationSource, window: window) {
-                        apply(snapshot: resolved, preferredCommitID: result.selectedCommitID ?? previousSelection)
+                       await WorkflowManagementDialogs.resolveConflicts(source: mutationSource, window: window) {
+                        uiCommands.notifyRepositoryChanged(preferredCommitID: result.selectedCommitID ?? previousSelection)
                         statusLabel.stringValue = "Repository refreshed after resolving stash conflicts."
                     }
                 case .paused(let reason):
@@ -1872,9 +1780,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             } catch is CancellationError {
                 return
             } catch {
-                if let refreshed = try? await mutationSource.loadSnapshot(), !Task.isCancelled {
-                    apply(snapshot: refreshed, preferredCommitID: previousSelection)
-                }
+                if !Task.isCancelled { uiCommands.notifyRepositoryChanged(preferredCommitID: previousSelection) }
                 statusLabel.stringValue = error.localizedDescription
                 await MutationDialogs.showError(error, title: errorTitle, window: window)
             }
@@ -1882,7 +1788,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
     }
 
     private func beginDropStash(_ stash: Stash) {
-        guard let mutationSource = dataSource as? any RepositoryMutatingDataSource,
+        guard let mutationSource = repositoryModule as? any RepositoryStashWorkflowDataSource,
               let window = view.window else {
             showPlaceholderStatus(for: "Drop stash is unavailable for mock data")
             return
@@ -1900,37 +1806,28 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
                 revisionDetailsTask?.cancel()
                 let result = try await mutationSource.dropStash(stash)
                 guard !Task.isCancelled else { return }
-                apply(snapshot: result.snapshot, preferredCommitID: result.selectedCommitID)
+                uiCommands.notifyRepositoryChanged(preferredCommitID: result.selectedCommitID ?? previousSelection)
                 statusLabel.stringValue = result.message
             } catch is CancellationError {
                 return
             } catch {
-                if let refreshed = try? await mutationSource.loadSnapshot(), !Task.isCancelled {
-                    apply(snapshot: refreshed, preferredCommitID: previousSelection)
-                }
+                if !Task.isCancelled { uiCommands.notifyRepositoryChanged(preferredCommitID: previousSelection) }
                 statusLabel.stringValue = error.localizedDescription
                 await MutationDialogs.showError(error, title: "Drop stash failed", window: window)
             }
         }
     }
 
-    private func beginCherryPick(_ selected: [Commit]) {
-        guard let mutationSource = dataSource as? any RepositoryMutatingDataSource,
-              let window = view.window,
-              let snapshot else {
-            showPlaceholderStatus(for: "Cherry-pick is unavailable for mock data")
-            return
-        }
-        let historyIndex = Dictionary(uniqueKeysWithValues: snapshot.commits.enumerated().map { ($0.element.id, $0.offset) })
-        let ordered = selected
-            .filter { !$0.isArtificial }
-            .sorted { (historyIndex[$0.id] ?? 0) > (historyIndex[$1.id] ?? 0) }
-        guard !ordered.isEmpty else { return }
-
-        let previousSelection = selectedCommitID
+    func startCherryPickWorkflow(
+        orderedRevisions ordered: [Commit],
+        history: [Commit],
+        mutationSource: any RepositoryCherryPickDataSource,
+        window: NSWindow,
+        previousSelection: RevisionID?
+    ) {
         mutationTask?.cancel()
-        mutationTask = Task { @MainActor [weak self, weak window] in
-            guard let self, let window else { return }
+        mutationTask = Task { @MainActor [weak self] in
+            guard let self else { return }
             var options = RepositoryCherryPickOptions(
                 automaticallyCommit: AppSettingsStore.shared.cherryPickPreferences.automaticallyCommit,
                 addReference: AppSettingsStore.shared.cherryPickPreferences.addReference
@@ -1942,7 +1839,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
                 guard !Task.isCancelled else { return }
                 guard let selection = await CherryPickDialog.present(
                     commit: proposedCommit,
-                    history: snapshot.commits,
+                    history: history,
                     options: options,
                     owner: window
                 ) else {
@@ -1964,14 +1861,14 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
                     revisionDetailsTask?.cancel()
                     let result = try await mutationSource.cherryPick(RepositoryCherryPickRequest(
                         items: [RepositoryCherryPickItem(
-                            commitID: selection.commit.id,
+                            commitID: selection.commit.objectID!,
                             mainlineParent: selection.mainlineParent
                         )],
                         options: selection.options
                     ))
                     guard !Task.isCancelled else { return }
                     preferredCommitID = result.selectedCommitID ?? preferredCommitID
-                    apply(snapshot: result.snapshot, preferredCommitID: preferredCommitID)
+                    uiCommands.notifyRepositoryChanged(preferredCommitID: preferredCommitID)
 
                     switch result.outcome {
                     case .completed:
@@ -1987,9 +1884,8 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
                             source: mutationSource,
                             window: window
                         )
-                        if let refreshed = resolution.snapshot {
-                            preferredCommitID = refreshed.commits.first(where: \.isHEAD)?.id ?? preferredCommitID
-                            apply(snapshot: refreshed, preferredCommitID: preferredCommitID)
+                        if resolution.repositoryChanged {
+                            uiCommands.notifyRepositoryChanged(preferredCommitID: preferredCommitID)
                         }
                         refreshOperationIndicators()
                         switch resolution.sequencerAction {
@@ -2013,9 +1909,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
                 } catch is CancellationError {
                     return
                 } catch {
-                    if let refreshed = try? await mutationSource.loadSnapshot(), !Task.isCancelled {
-                        apply(snapshot: refreshed, preferredCommitID: preferredCommitID)
-                    }
+                    if !Task.isCancelled { uiCommands.notifyRepositoryChanged(preferredCommitID: preferredCommitID) }
                     statusLabel.stringValue = error.localizedDescription
                     await MutationDialogs.showError(error, title: "Cherry-pick failed", window: window)
                     refreshOperationIndicators()
@@ -2030,8 +1924,12 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         }
     }
 
+    func beginCherryPick(_ selected: [Commit]) {
+        uiCommands.startCherryPick(selected)
+    }
+
     private func beginAbortCherryPick() {
-        guard let mutationSource = dataSource as? any RepositoryMutatingDataSource,
+        guard let mutationSource = repositoryModule as? any RepositoryCherryPickDataSource,
               let window = view.window else {
             showPlaceholderStatus(for: "Abort cherry-pick is unavailable for mock data")
             return
@@ -2048,39 +1946,34 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
                 statusLabel.stringValue = "Aborting cherry-pick…"
                 let result = try await mutationSource.abortCherryPick()
                 guard !Task.isCancelled else { return }
-                apply(snapshot: result.snapshot, preferredCommitID: result.selectedCommitID)
+                uiCommands.notifyRepositoryChanged(preferredCommitID: result.selectedCommitID ?? previousSelection)
                 statusLabel.stringValue = result.message
             } catch is CancellationError {
                 return
             } catch {
-                if let refreshed = try? await mutationSource.loadSnapshot(), !Task.isCancelled {
-                    apply(snapshot: refreshed, preferredCommitID: previousSelection)
-                }
+                if !Task.isCancelled { uiCommands.notifyRepositoryChanged(preferredCommitID: previousSelection) }
                 statusLabel.stringValue = error.localizedDescription
                 await MutationDialogs.showError(error, title: "Abort cherry-pick failed", window: window)
             }
         }
     }
 
-    private func beginRebase(
+    func startRebaseWorkflow(
         on target: Commit,
         interactive: Bool,
-        initialActions: [String: RepositoryRebaseTodoAction] = [:],
-        advancedFrom: String? = nil,
-        showAdvancedOptions: Bool = false
+        initialActions: [ObjectID: RepositoryRebaseTodoAction],
+        advancedFrom: String?,
+        showAdvancedOptions: Bool,
+        mutationSource: any RepositoryRebaseDataSource,
+        window: NSWindow,
+        previousSelection: RevisionID?
     ) {
-        guard let mutationSource = dataSource as? any RepositoryMutatingDataSource,
-              let window = view.window else {
-            showPlaceholderStatus(for: "Rebase is unavailable for mock data")
-            return
-        }
-        let previousSelection = selectedCommitID
         mutationTask?.cancel()
         mutationTask = Task { @MainActor [weak self, weak window] in
             guard let self, let window else { return }
             statusLabel.stringValue = "Opening Rebase…"
             revisionDetailsTask?.cancel()
-            if let refreshed = await WorkflowManagementDialogs.startRebase(
+            if await WorkflowManagementDialogs.startRebase(
                 source: mutationSource,
                 target: target,
                 interactive: interactive,
@@ -2089,7 +1982,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
                 showAdvancedOptions: showAdvancedOptions,
                 window: window
             ) {
-                apply(snapshot: refreshed, preferredCommitID: previousSelection)
+                uiCommands.notifyRepositoryChanged(preferredCommitID: previousSelection)
                 statusLabel.stringValue = "Repository refreshed after Rebase."
             } else {
                 statusLabel.stringValue = "Rebase closed."
@@ -2098,8 +1991,24 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         }
     }
 
+    func beginRebase(
+        on target: Commit,
+        interactive: Bool,
+        initialActions: [ObjectID: RepositoryRebaseTodoAction] = [:],
+        advancedFrom: String? = nil,
+        showAdvancedOptions: Bool = false
+    ) {
+        uiCommands.startRebase(
+            on: target,
+            interactive: interactive,
+            initialActions: initialActions,
+            advancedFrom: advancedFrom,
+            showAdvancedOptions: showAdvancedOptions
+        )
+    }
+
     private func beginAbortRebase() {
-        guard let mutationSource = dataSource as? any RepositoryMutatingDataSource,
+        guard let mutationSource = repositoryModule as? any RepositoryRebaseDataSource,
               let window = view.window else {
             showPlaceholderStatus(for: "Abort rebase is unavailable for mock data")
             return
@@ -2112,14 +2021,12 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
                 statusLabel.stringValue = "Aborting rebase…"
                 let result = try await mutationSource.abortRebase()
                 guard !Task.isCancelled else { return }
-                apply(snapshot: result.snapshot, preferredCommitID: result.selectedCommitID)
+                uiCommands.notifyRepositoryChanged(preferredCommitID: result.selectedCommitID ?? previousSelection)
                 statusLabel.stringValue = result.message
             } catch is CancellationError {
                 return
             } catch {
-                if let refreshed = try? await mutationSource.loadSnapshot(), !Task.isCancelled {
-                    apply(snapshot: refreshed, preferredCommitID: previousSelection)
-                }
+                if !Task.isCancelled { uiCommands.notifyRepositoryChanged(preferredCommitID: previousSelection) }
                 statusLabel.stringValue = error.localizedDescription
                 await MutationDialogs.showError(error, title: "Abort rebase failed", window: window)
             }
@@ -2128,7 +2035,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
 
     private func refreshOperationIndicators() {
         operationStateTask?.cancel()
-        guard let mutationSource = dataSource as? any RepositoryMutatingDataSource else {
+        guard let mutationSource = repositoryModule as? any RepositoryMutationStateDataSource else {
             revisionGridController.setCherryPickInProgress(false, hasConflicts: false)
             revisionGridController.setRebaseInProgress(false, hasConflicts: false)
             updateRebaseBanner(inProgress: false, hasConflicts: false)
@@ -2172,24 +2079,24 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
     @objc private func abortRebaseFromBanner() { beginAbortRebase() }
 
     @objc private func resolveRebaseFromBanner() {
-        guard let source = dataSource as? any RepositoryMutatingDataSource, let window = view.window else { return }
+        guard let source = repositoryModule as? any RepositoryRebaseDataSource, let window = view.window else { return }
         mutationTask?.cancel()
         mutationTask = Task { @MainActor [weak self, weak window] in
             guard let self, let window else { return }
-            if let refreshed = await WorkflowManagementDialogs.resolveConflicts(source: source, window: window) {
-                apply(snapshot: refreshed, preferredCommitID: selectedCommitID)
+            if await WorkflowManagementDialogs.resolveConflicts(source: source, window: window) {
+                uiCommands.notifyRepositoryChanged(preferredCommitID: selectedCommitID)
             }
             refreshOperationIndicators()
         }
     }
 
     @objc private func showRebaseManager() {
-        guard let source = dataSource as? any RepositoryMutatingDataSource, let window = view.window else { return }
+        guard let source = repositoryModule as? any RepositoryRebaseDataSource, let window = view.window else { return }
         mutationTask?.cancel()
         mutationTask = Task { @MainActor [weak self, weak window] in
             guard let self, let window else { return }
-            if let refreshed = await WorkflowManagementDialogs.manageRebase(source: source, window: window) {
-                apply(snapshot: refreshed, preferredCommitID: selectedCommitID)
+            if await WorkflowManagementDialogs.manageRebase(source: source, window: window) {
+                uiCommands.notifyRepositoryChanged(preferredCommitID: selectedCommitID)
             }
             refreshOperationIndicators()
         }
@@ -2197,9 +2104,9 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
 
     private func beginMutation(
         errorTitle: String,
-        operation: @escaping @Sendable (any RepositoryMutatingDataSource) async throws -> RepositoryMutationResult
+        operation: @escaping @Sendable (any RepositoryBrowserMutationDataSource) async throws -> RepositoryMutationResult
     ) {
-        guard let mutationSource = dataSource as? any RepositoryMutatingDataSource,
+        guard let mutationSource = repositoryModule as? any RepositoryBrowserMutationDataSource,
               let window = view.window else {
             showPlaceholderStatus(for: "Repository mutation is unavailable for mock data")
             return
@@ -2213,7 +2120,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
                 revisionDetailsTask?.cancel()
                 let result = try await operation(mutationSource)
                 guard !Task.isCancelled else { return }
-                apply(snapshot: result.snapshot, preferredCommitID: result.selectedCommitID ?? previousSelection)
+                uiCommands.notifyRepositoryChanged(preferredCommitID: result.selectedCommitID ?? previousSelection)
                 switch result.outcome {
                 case .completed:
                     statusLabel.stringValue = result.message
@@ -2225,9 +2132,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             } catch is CancellationError {
                 return
             } catch {
-                if let refreshed = try? await mutationSource.loadSnapshot(), !Task.isCancelled {
-                    apply(snapshot: refreshed, preferredCommitID: previousSelection)
-                }
+                if !Task.isCancelled { uiCommands.notifyRepositoryChanged(preferredCommitID: previousSelection) }
                 statusLabel.stringValue = error.localizedDescription
                 await MutationDialogs.showError(error, title: errorTitle, window: window)
             }

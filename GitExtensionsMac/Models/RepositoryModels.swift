@@ -1,13 +1,73 @@
 import Foundation
 
-struct Repository: Identifiable, Hashable, Sendable {
-    let id: String
-    let name: String
-    let path: String
-    let description: String
-    let isBare: Bool
+package enum ObjectIDError: LocalizedError, Sendable {
+    case invalid(String)
 
-    init(id: String, name: String, path: String, description: String, isBare: Bool = false) {
+    package var errorDescription: String? {
+        switch self {
+        case .invalid(let value):
+            return "Invalid Git object ID: \(value)"
+        }
+    }
+}
+
+package struct ObjectID: Hashable, Sendable, Comparable, CustomStringConvertible {
+    package let string: String
+
+    package init(parsing string: String) throws {
+        guard Self.isValid(string) else { throw ObjectIDError.invalid(string) }
+        self.string = string
+    }
+
+    package static func parse(_ string: String) throws -> ObjectID {
+        try ObjectID(parsing: string)
+    }
+
+    package static func parseIfPresent(_ string: String?) throws -> ObjectID? {
+        guard let string, !string.isEmpty else { return nil }
+        return try parse(string)
+    }
+
+    package var description: String { string }
+    package var shortString: String { String(string.prefix(8)) }
+
+    package static func < (lhs: ObjectID, rhs: ObjectID) -> Bool { lhs.string < rhs.string }
+
+    private static func isValid(_ value: String) -> Bool {
+        (value.count == 40 || value.count == 64)
+            && value.utf8.allSatisfy { byte in
+                (48...57).contains(byte) || (97...102).contains(byte)
+            }
+    }
+}
+
+package enum RevisionID: Hashable, Sendable, CustomStringConvertible {
+    case object(ObjectID)
+    case workingDirectory
+    case index
+
+    package var objectID: ObjectID? {
+        guard case .object(let objectID) = self else { return nil }
+        return objectID
+    }
+
+    package var description: String {
+        switch self {
+        case .object(let objectID): objectID.string
+        case .workingDirectory: "WORKTREE"
+        case .index: "INDEX"
+        }
+    }
+}
+
+package struct Repository: Identifiable, Hashable, Sendable {
+    package let id: String
+    package let name: String
+    package let path: String
+    package let description: String
+    package let isBare: Bool
+
+    package init(id: String, name: String, path: String, description: String, isBare: Bool = false) {
         self.id = id
         self.name = name
         self.path = path
@@ -16,48 +76,88 @@ struct Repository: Identifiable, Hashable, Sendable {
     }
 }
 
-struct Branch: Identifiable, Hashable, Sendable {
-    let id: String
-    let name: String
-    let commitID: String
-    let isCurrent: Bool
-    let isRemote: Bool
-    let remoteName: String?
-    let ahead: Int
-    let behind: Int
+package struct Branch: Identifiable, Hashable, Sendable {
+    package let id: String
+    package let name: String
+    package let commitID: ObjectID
+    package let isCurrent: Bool
+    package let isRemote: Bool
+    package let remoteName: String?
+    package let ahead: Int
+    package let behind: Int
+
+    package init(id: String, name: String, commitID: ObjectID, isCurrent: Bool, isRemote: Bool, remoteName: String?, ahead: Int, behind: Int) {
+        self.id = id
+        self.name = name
+        self.commitID = commitID
+        self.isCurrent = isCurrent
+        self.isRemote = isRemote
+        self.remoteName = remoteName
+        self.ahead = ahead
+        self.behind = behind
+    }
 }
 
-struct Tag: Identifiable, Hashable, Sendable {
-    let id: String
-    let name: String
-    let commitID: String
+package struct Tag: Identifiable, Hashable, Sendable {
+    package let id: String
+    package let name: String
+    package let commitID: ObjectID
+
+    package init(id: String, name: String, commitID: ObjectID) {
+        self.id = id
+        self.name = name
+        self.commitID = commitID
+    }
 }
 
-struct Remote: Identifiable, Hashable, Sendable {
-    let id: String
-    let name: String
-    let fetchURL: String
-    let branches: [Branch]
+package struct Remote: Identifiable, Hashable, Sendable {
+    package let id: String
+    package let name: String
+    package let fetchURL: String
+    package let branches: [Branch]
+
+    package init(id: String, name: String, fetchURL: String, branches: [Branch]) {
+        self.id = id
+        self.name = name
+        self.fetchURL = fetchURL
+        self.branches = branches
+    }
 }
 
-struct Stash: Identifiable, Hashable, Sendable {
-    let id: String
-    let selector: String
-    let subject: String
-    let branchName: String
-    let commitID: String
+package struct Stash: Identifiable, Hashable, Sendable {
+    package let id: String
+    package let selector: String
+    package let subject: String
+    package let branchName: String
+    package let commitID: ObjectID
+
+    package init(id: String, selector: String, subject: String, branchName: String, commitID: ObjectID) {
+        self.id = id
+        self.selector = selector
+        self.subject = subject
+        self.branchName = branchName
+        self.commitID = commitID
+    }
 }
 
-struct Worktree: Identifiable, Hashable, Sendable {
-    let id: String
-    let name: String
-    let path: String
-    let branchName: String
-    let isCurrent: Bool
+package struct Worktree: Identifiable, Hashable, Sendable {
+    package let id: String
+    package let name: String
+    package let path: String
+    package let branchName: String
+    package let isCurrent: Bool
+
+    package init(id: String, name: String, path: String, branchName: String, isCurrent: Bool) {
+        self.id = id
+        self.name = name
+        self.path = path
+        self.branchName = branchName
+        self.isCurrent = isCurrent
+    }
 }
 
-struct Submodule: Identifiable, Hashable, Sendable {
-    enum State: String, Hashable, Sendable {
+package struct Submodule: Identifiable, Hashable, Sendable {
+    package enum State: String, Hashable, Sendable {
         case clean
         case uninitialized
         case modified
@@ -65,17 +165,27 @@ struct Submodule: Identifiable, Hashable, Sendable {
         case unknown
     }
 
-    let id: String
-    let name: String
-    let path: String
-    let url: String?
-    let commitID: String?
-    let description: String?
-    let state: State
+    package let id: String
+    package let name: String
+    package let path: String
+    package let url: String?
+    package let commitID: ObjectID?
+    package let description: String?
+    package let state: State
+
+    package init(id: String, name: String, path: String, url: String?, commitID: ObjectID?, description: String?, state: State) {
+        self.id = id
+        self.name = name
+        self.path = path
+        self.url = url
+        self.commitID = commitID
+        self.description = description
+        self.state = state
+    }
 }
 
-struct RevisionReference: Identifiable, Hashable, Sendable {
-    enum Kind: Sendable {
+package struct RevisionReference: Identifiable, Hashable, Sendable {
+    package enum Kind: Sendable {
         case head
         case currentBranch
         case localBranch
@@ -84,13 +194,13 @@ struct RevisionReference: Identifiable, Hashable, Sendable {
         case stash
     }
 
-    let id: String
-    let name: String
-    let kind: Kind
-    let trackingRemote: String?
-    let mergeWith: String?
+    package let id: String
+    package let name: String
+    package let kind: Kind
+    package let trackingRemote: String?
+    package let mergeWith: String?
 
-    init(
+    package init(
         id: String,
         name: String,
         kind: Kind,
@@ -104,17 +214,17 @@ struct RevisionReference: Identifiable, Hashable, Sendable {
         self.mergeWith = mergeWith
     }
 
-    var remoteName: String? {
+    package var remoteName: String? {
         guard kind == .remoteBranch else { return nil }
         return name.split(separator: "/", maxSplits: 1).first.map(String.init)
     }
 
-    var localName: String {
+    package var localName: String {
         guard kind == .remoteBranch else { return name }
         return name.split(separator: "/", maxSplits: 1).dropFirst().first.map(String.init) ?? name
     }
 
-    func tracks(_ remoteReference: RevisionReference) -> Bool {
+    package func tracks(_ remoteReference: RevisionReference) -> Bool {
         guard kind == .currentBranch || kind == .localBranch,
               remoteReference.kind == .remoteBranch,
               let trackingRemote,
@@ -127,29 +237,29 @@ struct RevisionReference: Identifiable, Hashable, Sendable {
     }
 }
 
-struct Commit: Identifiable, Hashable, Sendable {
-    enum Kind: Hashable, Sendable {
+package struct Commit: Identifiable, Hashable, Sendable {
+    package enum Kind: Hashable, Sendable {
         case revision
         case workingDirectory
         case index
     }
 
-    let id: String
-    let shortID: String
-    let subject: String
-    let body: String
-    let authorName: String
-    let authorEmail: String
-    let authorDate: Date
-    let committerName: String
-    let committerEmail: String
-    let commitDate: Date
-    let parentIDs: [String]
-    let references: [RevisionReference]
-    let kind: Kind
+    package let id: RevisionID
+    package let shortID: String
+    package let subject: String
+    package let body: String
+    package let authorName: String
+    package let authorEmail: String
+    package let authorDate: Date
+    package let committerName: String
+    package let committerEmail: String
+    package let commitDate: Date
+    package let parentIDs: [ObjectID]
+    package let references: [RevisionReference]
+    package let kind: Kind
 
-    init(
-        id: String,
+    package init(
+        id: RevisionID,
         shortID: String,
         subject: String,
         body: String,
@@ -159,7 +269,7 @@ struct Commit: Identifiable, Hashable, Sendable {
         committerName: String,
         committerEmail: String,
         commitDate: Date,
-        parentIDs: [String],
+        parentIDs: [ObjectID],
         references: [RevisionReference],
         kind: Kind = .revision
     ) {
@@ -178,17 +288,24 @@ struct Commit: Identifiable, Hashable, Sendable {
         self.kind = kind
     }
 
-    var isMerge: Bool { parentIDs.count > 1 }
-    var isHEAD: Bool { references.contains { $0.kind == .head || $0.kind == .currentBranch } }
-    var isArtificial: Bool { kind != .revision }
+    package var isMerge: Bool { parentIDs.count > 1 }
+    package var isHEAD: Bool { references.contains { $0.kind == .head || $0.kind == .currentBranch } }
+    package var isArtificial: Bool { kind != .revision }
+    package var objectID: ObjectID? { id.objectID }
+    package var graphParentIDs: [RevisionID] {
+        switch kind {
+        case .workingDirectory: [.index]
+        case .index, .revision: parentIDs.map(RevisionID.object)
+        }
+    }
 }
 
-enum RevisionSelectionRestorer {
-    static func restoredID(
-        requestedID: String?,
+package enum RevisionSelectionRestorer {
+    package static func restoredID(
+        requestedID: RevisionID?,
         previousCommits: [Commit],
         refreshedCommits: [Commit]
-    ) -> String? {
+    ) -> RevisionID? {
         guard !refreshedCommits.isEmpty else { return nil }
         let refreshedIDs = Set(refreshedCommits.map(\.id))
         if let requestedID, refreshedIDs.contains(requestedID) {
@@ -199,12 +316,13 @@ enum RevisionSelectionRestorer {
            let previous = previousCommits.first(where: { $0.id == requestedID }) {
             let previousByID = Dictionary(uniqueKeysWithValues: previousCommits.map { ($0.id, $0) })
             var pending = Array(previous.parentIDs.prefix(50))
-            var visited = Set<String>()
+            var visited = Set<ObjectID>()
             while !pending.isEmpty, visited.count < 50 {
                 let candidate = pending.removeFirst()
                 guard visited.insert(candidate).inserted else { continue }
-                if refreshedIDs.contains(candidate) { return candidate }
-                if let commit = previousByID[candidate] {
+                let candidateID = RevisionID.object(candidate)
+                if refreshedIDs.contains(candidateID) { return candidateID }
+                if let commit = previousByID[candidateID] {
                     pending.append(contentsOf: commit.parentIDs)
                 }
             }
@@ -216,11 +334,16 @@ enum RevisionSelectionRestorer {
     }
 }
 
-struct AuthorAvatarPresentation: Equatable {
-    let initials: String
-    let paletteIndex: Int
+package struct AuthorAvatarPresentation: Equatable {
+    package let initials: String
+    package let paletteIndex: Int
 
-    static func make(name: String?, email: String?) -> AuthorAvatarPresentation {
+    package init(initials: String, paletteIndex: Int) {
+        self.initials = initials
+        self.paletteIndex = paletteIndex
+    }
+
+    package static func make(name: String?, email: String?) -> AuthorAvatarPresentation {
         let cleanName = name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let cleanEmail = email?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let selected = cleanName.isEmpty ? cleanEmail.split(separator: "@", maxSplits: 1).first.map(String.init) ?? "" : cleanName
@@ -252,8 +375,8 @@ struct AuthorAvatarPresentation: Equatable {
     }
 }
 
-enum RevisionDiffSummaryResolver {
-    static func summary(selected: Commit, comparison: Commit?) -> String {
+package enum RevisionDiffSummaryResolver {
+    package static func summary(selected: Commit, comparison: Commit?) -> String {
         guard let comparison else {
             return "Diff with empty tree"
         }
@@ -265,14 +388,14 @@ enum RevisionDiffSummaryResolver {
     }
 }
 
-enum FileChangeType: String, Hashable, Sendable {
+package enum FileChangeType: String, Hashable, Sendable {
     case added = "A"
     case modified = "M"
     case deleted = "D"
     case renamed = "R"
     case copied = "C"
 
-    var description: String {
+    package var description: String {
         switch self {
         case .added: "Added"
         case .modified: "Modified"
@@ -283,17 +406,26 @@ enum FileChangeType: String, Hashable, Sendable {
     }
 }
 
-struct ChangedFile: Identifiable, Hashable, Sendable {
-    let id: String
-    let path: String
-    let oldPath: String?
-    let changeType: FileChangeType
-    let additions: Int
-    let deletions: Int
+package struct ChangedFile: Identifiable, Hashable, Sendable {
+    package let id: String
+    package let path: String
+    package let oldPath: String?
+    package let changeType: FileChangeType
+    package let additions: Int
+    package let deletions: Int
+
+    package init(id: String, path: String, oldPath: String?, changeType: FileChangeType, additions: Int, deletions: Int) {
+        self.id = id
+        self.path = path
+        self.oldPath = oldPath
+        self.changeType = changeType
+        self.additions = additions
+        self.deletions = deletions
+    }
 }
 
-struct DiffLine: Identifiable, Hashable, Sendable {
-    enum Kind: Hashable, Sendable {
+package struct DiffLine: Identifiable, Hashable, Sendable {
+    package enum Kind: Hashable, Sendable {
         case header
         case hunk
         case context
@@ -301,35 +433,49 @@ struct DiffLine: Identifiable, Hashable, Sendable {
         case deletion
     }
 
-    let id: String
-    let oldLineNumber: Int?
-    let newLineNumber: Int?
-    let kind: Kind
-    let text: String
+    package let id: String
+    package let oldLineNumber: Int?
+    package let newLineNumber: Int?
+    package let kind: Kind
+    package let text: String
+
+    package init(id: String, oldLineNumber: Int?, newLineNumber: Int?, kind: Kind, text: String) {
+        self.id = id
+        self.oldLineNumber = oldLineNumber
+        self.newLineNumber = newLineNumber
+        self.kind = kind
+        self.text = text
+    }
 }
 
-struct FileDiff: Identifiable, Hashable, Sendable {
-    let id: String
-    let fileID: String
-    let lines: [DiffLine]
+package struct FileDiff: Identifiable, Hashable, Sendable {
+    package let id: String
+    package let fileID: String
+    package let lines: [DiffLine]
+
+    package init(id: String, fileID: String, lines: [DiffLine]) {
+        self.id = id
+        self.fileID = fileID
+        self.lines = lines
+    }
 }
 
-struct RepositoryFileEntry: Identifiable, Hashable, Sendable {
-    let id: String
-    let path: String
-    let content: String
-    let byteCount: Int
-    let isExecutable: Bool
-    let gitObjectID: String?
-    let gitObjectType: String?
+package struct RepositoryFileEntry: Identifiable, Hashable, Sendable {
+    package let id: String
+    package let path: String
+    package let content: String
+    package let byteCount: Int
+    package let isExecutable: Bool
+    package let gitObjectID: ObjectID?
+    package let gitObjectType: String?
 
-    init(
+    package init(
         id: String? = nil,
         path: String,
         content: String,
         byteCount: Int? = nil,
         isExecutable: Bool = false,
-        gitObjectID: String? = nil,
+        gitObjectID: ObjectID? = nil,
         gitObjectType: String? = nil
     ) {
         self.id = id ?? path
@@ -342,22 +488,31 @@ struct RepositoryFileEntry: Identifiable, Hashable, Sendable {
     }
 }
 
-struct RepositoryFileTreeNode: Identifiable, Hashable, Sendable {
-    enum Kind: Int, Hashable, Sendable {
+package struct RepositoryFileTreeNode: Identifiable, Hashable, Sendable {
+    package enum Kind: Int, Hashable, Sendable {
         case folder
         case file
     }
 
-    let id: String
-    let name: String
-    let path: String
-    let kind: Kind
-    let file: RepositoryFileEntry?
-    let children: [RepositoryFileTreeNode]
+    package let id: String
+    package let name: String
+    package let path: String
+    package let kind: Kind
+    package let file: RepositoryFileEntry?
+    package let children: [RepositoryFileTreeNode]
+
+    package init(id: String, name: String, path: String, kind: Kind, file: RepositoryFileEntry?, children: [RepositoryFileTreeNode]) {
+        self.id = id
+        self.name = name
+        self.path = path
+        self.kind = kind
+        self.file = file
+        self.children = children
+    }
 }
 
-enum RepositoryFileTreeBuilder {
-    static func build(files: [RepositoryFileEntry]) -> [RepositoryFileTreeNode] {
+package enum RepositoryFileTreeBuilder {
+    package static func build(files: [RepositoryFileEntry]) -> [RepositoryFileTreeNode] {
         let root = MutableRepositoryFileTreeNode(name: "", path: "", kind: .folder)
 
         for file in files.sorted(by: { $0.path.caseInsensitiveCompare($1.path) == .orderedAscending }) {
@@ -427,14 +582,14 @@ private final class MutableRepositoryFileTreeNode {
     }
 }
 
-enum CommitSignatureStatus: Hashable, Sendable {
+package enum CommitSignatureStatus: Hashable, Sendable {
     case noSignature
     case goodSignature
     case signatureError
     case missingPublicKey
 }
 
-enum TagSignatureStatus: Hashable, Sendable {
+package enum TagSignatureStatus: Hashable, Sendable {
     case noTag
     case oneGood
     case oneBad
@@ -443,14 +598,21 @@ enum TagSignatureStatus: Hashable, Sendable {
     case tagNotSigned
 }
 
-struct RevisionGPGInfo: Hashable, Sendable {
-    let commitStatus: CommitSignatureStatus
-    let commitVerificationMessage: String
-    let tagStatus: TagSignatureStatus
-    let tagVerificationMessage: String?
+package struct RevisionGPGInfo: Hashable, Sendable {
+    package let commitStatus: CommitSignatureStatus
+    package let commitVerificationMessage: String
+    package let tagStatus: TagSignatureStatus
+    package let tagVerificationMessage: String?
+
+    package init(commitStatus: CommitSignatureStatus, commitVerificationMessage: String, tagStatus: TagSignatureStatus, tagVerificationMessage: String?) {
+        self.commitStatus = commitStatus
+        self.commitVerificationMessage = commitVerificationMessage
+        self.tagStatus = tagStatus
+        self.tagVerificationMessage = tagVerificationMessage
+    }
 }
 
-enum SignatureIndicator: Hashable, Sendable {
+package enum SignatureIndicator: Hashable, Sendable {
     case none
     case good
     case warning
@@ -458,18 +620,18 @@ enum SignatureIndicator: Hashable, Sendable {
     case many
 }
 
-struct SignatureRowPresentation: Equatable, Sendable {
-    let message: String
-    let indicator: SignatureIndicator
+package struct SignatureRowPresentation: Equatable, Sendable {
+    package let message: String
+    package let indicator: SignatureIndicator
 }
 
-struct RevisionGPGPresentation: Equatable, Sendable {
-    let commit: SignatureRowPresentation
-    let tag: SignatureRowPresentation?
+package struct RevisionGPGPresentation: Equatable, Sendable {
+    package let commit: SignatureRowPresentation
+    package let tag: SignatureRowPresentation?
 }
 
-enum RevisionGPGPresentationResolver {
-    static func resolve(info: RevisionGPGInfo?) -> RevisionGPGPresentation {
+package enum RevisionGPGPresentationResolver {
+    package static func resolve(info: RevisionGPGInfo?) -> RevisionGPGPresentation {
         guard let info else {
             return RevisionGPGPresentation(
                 commit: SignatureRowPresentation(message: "Commit is not signed", indicator: .none),
@@ -509,18 +671,27 @@ enum RevisionGPGPresentationResolver {
     }
 }
 
-struct CommitRelations: Equatable, Sendable {
-    let parentIDs: [String]
-    let childIDs: [String]
-    let branchNames: [String]
-    let tagNames: [String]
+package struct CommitRelations: Equatable, Sendable {
+    package let parentIDs: [ObjectID]
+    package let childIDs: [ObjectID]
+    package let branchNames: [String]
+    package let tagNames: [String]
+
+    package init(parentIDs: [ObjectID], childIDs: [ObjectID], branchNames: [String], tagNames: [String]) {
+        self.parentIDs = parentIDs
+        self.childIDs = childIDs
+        self.branchNames = branchNames
+        self.tagNames = tagNames
+    }
 }
 
-enum CommitRelationsResolver {
-    static func resolve(commit: Commit, history: [Commit]) -> CommitRelations {
+package enum CommitRelationsResolver {
+    package static func resolve(commit: Commit, history: [Commit]) -> CommitRelations {
         CommitRelations(
             parentIDs: commit.parentIDs,
-            childIDs: history.filter { $0.parentIDs.contains(commit.id) }.map(\.id),
+            childIDs: commit.objectID.map { objectID in
+                history.filter { $0.parentIDs.contains(objectID) }.compactMap(\.objectID)
+            } ?? [],
             branchNames: commit.references.filter {
                 $0.kind == .currentBranch || $0.kind == .localBranch || $0.kind == .remoteBranch
             }.map(\.name),
@@ -529,8 +700,8 @@ enum CommitRelationsResolver {
     }
 }
 
-enum FileTreeSelectionResolver {
-    static func selectedPath(previousPath: String?, files: [RepositoryFileEntry]) -> String? {
+package enum FileTreeSelectionResolver {
+    package static func selectedPath(previousPath: String?, files: [RepositoryFileEntry]) -> String? {
         if let previousPath, files.contains(where: { $0.path == previousPath }) {
             return previousPath
         }
@@ -538,26 +709,150 @@ enum FileTreeSelectionResolver {
     }
 }
 
-struct RepositorySnapshot: Sendable {
-    let repositories: [Repository]
-    let currentRepository: Repository
-    let branches: [Branch]
-    let tags: [Tag]
-    let remotes: [Remote]
-    let stashes: [Stash]
-    let worktrees: [Worktree]
-    let submodules: [Submodule]
-    let commits: [Commit]
-    let filesByCommit: [String: [ChangedFile]]
-    let diffsByFile: [String: FileDiff]
-    let repositoryFilesByCommit: [String: [RepositoryFileEntry]]
-    let gpgInfoByCommit: [String: RevisionGPGInfo]
-    let workingDirectoryChangeCount: Int
+package struct RepositoryIdentityState: Sendable {
+    package let repositories: [Repository]
+    package let currentRepository: Repository
+    package let headID: ObjectID?
+
+    package init(repositories: [Repository], currentRepository: Repository, headID: ObjectID?) {
+        self.repositories = repositories
+        self.currentRepository = currentRepository
+        self.headID = headID
+    }
 }
 
-struct RepositoryRevisionDetails: Sendable {
-    let files: [ChangedFile]
-    let diffsByFile: [String: FileDiff]
-    let repositoryFiles: [RepositoryFileEntry]
-    let gpgInfo: RevisionGPGInfo?
+package struct RepositoryReferenceState: Sendable {
+    package let branches: [Branch]
+    package let tags: [Tag]
+    package let referencesByCommit: [ObjectID: [RevisionReference]]
+
+    package var references: [RevisionReference] { referencesByCommit.values.flatMap { $0 } }
+
+    package init(branches: [Branch], tags: [Tag], referencesByCommit: [ObjectID: [RevisionReference]]) {
+        self.branches = branches
+        self.tags = tags
+        self.referencesByCommit = referencesByCommit
+    }
+}
+
+package struct RepositoryNavigationState: Sendable {
+    package let remotes: [Remote]
+    package let stashes: [Stash]
+    package let worktrees: [Worktree]
+    package let submodules: [Submodule]
+
+    package init(remotes: [Remote], stashes: [Stash], worktrees: [Worktree], submodules: [Submodule]) {
+        self.remotes = remotes
+        self.stashes = stashes
+        self.worktrees = worktrees
+        self.submodules = submodules
+    }
+}
+
+package struct RepositoryStatusSummary: Sendable {
+    package let workingDirectoryChangeCount: Int
+
+    package init(workingDirectoryChangeCount: Int) {
+        self.workingDirectoryChangeCount = workingDirectoryChangeCount
+    }
+}
+
+package struct RepositoryNetworkContext: Sendable {
+    package let repository: Repository
+    package let headID: ObjectID?
+    package let branches: [Branch]
+    package let remotes: [Remote]
+    package let references: [RevisionReference]
+    package let submodules: [Submodule]
+
+    package init(repository: Repository, headID: ObjectID?, branches: [Branch], remotes: [Remote], references: [RevisionReference], submodules: [Submodule]) {
+        self.repository = repository
+        self.headID = headID
+        self.branches = branches
+        self.remotes = remotes
+        self.references = references
+        self.submodules = submodules
+    }
+}
+
+package struct RepositoryBranchContext: Sendable {
+    package let repository: Repository
+    package let headID: ObjectID?
+    package let branches: [Branch]
+    package let remotes: [Remote]
+    package let referencesByCommit: [ObjectID: [RevisionReference]]
+    package let submodules: [Submodule]
+
+    package init(repository: Repository, headID: ObjectID?, branches: [Branch], remotes: [Remote], referencesByCommit: [ObjectID: [RevisionReference]], submodules: [Submodule]) {
+        self.repository = repository
+        self.headID = headID
+        self.branches = branches
+        self.remotes = remotes
+        self.referencesByCommit = referencesByCommit
+        self.submodules = submodules
+    }
+}
+
+package struct RepositoryMergeContext: Sendable {
+    package let repository: Repository
+    package let branches: [Branch]
+    package let tags: [Tag]
+    package let referencesByCommit: [ObjectID: [RevisionReference]]
+    package let submodules: [Submodule]
+
+    package init(repository: Repository, branches: [Branch], tags: [Tag], referencesByCommit: [ObjectID: [RevisionReference]], submodules: [Submodule]) {
+        self.repository = repository
+        self.branches = branches
+        self.tags = tags
+        self.referencesByCommit = referencesByCommit
+        self.submodules = submodules
+    }
+}
+
+package struct RepositoryCommitContext: Sendable {
+    package let repository: Repository
+    package let headID: ObjectID?
+    package let branches: [Branch]
+    package let submodules: [Submodule]
+
+    package init(repository: Repository, headID: ObjectID?, branches: [Branch], submodules: [Submodule]) {
+        self.repository = repository
+        self.headID = headID
+        self.branches = branches
+        self.submodules = submodules
+    }
+}
+
+package struct RepositoryStashContext: Sendable {
+    package let headID: ObjectID?
+    package let stashes: [Stash]
+
+    package init(headID: ObjectID?, stashes: [Stash]) {
+        self.headID = headID
+        self.stashes = stashes
+    }
+}
+
+package struct RepositoryRebaseContext: Sendable {
+    package let branches: [Branch]
+    package let tags: [Tag]
+
+    package init(branches: [Branch], tags: [Tag]) {
+        self.branches = branches
+        self.tags = tags
+    }
+}
+
+package struct RepositoryRevisionDetails: Sendable {
+    package let files: [ChangedFile]
+    package let diffsByFile: [String: FileDiff]
+    package let repositoryFiles: [RepositoryFileEntry]
+    package let gpgInfo: RevisionGPGInfo?
+
+    package init(files: [ChangedFile], diffsByFile: [String: FileDiff], repositoryFiles: [RepositoryFileEntry], gpgInfo: RevisionGPGInfo?) {
+        self.files = files
+        self.diffsByFile = diffsByFile
+        self.repositoryFiles = repositoryFiles
+        self.gpgInfo = gpgInfo
+    }
 }

@@ -1,3 +1,5 @@
+import GitExtensionsCore
+import GitCommands
 import AppKit
 
 private enum CommitKeyboardShortcut {
@@ -84,14 +86,14 @@ private final class CommitRootView: NSView {
 @MainActor
 enum CommitWorkflowDialog {
     static func present(
-        source: any RepositoryMutatingDataSource,
+        source: any RepositoryCommitWorkflowDataSource,
         pushSource: (any RepositoryPushingDataSource)? = nil,
         initialMode: RepositoryCommitMode,
         specialKind: CommitWorkflowSpecialKind? = nil,
         head: Commit?,
         draft: CommitDialogDraft?,
         owner: NSWindow,
-        onSnapshot: @escaping (RepositorySnapshot, String?) -> Void,
+        onRepositoryChanged: @escaping (RevisionID?) -> Void,
         onClose: @escaping () -> Void
     ) -> NSWindowController {
         let controller = CommitWorkflowViewController(
@@ -101,7 +103,7 @@ enum CommitWorkflowDialog {
             specialKind: specialKind,
             head: head,
             draft: draft,
-            onSnapshot: onSnapshot
+            onRepositoryChanged: onRepositoryChanged
         )
         let commitWindow = NSWindow(contentViewController: controller)
         commitWindow.title = "Commit"
@@ -141,13 +143,13 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
     weak var commitWindow: NSWindow?
     var onClose: (() -> Void)?
 
-    private let source: any RepositoryMutatingDataSource
+    private let source: any RepositoryCommitWorkflowDataSource
     private let pushSource: (any RepositoryPushingDataSource)?
     private let initialMode: RepositoryCommitMode
     private var activeSpecialKind: CommitWorkflowSpecialKind?
     private let head: Commit?
     private let draft: CommitDialogDraft?
-    private let onSnapshot: (RepositorySnapshot, String?) -> Void
+    private let onRepositoryChanged: (RevisionID?) -> Void
     private let settings = AppSettingsStore.shared
     private let unstagedTable = NSOutlineView()
     private let stagedTable = NSOutlineView()
@@ -188,7 +190,8 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
     private var staged: [ChangedFile] = []
     private var unstagedRootNodes: [ChangedFileNode] = []
     private var stagedRootNodes: [ChangedFileNode] = []
-    private var currentSnapshot: RepositorySnapshot?
+    private var repositoryContext: RepositoryCommitContext?
+    private var networkContext: RepositoryNetworkContext?
     private var commitState: RepositoryCommitState?
     private var loadTask: Task<Void, Never>?
     private var diffLoadTask: Task<Void, Never>?
@@ -223,13 +226,13 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
     private var selectedCommitMode: RepositoryCommitMode = .normal
 
     init(
-        source: any RepositoryMutatingDataSource,
+        source: any RepositoryCommitWorkflowDataSource,
         pushSource: (any RepositoryPushingDataSource)?,
         initialMode: RepositoryCommitMode,
         specialKind: CommitWorkflowSpecialKind?,
         head: Commit?,
         draft: CommitDialogDraft?,
-        onSnapshot: @escaping (RepositorySnapshot, String?) -> Void
+        onRepositoryChanged: @escaping (RevisionID?) -> Void
     ) {
         self.source = source
         self.pushSource = pushSource
@@ -237,7 +240,7 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
         self.activeSpecialKind = specialKind
         self.head = head
         self.draft = draft
-        self.onSnapshot = onSnapshot
+        self.onRepositoryChanged = onRepositoryChanged
         self.showOnlyMyMessages = AppSettingsStore.shared.commitPreferences.showOnlyMyMessages
         let filePreferences = AppSettingsStore.shared.fileStatusListPreferences
         self.fileTreeMode = filePreferences.isTreeMode
@@ -587,7 +590,7 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
     }
 
     @objc private func generateSubmoduleMessage(_ sender: NSMenuItem) {
-        let changed = (currentSnapshot?.submodules ?? []).filter { module in
+        let changed = (repositoryContext?.submodules ?? []).filter { module in
             staged.contains { $0.path == module.path }
         }
         guard !changed.isEmpty else {
@@ -597,7 +600,7 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
         var lines = ["Submodule\(changed.count == 1 ? "" : "s") \(changed.map(\.path).joined(separator: ", ")) updated", ""]
         for module in changed {
             lines.append("Submodule \(module.path):")
-            lines.append("    * Revision changed to \(module.commitID.map { String($0.prefix(7)) } ?? "unknown")")
+            lines.append("    * Revision changed to \(module.commitID.map { String($0.string.prefix(7)) } ?? "unknown")")
             lines.append("")
         }
         messageView.string = lines.joined(separator: "\n").trimmingCharacters(in: .newlines)
@@ -780,7 +783,7 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
     }
 
     private func headMessage() -> String {
-        guard let head = currentSnapshot?.commits.first(where: \.isHEAD) ?? head else { return "" }
+        guard let head else { return "" }
         return head.subject + (head.body.isEmpty ? "" : "\n\n\(head.body)")
     }
 
@@ -1107,20 +1110,20 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
     }
 
     @objc private func openContainingFolder(_ sender: NSButton) {
-        guard let file = selectedChangedFile(), let snapshot = currentSnapshot else {
+        guard let file = selectedChangedFile(), let context = repositoryContext else {
             status.stringValue = "Select a file first."
             return
         }
-        let url = URL(fileURLWithPath: snapshot.currentRepository.path).appendingPathComponent(file.path).deletingLastPathComponent()
+        let url = URL(fileURLWithPath: context.repository.path).appendingPathComponent(file.path).deletingLastPathComponent()
         NSWorkspace.shared.open(url)
     }
 
     @objc private func viewSelectedFile(_ sender: NSButton) {
-        guard let file = selectedChangedFile(), let snapshot = currentSnapshot else {
+        guard let file = selectedChangedFile(), let context = repositoryContext else {
             status.stringValue = "Select a file first."
             return
         }
-        let url = URL(fileURLWithPath: snapshot.currentRepository.path).appendingPathComponent(file.path)
+        let url = URL(fileURLWithPath: context.repository.path).appendingPathComponent(file.path)
         guard FileManager.default.fileExists(atPath: url.path) else {
             status.stringValue = "The selected file is not present in the working directory."
             return
@@ -1133,7 +1136,7 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
     }
 
     @objc private func editIgnoredFiles(_ sender: NSMenuItem) {
-        guard let repository = currentSnapshot?.currentRepository else {
+        guard let repository = repositoryContext?.repository else {
             status.stringValue = "Repository information is not available."
             return
         }
@@ -1303,13 +1306,13 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
 
     @objc private func openContextFile(_ sender: NSMenuItem) {
         guard let path = sender.representedObject as? String,
-              let repository = currentSnapshot?.currentRepository else { return }
+              let repository = repositoryContext?.repository else { return }
         NSWorkspace.shared.open(URL(fileURLWithPath: repository.path).appendingPathComponent(path))
     }
 
     @objc private func revealContextFile(_ sender: NSMenuItem) {
         guard let path = sender.representedObject as? String,
-              let repository = currentSnapshot?.currentRepository else { return }
+              let repository = repositoryContext?.repository else { return }
         NSWorkspace.shared.activateFileViewerSelecting([
             URL(fileURLWithPath: repository.path).appendingPathComponent(path)
         ])
@@ -1358,22 +1361,25 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
                 updateButtonStates()
             }
             do {
-                async let snapshotValue = source.loadSnapshot()
+                async let repositoryStateValue = source.loadRepositoryState()
                 async let stateValue = source.loadCommitState(
                     historyLimit: settings.commitPreferences.historyLimit,
                     showOnlyMyMessages: showOnlyMyMessages,
                     rememberAmend: settings.commitPreferences.rememberAmendState
                 )
-                let snapshot = try await snapshotValue
-                guard let worktree = snapshot.commits.first(where: { $0.kind == .workingDirectory }),
-                      let index = snapshot.commits.first(where: { $0.kind == .index }) else {
+                let repositoryState = try await repositoryStateValue
+                let context = repositoryState.commitContext
+                let artificial = RevisionCommitBuilder.artificialRevisions(headID: context.headID)
+                guard let worktree = artificial.first(where: { $0.kind == .workingDirectory }),
+                      let index = artificial.first(where: { $0.kind == .index }) else {
                     throw RepositoryDataSourceError.unavailable
                 }
                 async let worktreeDetails = source.loadRevisionDetails(for: worktree)
                 async let indexDetails = source.loadRevisionDetails(for: index)
                 let (worktreeValue, indexValue, loadedCommitState) = try await (worktreeDetails, indexDetails, stateValue)
                 guard !Task.isCancelled else { return }
-                currentSnapshot = snapshot
+                repositoryContext = context
+                networkContext = repositoryState.networkContext
                 commitState = loadedCommitState
                 if preserveMessage {
                     messageView.string = preservedMessage
@@ -1390,8 +1396,8 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
                 configureMessageMenu()
                 configureTemplatesMenu()
                 configureOptionsMenu()
-                let branch = snapshot.branches.first(where: \.isCurrent)?.name ?? "detached HEAD"
-                commitWindow?.title = "Commit to \(branch) (\(snapshot.currentRepository.path))"
+                let branch = context.branches.first(where: \.isCurrent)?.name ?? "detached HEAD"
+                commitWindow?.title = "Commit to \(branch) (\(context.repository.path))"
                 unstaged = worktreeValue.files
                 staged = indexValue.files
                 reloadFileTrees(preserveSelection: false)
@@ -1419,9 +1425,10 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
     }
 
     private func loadSelectedDiff(from table: NSOutlineView) {
-        guard let file = selectedLeafFile(in: table), let snapshot = currentSnapshot else { return }
+        guard let file = selectedLeafFile(in: table), let context = repositoryContext else { return }
         let kind: Commit.Kind = table === unstagedTable ? .workingDirectory : .index
-        guard let commit = snapshot.commits.first(where: { $0.kind == kind }) else { return }
+        guard let commit = RevisionCommitBuilder.artificialRevisions(headID: context.headID)
+            .first(where: { $0.kind == kind }) else { return }
         diffLoadTask?.cancel()
         diffLoadTask = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -1594,7 +1601,7 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
            staged.isEmpty,
            unstaged.isEmpty,
            allowEmpty.state == .off {
-            openPush(snapshot: currentSnapshot, forceWithLease: false)
+            openPush(context: networkContext, forceWithLease: false)
             return
         }
         actionTask = Task { @MainActor [weak self, weak commitWindow] in
@@ -1680,8 +1687,10 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
                 status.stringValue = currentCommitMode == .normal ? "Committing…" : "Amending…"
                 let wasAmend = currentCommitMode != .normal
                 let result = try await source.commit(request)
-                onSnapshot(result.snapshot, result.selectedCommitID)
-                currentSnapshot = result.snapshot
+                onRepositoryChanged(result.selectedCommitID)
+                let repositoryState = try await source.loadRepositoryState()
+                repositoryContext = repositoryState.commitContext
+                networkContext = repositoryState.networkContext
                 var preferences = settings.commitPreferences
                 preferences.lastCommitMessage = message
                 settings.saveCommitPreferences(preferences)
@@ -1693,7 +1702,7 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
 
                 if pushAfter {
                     openPush(
-                        snapshot: result.snapshot,
+                        context: networkContext,
                         forceWithLease: (wasAmend || historyWasSoftReset) && preferences.forceWithLeaseAfterAmend
                     )
                 }
@@ -1719,10 +1728,6 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
                 return
             } catch {
                 status.stringValue = error.localizedDescription
-                if let refreshed = try? await source.loadSnapshot() {
-                    currentSnapshot = refreshed
-                    onSnapshot(refreshed, nil)
-                }
                 await showOperationError(error, title: "Commit failed")
                 reloadChanges(preserveMessage: true)
             }
@@ -1818,8 +1823,8 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
         }
     }
 
-    private func openPush(snapshot: RepositorySnapshot?, forceWithLease: Bool) {
-        guard let source = pushSource, let snapshot else {
+    private func openPush(context: RepositoryNetworkContext?, forceWithLease: Bool) {
+        guard let source = pushSource, let context else {
             status.stringValue = "Push is unavailable for this repository."
             return
         }
@@ -1829,13 +1834,13 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
         }
         pushWindowController = PushDialog.present(
             source: source,
-            snapshot: snapshot,
-            initialBranch: snapshot.branches.first(where: \.isCurrent)?.name,
+            context: context,
+            initialBranch: context.branches.first(where: \.isCurrent)?.name,
             executeImmediately: true,
             initialForceWithLease: forceWithLease,
-            onSnapshot: { [weak self] snapshot, selected in
-                self?.currentSnapshot = snapshot
-                self?.onSnapshot(snapshot, selected)
+            onRepositoryChanged: { [weak self] selected in
+                self?.onRepositoryChanged(selected)
+                self?.reloadChanges(preserveMessage: true)
             },
             onCompletion: { [weak self] completed in
                 guard let self else { return }
@@ -1881,7 +1886,7 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
             guard await begin(alert, window: commitWindow) == .alertFirstButtonReturn else { actionTask = nil; return }
             do {
                 let result = try await source.resetChanges(RepositoryResetChangesRequest(scope: scope, deleteUntracked: clean.state == .on))
-                onSnapshot(result.snapshot, result.selectedCommitID)
+                onRepositoryChanged(result.selectedCommitID)
                 reloadChanges(preserveMessage: true)
             } catch { await showOperationError(error, title: "Reset failed") }
             actionTask = nil
@@ -1902,7 +1907,7 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
             guard await begin(alert, window: commitWindow) == .alertFirstButtonReturn else { actionTask = nil; return }
             do {
                 let result = try await source.resetSoftToParent()
-                onSnapshot(result.snapshot, result.selectedCommitID)
+                onRepositoryChanged(result.selectedCommitID)
                 historyWasSoftReset = true
                 amend.state = .off; selectedCommitMode = .normal; modeChanged()
                 reloadChanges(preserveMessage: true)
@@ -1933,7 +1938,7 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
         guard await begin(alert, window: window) == .alertFirstButtonReturn else { return false }
         do {
             let result = try await source.createBranch(named: field.stringValue)
-            onSnapshot(result.snapshot, result.selectedCommitID)
+            onRepositoryChanged(result.selectedCommitID)
             reloadChanges(preserveMessage: true)
             return true
         } catch {
@@ -1943,7 +1948,7 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
     }
 
     private func promptAndCheckoutBranch(window: NSWindow) async -> Bool {
-        let branches = (currentSnapshot?.branches ?? []).filter { !$0.isRemote }
+        let branches = (repositoryContext?.branches ?? []).filter { !$0.isRemote }
         guard !branches.isEmpty else { return await promptAndCreateBranch(window: window) }
         let alert = NSAlert()
         alert.messageText = "Checkout branch"
@@ -1957,7 +1962,7 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
               let name = popup.titleOfSelectedItem else { return false }
         do {
             let result = try await source.checkout(RepositoryCheckoutRequest(target: .localBranch(name), localChanges: .keep))
-            onSnapshot(result.snapshot, result.selectedCommitID)
+            onRepositoryChanged(result.selectedCommitID)
             reloadChanges(preserveMessage: true)
             return true
         } catch {
@@ -1970,9 +1975,8 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
         guard let commitWindow else { return }
         actionTask = Task { @MainActor [weak self, weak commitWindow] in
             guard let self, let commitWindow else { return }
-            if let snapshot = await WorkflowManagementDialogs.resolveConflicts(source: source, window: commitWindow) {
-                currentSnapshot = snapshot
-                onSnapshot(snapshot, nil)
+            if await WorkflowManagementDialogs.resolveConflicts(source: source, window: commitWindow) {
+                onRepositoryChanged(nil)
             }
             actionTask = nil
             reloadChanges(preserveMessage: true)
@@ -2022,7 +2026,7 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
         stashStagedButton.isEnabled = !busy && !staged.isEmpty
         resetUnstagedButton.isEnabled = !busy && !unstaged.isEmpty
         resetAllButton.isEnabled = !busy && (!unstaged.isEmpty || !staged.isEmpty)
-        let currentHead = currentSnapshot?.commits.first(where: \.isHEAD) ?? head
+        let currentHead = head
         resetSoftButton.isEnabled = !busy && currentHead?.parentIDs.isEmpty == false
         cancelButton.title = actionTask == nil ? "Cancel" : "Abort"
     }

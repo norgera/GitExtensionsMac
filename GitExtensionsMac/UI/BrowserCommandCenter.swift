@@ -1,4 +1,7 @@
+import GitExtensionsCore
+import GitCommands
 import AppKit
+
 import Combine
 
 extension Notification.Name {

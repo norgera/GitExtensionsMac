@@ -1,3 +1,5 @@
+import GitExtensionsCore
+import GitCommands
 import Foundation
 
 struct RevisionGraphLayout: Hashable, Sendable {
@@ -46,7 +48,7 @@ struct RevisionGraphLayout: Hashable, Sendable {
     }
 
     struct Row: Hashable, Sendable {
-        let commitID: String
+        let commitID: RevisionID
         let nodeLane: Int
         let nodeColorIndex: Int
         let laneCount: Int
@@ -80,8 +82,8 @@ private final class GraphBuilder {
     typealias Layout = RevisionGraphLayout
 
     private struct Segment: Hashable {
-        let childID: String
-        let parentID: String
+        let childID: RevisionID
+        let parentID: RevisionID
         let parentIndex: Int
     }
 
@@ -113,7 +115,7 @@ private final class GraphBuilder {
     }
 
     private final class RowState {
-        let revisionID: String
+        let revisionID: RevisionID
         let rowIndex: Int
         let segments: [Segment]
 
@@ -123,7 +125,7 @@ private final class GraphBuilder {
         private var gaps: Set<Int> = []
 
         init(
-            revisionID: String,
+            revisionID: RevisionID,
             rowIndex: Int,
             segments: [Segment],
             mergeCommonParents: Bool,
@@ -248,13 +250,13 @@ private final class GraphBuilder {
 
     private let commits: [Commit]
     private let configuration: Layout.Configuration
-    private let commitByID: [String: Commit]
-    private let visibleIDs: Set<String>
-    private let visibleParentsByID: [String: [String]]
-    private let rowIndexByID: [String: Int]
-    private let childCountByID: [String: Int]
-    private let segmentsByChildID: [String: [Segment]]
-    private let relativeIDs: Set<String>
+    private let commitByID: [RevisionID: Commit]
+    private let visibleIDs: Set<RevisionID>
+    private let visibleParentsByID: [RevisionID: [RevisionID]]
+    private let rowIndexByID: [RevisionID: Int]
+    private let childCountByID: [RevisionID: Int]
+    private let segmentsByChildID: [RevisionID: [Segment]]
+    private let relativeIDs: Set<RevisionID>
 
     private var colorBySegment: [Segment: SegmentColor] = [:]
     private var rows: [RowState] = []
@@ -266,15 +268,15 @@ private final class GraphBuilder {
         visibleIDs = Set(commits.map(\.id))
         rowIndexByID = Dictionary(uniqueKeysWithValues: commits.enumerated().map { ($0.element.id, $0.offset) })
 
-        var relatives: Set<String> = []
+        var relatives: Set<RevisionID> = []
         var pending = completeHistory.filter(\.isHEAD).map(\.id)
         while let id = pending.popLast() {
             guard relatives.insert(id).inserted else { continue }
-            pending.append(contentsOf: commitByID[id]?.parentIDs ?? [])
+            pending.append(contentsOf: commitByID[id]?.graphParentIDs ?? [])
         }
         relativeIDs = relatives
 
-        var parents: [String: [String]] = [:]
+        var parents: [RevisionID: [RevisionID]] = [:]
         for commit in commits {
             parents[commit.id] = Self.visibleParents(
                 of: commit,
@@ -284,13 +286,13 @@ private final class GraphBuilder {
         }
         visibleParentsByID = parents
 
-        var children: [String: Int] = [:]
+        var children: [RevisionID: Int] = [:]
         for parentIDs in parents.values {
             for parentID in parentIDs { children[parentID, default: 0] += 1 }
         }
         childCountByID = children
 
-        var segments: [String: [Segment]] = [:]
+        var segments: [RevisionID: [Segment]] = [:]
         for commit in commits {
             segments[commit.id] = (parents[commit.id] ?? []).enumerated().map {
                 Segment(childID: commit.id, parentID: $0.element, parentIndex: $0.offset)
@@ -407,14 +409,14 @@ private final class GraphBuilder {
         guard input.count > 1 else { return input }
 
         let endIndex = min(rowIndex + Self.orderSegmentsLookAhead, commits.count)
-        func relativeRow(of revisionID: String) -> Int {
+        func relativeRow(of revisionID: RevisionID) -> Int {
             guard let index = rowIndexByID[revisionID], index > rowIndex, index < endIndex else {
                 return Int.max
             }
             return index - rowIndex
         }
 
-        func isAncestor(_ ancestorID: String, of childID: String, stopRow: Int, visited: inout Set<String>) -> Bool {
+        func isAncestor(_ ancestorID: RevisionID, of childID: RevisionID, stopRow: Int, visited: inout Set<RevisionID>) -> Bool {
             guard visited.insert(childID).inserted else { return false }
             let parents = visibleParentsByID[childID] ?? []
             if parents.contains(ancestorID) { return true }
@@ -440,10 +442,10 @@ private final class GraphBuilder {
 
             if rowA != Int.max, rowB != Int.max {
                 if rowA > rowB {
-                    var visited: Set<String> = []
+                    var visited: Set<RevisionID> = []
                     if isAncestor(a.parentID, of: b.parentID, stopRow: rowA, visited: &visited) { return true }
                 } else if rowB > rowA {
-                    var visited: Set<String> = []
+                    var visited: Set<RevisionID> = []
                     if isAncestor(b.parentID, of: a.parentID, stopRow: rowB, visited: &visited) { return false }
                 }
             }
@@ -877,7 +879,7 @@ private final class GraphBuilder {
 
     private func makeColor(
         for segment: Segment,
-        startID: String,
+        startID: RevisionID,
         derivedFrom: Int?,
         left: Segment?,
         right: Segment?
@@ -897,38 +899,39 @@ private final class GraphBuilder {
 
     private static func visibleParents(
         of commit: Commit,
-        visibleIDs: Set<String>,
-        commitByID: [String: Commit]
-    ) -> [String] {
-        var result: [String] = []
-        var emitted: Set<String> = []
+        visibleIDs: Set<RevisionID>,
+        commitByID: [RevisionID: Commit]
+    ) -> [RevisionID] {
+        var result: [RevisionID] = []
+        var emitted: Set<RevisionID> = []
 
-        func appendVisibleAncestors(_ id: String, visited: inout Set<String>) {
+        func appendVisibleAncestors(_ id: RevisionID, visited: inout Set<RevisionID>) {
             guard visited.insert(id).inserted else { return }
             if visibleIDs.contains(id) {
                 if emitted.insert(id).inserted { result.append(id) }
                 return
             }
             guard let hiddenCommit = commitByID[id] else { return }
-            for parentID in hiddenCommit.parentIDs {
+            for parentID in hiddenCommit.graphParentIDs {
                 appendVisibleAncestors(parentID, visited: &visited)
             }
         }
 
-        for parentID in commit.parentIDs {
-            var visited: Set<String> = []
+        for parentID in commit.graphParentIDs {
+            var visited: Set<RevisionID> = []
             appendVisibleAncestors(parentID, visited: &visited)
         }
         return result
     }
 
-    private static func objectIDHash(_ objectID: String) -> Int32 {
-        let prefix = objectID.prefix(8)
+    private static func objectIDHash(_ revisionID: RevisionID) -> Int32 {
+        let valueString = revisionID.description
+        let prefix = valueString.prefix(8)
         guard prefix.count == 8,
               let value = UInt32(prefix, radix: 16)
         else {
             var value: UInt32 = 2_166_136_261
-            for byte in objectID.utf8 {
+            for byte in valueString.utf8 {
                 value ^= UInt32(byte)
                 value &*= 16_777_619
             }

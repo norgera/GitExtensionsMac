@@ -1,3 +1,6 @@
+@testable import GitExtensionsCore
+@testable import GitCommands
+@testable import GitUI
 import Foundation
 
 enum GitPushTests {
@@ -86,11 +89,11 @@ enum GitPushTests {
 
         let trackingState = RepositoryPushState(
             currentBranch: "topic",
-            headID: "1",
+            headID: testObjectID("1"),
             isBare: false,
             localBranches: [
-                RepositoryPushBranchState(name: "topic", objectID: "1", trackingRemote: nil, mergeWith: nil, ahead: 0, behind: 0),
-                RepositoryPushBranchState(name: "origin-copy", objectID: "1", trackingRemote: nil, mergeWith: nil, ahead: 0, behind: 0)
+                RepositoryPushBranchState(name: "topic", objectID: testObjectID("1"), trackingRemote: nil, mergeWith: nil, ahead: 0, behind: 0),
+                RepositoryPushBranchState(name: "origin-copy", objectID: testObjectID("1"), trackingRemote: nil, mergeWith: nil, ahead: 0, behind: 0)
             ],
             remoteBranches: [],
             tags: [],
@@ -113,8 +116,8 @@ enum GitPushTests {
         try fixture.git(["config", "--add", "remote.origin.push", "main:refs/heads/not-a-head-source"], in: repository)
         try fixture.git(["config", "remote.origin.prefix", "users/test/"], in: repository)
         try fixture.git(["config", "branch.autosetupmerge", "false"], in: repository)
-        let source = GitRepositoryBrowsingDataSource(repositoryURL: repository)
-        _ = try await source.loadSnapshot()
+        let source = GitRepositoryModule(repositoryURL: repository)
+        _ = try await source.loadRepositoryState()
         let state = try await source.loadPushState()
         let directRemoteBranches = try await source.loadPushRemoteBranches(named: "origin")
         try require(state.currentBranch == "main" && state.preferredRemoteName == "origin", "push state: current tracking remote is preferred")
@@ -132,8 +135,8 @@ enum GitPushTests {
         let fixture = try PullGitFixture.make()
         defer { fixture.remove() }
         let repository = try fixture.clone(named: "Normal push client")
-        let source = GitRepositoryBrowsingDataSource(repositoryURL: repository)
-        _ = try await source.loadSnapshot()
+        let source = GitRepositoryModule(repositoryURL: repository)
+        _ = try await source.loadRepositoryState()
         try fixture.commit("normal\n", path: "normal.txt", message: "Normal push", in: repository)
         let events = PushOutputRecorder()
         let normal = try await source.performPush(
@@ -146,7 +149,8 @@ enum GitPushTests {
         )
         try require(normal.outcome == .completed && !events.events.isEmpty, "normal push: completes and streams output")
         try require(try idsMatch("main", in: repository, remoteRef: "refs/heads/main", fixture: fixture), "normal push: bare remote receives the new commit")
-        let current = normal.snapshot.branches.first(where: \.isCurrent)
+        let stateAfterPush = try await source.loadRepositoryState()
+        let current = stateAfterPush.references.branches.first(where: \.isCurrent)
         try require(current?.ahead == 0 && current?.behind == 0, "normal push: refreshed remote-tracking and ahead/behind state are current")
 
         let alreadyCurrent = try await source.performPush(
@@ -187,8 +191,8 @@ enum GitPushTests {
         defer { fixture.remove() }
         let repository = try fixture.clone(named: "Remote and tag client")
         try fixture.git(["remote", "add", "upstream", fixture.upstreamURL.path], in: repository)
-        let source = GitRepositoryBrowsingDataSource(repositoryURL: repository)
-        _ = try await source.loadSnapshot()
+        let source = GitRepositoryModule(repositoryURL: repository)
+        _ = try await source.loadRepositoryState()
         try fixture.git(["checkout", "-b", "upstream-work"], in: repository)
         try fixture.commit("upstream\n", path: "upstream.txt", message: "Upstream push", in: repository)
         let upstream = try await source.performPush(
@@ -247,8 +251,8 @@ enum GitPushTests {
         try fixture.commit("local\n", path: "local.txt", message: "Local divergence", in: repository)
         try fixture.commit("peer\n", path: "peer.txt", message: "Peer divergence", in: peer)
         try fixture.git(["push", "origin", "main"], in: peer)
-        let source = GitRepositoryBrowsingDataSource(repositoryURL: repository)
-        _ = try await source.loadSnapshot()
+        let source = GitRepositoryModule(repositoryURL: repository)
+        _ = try await source.loadRepositoryState()
         let rejected = try await source.performPush(
             RepositoryPushRequest(destination: .remote("origin"), operation: .branch(source: "refs/heads/main", destination: "main"), recursiveSubmodules: .none),
             output: { _ in }
@@ -291,8 +295,8 @@ enum GitPushTests {
         try fixture.git(["push", "origin", "obsolete"], in: repository)
         try fixture.git(["config", "branch.obsolete.remote", "origin"], in: repository)
         try fixture.git(["config", "branch.obsolete.merge", "refs/heads/obsolete"], in: repository)
-        let source = GitRepositoryBrowsingDataSource(repositoryURL: repository)
-        _ = try await source.loadSnapshot()
+        let source = GitRepositoryModule(repositoryURL: repository)
+        _ = try await source.loadRepositoryState()
         try fixture.git(["config", "receive.denyDeletes", "true"], in: fixture.originURL)
         let remoteRejected = try await source.performPush(
             RepositoryPushRequest(
@@ -322,17 +326,19 @@ enum GitPushTests {
         try require(try fixture.refExists("refs/heads/created/one", in: fixture.originURL), "multiple branches: normal row creates destination")
         try require(try fixture.refExists("refs/heads/created/two", in: fixture.originURL), "multiple branches: force row creates destination")
         try require(!(try fixture.refExists("refs/heads/obsolete", in: fixture.originURL)), "multiple branches: delete row removes remote ref")
-        try require(!result.snapshot.branches.contains(where: { $0.isRemote && $0.remoteName == "origin" && $0.name == "obsolete" }), "multiple branches: refreshed snapshot removes remote-tracking ref")
-        let afterLocalDelete = try await source.deleteLocalTrackingBranches(["obsolete"], force: false)
-        try require(!afterLocalDelete.branches.contains(where: { !$0.isRemote && $0.name == "obsolete" }), "remote deletion: optional local tracking branch cleanup updates repository state")
+        let stateAfterRemoteDelete = try await source.loadRepositoryState()
+        try require(!stateAfterRemoteDelete.references.branches.contains(where: { $0.isRemote && $0.remoteName == "origin" && $0.name == "obsolete" }), "multiple branches: refreshed state removes remote-tracking ref")
+        try await source.deleteLocalTrackingBranches(["obsolete"], force: false)
+        let stateAfterLocalDelete = try await source.loadRepositoryState()
+        try require(!stateAfterLocalDelete.references.branches.contains(where: { !$0.isRemote && $0.name == "obsolete" }), "remote deletion: optional local tracking branch cleanup updates repository state")
     }
 
     private static func testDetachedAndValidationFailures() async throws {
         let fixture = try PullGitFixture.make()
         defer { fixture.remove() }
         let repository = try fixture.clone(named: "Push validation client")
-        let source = GitRepositoryBrowsingDataSource(repositoryURL: repository)
-        _ = try await source.loadSnapshot()
+        let source = GitRepositoryModule(repositoryURL: repository)
+        _ = try await source.loadRepositoryState()
         try fixture.git(["checkout", "--detach", "HEAD"], in: repository)
         let state = try await source.loadPushState()
         try require(state.isDetached, "detached HEAD: state is represented")
@@ -381,8 +387,8 @@ enum GitPushTests {
         let hook = fixture.originURL.appendingPathComponent("hooks/pre-receive")
         try fixture.write("#!/bin/sh\ntouch '\(marker.path)'\nsleep 10\n", to: hook)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: hook.path)
-        let source = GitRepositoryBrowsingDataSource(repositoryURL: repository)
-        _ = try await source.loadSnapshot()
+        let source = GitRepositoryModule(repositoryURL: repository)
+        _ = try await source.loadRepositoryState()
         let started = Date()
         let task = Task {
             try await source.performPush(

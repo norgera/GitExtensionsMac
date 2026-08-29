@@ -1,3 +1,5 @@
+import GitExtensionsCore
+import GitCommands
 import AppKit
 
 @MainActor
@@ -5,13 +7,13 @@ enum RemoteManagementDialog {
     static func present(
         source: any RepositoryRemoteManagingDataSource,
         selectedRemote: String? = nil,
-        onSnapshot: @escaping (RepositorySnapshot) -> Void,
+        onRepositoryChanged: @escaping () -> Void,
         onClose: @escaping () -> Void
     ) -> NSWindowController {
         let content = RemoteManagementViewController(
             source: source,
             selectedRemote: selectedRemote,
-            onSnapshot: onSnapshot
+            onRepositoryChanged: onRepositoryChanged
         )
         let window = NSWindow(contentViewController: content)
         window.title = "Remote repositories"
@@ -42,7 +44,7 @@ private final class RemoteManagementViewController: NSViewController, NSWindowDe
     var onClose: (() -> Void)?
     private let source: any RepositoryRemoteManagingDataSource
     private let preselectedRemote: String?
-    private let onSnapshot: (RepositorySnapshot) -> Void
+    private let onRepositoryChanged: () -> Void
     private var configurations: [RepositoryRemoteConfiguration] = []
     private var tracking: [RepositoryBranchTrackingConfiguration] = []
     private var remoteBranches: [String: [String]] = [:]
@@ -70,11 +72,11 @@ private final class RemoteManagementViewController: NSViewController, NSWindowDe
     init(
         source: any RepositoryRemoteManagingDataSource,
         selectedRemote: String?,
-        onSnapshot: @escaping (RepositorySnapshot) -> Void
+        onRepositoryChanged: @escaping () -> Void
     ) {
         self.source = source
         preselectedRemote = selectedRemote
-        self.onSnapshot = onSnapshot
+        self.onRepositoryChanged = onRepositoryChanged
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -266,11 +268,11 @@ private final class RemoteManagementViewController: NSViewController, NSWindowDe
             do {
                 async let remotes = source.loadRemoteConfigurations()
                 async let tracking = source.loadBranchTrackingConfigurations()
-                async let snapshot = source.loadSnapshot()
+                async let navigation = source.loadRepositoryState().navigation
                 configurations = try await remotes
                 self.tracking = try await tracking
-                let loadedSnapshot = try await snapshot
-                remoteBranches = Dictionary(uniqueKeysWithValues: loadedSnapshot.remotes.map { remote in
+                let loadedNavigation = try await navigation
+                remoteBranches = Dictionary(uniqueKeysWithValues: loadedNavigation.remotes.map { remote in
                     let prefix = remote.name + "/"
                     let names = remote.branches.map { branch in
                         branch.name.hasPrefix(prefix) ? String(branch.name.dropFirst(prefix.count)) : branch.name
@@ -402,15 +404,15 @@ private final class RemoteManagementViewController: NSViewController, NSWindowDe
         }
     }
 
-    private func mutate(_ message: String, preferredSelection: String? = nil, operation: @escaping @Sendable () async throws -> RepositorySnapshot) {
+    private func mutate(_ message: String, preferredSelection: String? = nil, operation: @escaping @Sendable () async throws -> Void) {
         task?.cancel()
         setBusy(true, text: message)
         let name = preferredSelection ?? nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         task = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
-                let snapshot = try await operation()
-                onSnapshot(snapshot)
+                try await operation()
+                onRepositoryChanged()
                 setBusy(false, text: "")
                 reload(selecting: name.isEmpty ? nil : name)
             } catch is CancellationError {

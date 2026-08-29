@@ -1,3 +1,5 @@
+import GitExtensionsCore
+import GitCommands
 import AppKit
 
 private final class NetworkHelpToggleButton: NSButton {
@@ -251,14 +253,14 @@ enum ApplicationShellDialogs {
     static func presentNetworkWindow(
         kind: NetworkOperationKind,
         initialAction: NetworkDialogInitialAction,
-        snapshot: RepositorySnapshot,
+        context: RepositoryNetworkContext,
         source: (any RepositoryRemoteManagingDataSource)?,
-        onSnapshot: @escaping (RepositorySnapshot) -> Void,
+        onRepositoryChanged: @escaping () -> Void,
         onClose: @escaping () -> Void
     ) -> NSWindowController {
-        let controller = NetworkDialogViewController(kind: kind, initialAction: initialAction, snapshot: snapshot, source: source, onSnapshot: onSnapshot)
+        let controller = NetworkDialogViewController(kind: kind, initialAction: initialAction, context: context, source: source, onRepositoryChanged: onRepositoryChanged)
         let window = NSWindow(contentViewController: controller)
-        window.title = "\(kind.rawValue) (\(snapshot.currentRepository.path))"
+        window.title = "\(kind.rawValue) (\(context.repository.path))"
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
         window.setContentSize(NSSize(width: kind == .push ? 760 : 920, height: kind == .push ? 500 : 620))
         window.minSize = NSSize(width: kind == .push ? 620 : 700, height: kind == .push ? 410 : 510)
@@ -324,9 +326,9 @@ private final class NetworkDialogViewController: NSViewController, NSWindowDeleg
     var onClose: (() -> Void)?
     private let kind: NetworkOperationKind
     private let initialAction: NetworkDialogInitialAction
-    private var snapshot: RepositorySnapshot
+    private var context: RepositoryNetworkContext
     private let source: (any RepositoryRemoteManagingDataSource)?
-    private let onSnapshot: (RepositorySnapshot) -> Void
+    private let onRepositoryChanged: () -> Void
     private var didClose = false
     private var remoteWindowController: NSWindowController?
     private var remoteBranchTask: Task<Void, Never>?
@@ -351,15 +353,15 @@ private final class NetworkDialogViewController: NSViewController, NSWindowDeleg
     init(
         kind: NetworkOperationKind,
         initialAction: NetworkDialogInitialAction,
-        snapshot: RepositorySnapshot,
+        context: RepositoryNetworkContext,
         source: (any RepositoryRemoteManagingDataSource)?,
-        onSnapshot: @escaping (RepositorySnapshot) -> Void
+        onRepositoryChanged: @escaping () -> Void
     ) {
         self.kind = kind
         self.initialAction = initialAction
-        self.snapshot = snapshot
+        self.context = context
         self.source = source
-        self.onSnapshot = onSnapshot
+        self.onRepositoryChanged = onRepositoryChanged
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -493,7 +495,7 @@ private final class NetworkDialogViewController: NSViewController, NSWindowDeleg
         remote.action = #selector(remoteChanged(_:))
         let initialRemote = initialAction == .fetchAll || initialAction == .fetchPruneAll ? "[ All ]" : preferredRemoteName()
         populateRemotes(selecting: initialRemote)
-        let url = NSTextField(string: snapshot.remotes.first?.fetchURL ?? "")
+        let url = NSTextField(string: context.remotes.first?.fetchURL ?? "")
         remoteURLField = url
         url.isEnabled = false
         let remoteChoice = NSButton(radioButtonWithTitle: "Remote", target: nil, action: nil)
@@ -512,12 +514,12 @@ private final class NetworkDialogViewController: NSViewController, NSWindowDeleg
         sourceGrid.rowSpacing = 6
         sourceGrid.columnSpacing = 8
 
-        let currentBranch = snapshot.branches.first(where: \.isCurrent)?.name ?? ""
+        let currentBranch = context.branches.first(where: \.isCurrent)?.name ?? ""
         let local = NSTextField(string: currentBranch)
         localBranchField = local
         let branches = NSPopUpButton()
         branchPopUp = branches
-        url.stringValue = snapshot.remotes.first(where: { $0.name == remote.titleOfSelectedItem })?.fetchURL ?? ""
+        url.stringValue = context.remotes.first(where: { $0.name == remote.titleOfSelectedItem })?.fetchURL ?? ""
         populateRemoteBranches()
         let branchGrid = NSGridView(views: [
             [rightLabel("Local branch"), local],
@@ -565,8 +567,8 @@ private final class NetworkDialogViewController: NSViewController, NSWindowDeleg
 
     private func makePushForm() -> NSView {
         let remote = NSPopUpButton()
-        remote.addItems(withTitles: snapshot.remotes.map(\.name).isEmpty ? ["origin"] : snapshot.remotes.map(\.name))
-        let currentBranch = snapshot.branches.first(where: \.isCurrent)?.name ?? ""
+        remote.addItems(withTitles: context.remotes.map(\.name).isEmpty ? ["origin"] : context.remotes.map(\.name))
+        let currentBranch = context.branches.first(where: \.isCurrent)?.name ?? ""
         let local = NSTextField(string: currentBranch)
         let remoteBranch = NSTextField(string: currentBranch)
         let grid = NSGridView(views: [
@@ -616,7 +618,7 @@ private final class NetworkDialogViewController: NSViewController, NSWindowDeleg
         }
         localBranchField?.isEnabled = sender === fetchMode
         if sender !== fetchMode {
-            localBranchField?.stringValue = snapshot.branches.first(where: \.isCurrent)?.name ?? ""
+            localBranchField?.stringValue = context.branches.first(where: \.isCurrent)?.name ?? ""
         }
         let isFetch = sender === fetchMode
         allTagsButton?.isEnabled = isFetch
@@ -629,7 +631,7 @@ private final class NetworkDialogViewController: NSViewController, NSWindowDeleg
         let effectiveKind: NetworkOperationKind = isFetch ? .fetch : .pull
         executeButton?.title = effectiveKind.rawValue
         executeButton?.image = AppKitFactory.resourceImage("Pull", accessibilityDescription: effectiveKind.rawValue)
-        view.window?.title = "\(effectiveKind.rawValue) (\(snapshot.currentRepository.path))"
+        view.window?.title = "\(effectiveKind.rawValue) (\(context.repository.path))"
         updateHelpImage()
     }
 
@@ -669,18 +671,18 @@ private final class NetworkDialogViewController: NSViewController, NSWindowDeleg
     }
 
     private func preferredRemoteName() -> String? {
-        let current = snapshot.branches.first(where: \.isCurrent)?.name
-        let tracking = snapshot.commits.lazy.flatMap(\.references).first {
+        let current = context.branches.first(where: \.isCurrent)?.name
+        let tracking = context.references.first {
             ($0.kind == .currentBranch || $0.kind == .localBranch) && $0.name == current
         }?.trackingRemote
-        return tracking ?? snapshot.remotes.first?.name
+        return tracking ?? context.remotes.first?.name
     }
 
     private func populateRemotes(selecting name: String?) {
         guard let remotePopUp else { return }
         remotePopUp.removeAllItems()
         remotePopUp.addItem(withTitle: "[ All ]")
-        remotePopUp.addItems(withTitles: snapshot.remotes.map(\.name))
+        remotePopUp.addItems(withTitles: context.remotes.map(\.name))
         if remotePopUp.numberOfItems == 0 { remotePopUp.addItem(withTitle: "[ All ]") }
         if let name { remotePopUp.selectItem(withTitle: name) }
         updateRemoteURL()
@@ -688,7 +690,7 @@ private final class NetworkDialogViewController: NSViewController, NSWindowDeleg
 
     private func updateRemoteURL() {
         let name = remotePopUp?.titleOfSelectedItem
-        remoteURLField?.stringValue = snapshot.remotes.first(where: { $0.name == name })?.fetchURL ?? ""
+        remoteURLField?.stringValue = context.remotes.first(where: { $0.name == name })?.fetchURL ?? ""
         let all = name == "[ All ]"
         mergeMode.isEnabled = !all
         rebaseMode.isEnabled = !all
@@ -699,14 +701,14 @@ private final class NetworkDialogViewController: NSViewController, NSWindowDeleg
     private func populateRemoteBranches(advertisedNames: [String]? = nil) {
         guard let branchPopUp else { return }
         let remoteName = remotePopUp?.titleOfSelectedItem
-        let currentBranch = snapshot.branches.first(where: \.isCurrent)?.name ?? ""
-        let trackedBranch = snapshot.commits.lazy.flatMap(\.references).first {
+        let currentBranch = context.branches.first(where: \.isCurrent)?.name ?? ""
+        let trackedBranch = context.references.first {
             ($0.kind == .currentBranch || $0.kind == .localBranch) && $0.name == currentBranch && $0.trackingRemote == remoteName
         }?.mergeWith
         branchPopUp.removeAllItems()
         if remoteName == "[ All ]" {
             branchPopUp.addItem(withTitle: "*")
-        } else if let remote = snapshot.remotes.first(where: { $0.name == remoteName }) {
+        } else if let remote = context.remotes.first(where: { $0.name == remoteName }) {
             let prefix = remote.name + "/"
             let cachedNames = remote.branches.map { branch in
                 branch.name.hasPrefix(prefix) ? String(branch.name.dropFirst(prefix.count)) : branch.name
@@ -769,10 +771,9 @@ private final class NetworkDialogViewController: NSViewController, NSWindowDeleg
         remoteWindowController = RemoteManagementDialog.present(
             source: source,
             selectedRemote: selectedName == "[ All ]" ? nil : selectedName,
-            onSnapshot: { [weak self] snapshot in
+            onRepositoryChanged: { [weak self] in
                 guard let self else { return }
-                self.snapshot = snapshot
-                self.onSnapshot(snapshot)
+                self.onRepositoryChanged()
                 self.populateRemotes(selecting: self.remotePopUp?.titleOfSelectedItem)
                 self.loadAdvertisedRemoteBranches()
             },

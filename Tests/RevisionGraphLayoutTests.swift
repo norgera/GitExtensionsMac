@@ -1,8 +1,57 @@
+@testable import GitExtensionsCore
+@testable import GitCommands
+@testable import GitUI
 import Foundation
+
+func testObjectID(_ label: String) -> ObjectID {
+    var words: [UInt32] = [2_166_136_261, 2_166_136_263, 2_166_136_269, 2_166_136_283, 2_166_136_301]
+    for byte in label.utf8 {
+        for index in words.indices {
+            words[index] ^= UInt32(byte) &+ UInt32(index)
+            words[index] &*= 16_777_619
+        }
+    }
+    let hexadecimal = words.map { String(format: "%08x", $0) }.joined()
+    return try! ObjectID.parse(hexadecimal)
+}
+
+func testRevisionID(_ label: String) -> RevisionID { .object(testObjectID(label)) }
 
 @main
 private enum RevisionGraphLayoutTests {
     static func main() async {
+        if CommandLine.arguments.contains("--architecture-h-only") {
+            ContextMenuStateTests.run()
+            RepositoryChangedNotifierTests.run()
+            print("ArchitectureHBoundaryTests: passed")
+            return
+        }
+        if CommandLine.arguments.contains("--object-id-only") {
+            testObjectIdentity()
+            testRevisionSelectionRestoration()
+            print("ObjectIDTests: passed")
+            return
+        }
+        if CommandLine.arguments.contains("--revision-reader-only") {
+            do {
+                testRevisionSelectionRestoration()
+                try await GitRepositoryModuleTests.runRevisionReader()
+                print("RevisionReaderTests: passed")
+            } catch {
+                fatalError("RevisionReaderTests failed: \(error.localizedDescription)")
+            }
+            return
+        }
+        if CommandLine.arguments.contains("--repository-state-only") {
+            do {
+                try await GitRepositoryModuleTests.run()
+                print("RepositoryStateTests: passed")
+            } catch {
+                fatalError("RepositoryStateTests failed: \(error.localizedDescription)")
+            }
+            return
+        }
+        testObjectIdentity()
         testLinearHistory()
         testRelativeGraphState()
         testRelativeTraversalContinuesAfterMergeDiamond()
@@ -21,8 +70,9 @@ private enum RevisionGraphLayoutTests {
         ContextMenuStateTests.run()
         RepositoryDetailModelTests.run()
         AppSettingsTests.run()
+        RepositoryChangedNotifierTests.run()
         do {
-            try await GitRepositoryBrowsingDataSourceTests.run()
+            try await GitRepositoryModuleTests.run()
             try await GitRepositoryMutationTests.runCheckout()
             try await GitRepositoryMutationTests.runStaging()
             try await GitRepositoryMutationTests.runCommitAndAmend()
@@ -40,7 +90,7 @@ private enum RevisionGraphLayoutTests {
                 )
             }
         } catch {
-            fatalError("GitRepositoryBrowsingDataSourceTests failed: \(error.localizedDescription)")
+            fatalError("GitRepositoryModuleTests failed: \(error.localizedDescription)")
         }
         print("RevisionGraphLayoutTests: passed")
     }
@@ -85,17 +135,17 @@ private enum RevisionGraphLayoutTests {
         let current = RevisionReference(id: "refs/heads/main", name: "main", kind: .currentBranch)
         let commits = [
             Commit(
-                id: "head", shortID: "head", subject: "head", body: "", authorName: "Test", authorEmail: "test@example.com",
+                id: testRevisionID("head"), shortID: "head", subject: "head", body: "", authorName: "Test", authorEmail: "test@example.com",
                 authorDate: .distantPast, committerName: "Test", committerEmail: "test@example.com", commitDate: .distantPast,
-                parentIDs: ["base"], references: [current]
+                parentIDs: [testObjectID("base")], references: [current]
             ),
             Commit(
-                id: "side", shortID: "side", subject: "side", body: "", authorName: "Test", authorEmail: "test@example.com",
+                id: testRevisionID("side"), shortID: "side", subject: "side", body: "", authorName: "Test", authorEmail: "test@example.com",
                 authorDate: .distantPast, committerName: "Test", committerEmail: "test@example.com", commitDate: .distantPast,
-                parentIDs: ["base"], references: []
+                parentIDs: [testObjectID("base")], references: []
             ),
             Commit(
-                id: "base", shortID: "base", subject: "base", body: "", authorName: "Test", authorEmail: "test@example.com",
+                id: testRevisionID("base"), shortID: "base", subject: "base", body: "", authorName: "Test", authorEmail: "test@example.com",
                 authorDate: .distantPast, committerName: "Test", committerEmail: "test@example.com", commitDate: .distantPast,
                 parentIDs: [], references: []
             )
@@ -113,9 +163,9 @@ private enum RevisionGraphLayoutTests {
         let current = RevisionReference(id: "refs/heads/main", name: "main", kind: .currentBranch)
         func commit(_ id: String, _ parents: [String], refs: [RevisionReference] = []) -> Commit {
             Commit(
-                id: id, shortID: id, subject: id, body: "", authorName: "Test", authorEmail: "test@example.com",
+                id: testRevisionID(id), shortID: id, subject: id, body: "", authorName: "Test", authorEmail: "test@example.com",
                 authorDate: .distantPast, committerName: "Test", committerEmail: "test@example.com", commitDate: .distantPast,
-                parentIDs: parents, references: refs
+                parentIDs: parents.map(testObjectID), references: refs
             )
         }
         let commits = [
@@ -310,6 +360,60 @@ private enum RevisionGraphLayoutTests {
         }, "octopus: no emitted geometry exceeds the cap")
     }
 
+    private static func testObjectIdentity() {
+        let sha1Text = "0123456789abcdef0123456789abcdef01234567"
+        let sha256Text = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        let sha1 = try! ObjectID.parse(sha1Text)
+        let sha256 = try! ObjectID.parse(sha256Text)
+        let sameSHA1 = try! ObjectID.parse(sha1Text)
+
+        expect(sha1.string == sha1Text, "object ID: SHA-1 round trips exactly")
+        expect(sha256.string == sha256Text, "object ID: SHA-256 round trips exactly")
+        expect(sha1 == sameSHA1, "object ID: equal hashes compare equally")
+        expect(Set([sha1, sameSHA1, sha256]).count == 2, "object ID: hashing follows object identity")
+        expect((try? ObjectID.parse("WORKTREE")) == nil, "object ID: artificial row names are rejected")
+        expect((try? ObjectID.parse(String(repeating: "a", count: 39))) == nil, "object ID: abbreviated hashes are rejected")
+        expect((try? ObjectID.parse(String(repeating: "A", count: 40))) == nil, "object ID: non-canonical uppercase hashes are rejected")
+
+        let parent = testObjectID("parent")
+        let referenceTarget = Branch(
+            id: "refs/heads/main",
+            name: "main",
+            commitID: sha1,
+            isCurrent: true,
+            isRemote: false,
+            remoteName: nil,
+            ahead: 0,
+            behind: 0
+        )
+        let revision = Commit(
+            id: .object(sha1),
+            shortID: sha1.shortString,
+            subject: "Typed revision",
+            body: "",
+            authorName: "Test",
+            authorEmail: "test@example.com",
+            authorDate: .distantPast,
+            committerName: "Test",
+            committerEmail: "test@example.com",
+            commitDate: .distantPast,
+            parentIDs: [parent],
+            references: []
+        )
+        expect(revision.objectID == sha1 && revision.parentIDs == [parent], "object ID: revisions and parents retain typed associations")
+        expect(referenceTarget.commitID == sha1, "object ID: ref targets retain typed associations")
+        expect(RevisionID.workingDirectory.objectID == nil, "object ID: Working directory has no Git object identity")
+        expect(RevisionID.index.objectID == nil, "object ID: Commit index has no Git object identity")
+        expect(RevisionID.workingDirectory != RevisionID.index, "object ID: artificial rows have distinct row identities")
+
+        let command = GitCommand(
+            arguments: ["show", "--format=", sha1.string],
+            accessesRemote: false,
+            changesRepositoryState: false
+        )
+        expect(command.arguments == ["show", "--format=", sha1Text], "object ID: Git argument conversion preserves the exact hash")
+    }
+
     private static func testRevisionSelectionRestoration() {
         let previous = history((0...600).map { index in
             ("r\(index)", index == 600 ? [] : ["r\(index + 1)"])
@@ -317,34 +421,34 @@ private enum RevisionGraphLayoutTests {
         let refreshed = previous
         expect(
             RevisionSelectionRestorer.restoredID(
-                requestedID: "r500",
+                requestedID: testRevisionID("r500"),
                 previousCommits: previous,
                 refreshedCommits: refreshed
-            ) == "r500",
+            ) == testRevisionID("r500"),
             "refresh retains an existing selection hundreds of rows down"
         )
 
-        let withoutSelected = refreshed.filter { $0.id != "r500" }
+        let withoutSelected = refreshed.filter { $0.id != testRevisionID("r500") }
         expect(
             RevisionSelectionRestorer.restoredID(
-                requestedID: "r500",
+                requestedID: testRevisionID("r500"),
                 previousCommits: previous,
                 refreshedCommits: withoutSelected
-            ) == "r501",
+            ) == testRevisionID("r501"),
             "missing selection falls back to its nearest surviving parent"
         )
 
         let head = Commit(
-            id: "new-head", shortID: "new", subject: "new", body: "", authorName: "Test", authorEmail: "test@example.com",
+            id: testRevisionID("new-head"), shortID: "new", subject: "new", body: "", authorName: "Test", authorEmail: "test@example.com",
             authorDate: .distantPast, committerName: "Test", committerEmail: "test@example.com", commitDate: .distantPast,
             parentIDs: [], references: [RevisionReference(id: "HEAD", name: "main", kind: .head)]
         )
         expect(
             RevisionSelectionRestorer.restoredID(
-                requestedID: "missing",
+                requestedID: testRevisionID("missing"),
                 previousCommits: [],
                 refreshedCommits: [head]
-            ) == "new-head",
+            ) == testRevisionID("new-head"),
             "unrelated missing selection falls back to checkout"
         )
     }
@@ -366,7 +470,7 @@ private enum RevisionGraphLayoutTests {
     private static func history(_ specs: [(String, [String])]) -> [Commit] {
         specs.enumerated().map { index, spec in
             Commit(
-                id: spec.0,
+                id: testRevisionID(spec.0),
                 shortID: spec.0,
                 subject: spec.0,
                 body: "",
@@ -376,7 +480,7 @@ private enum RevisionGraphLayoutTests {
                 committerName: "Test",
                 committerEmail: "test@example.com",
                 commitDate: Date(timeIntervalSince1970: TimeInterval(10_000 - index)),
-                parentIDs: spec.1,
+                parentIDs: spec.1.map(testObjectID),
                 references: []
             )
         }

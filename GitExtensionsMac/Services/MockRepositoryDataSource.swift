@@ -1,25 +1,37 @@
+import GitExtensionsCore
+import GitCommands
 import Foundation
 
 struct MockRepositoryDataSource: RepositoryBrowsingDataSource {
-    func loadSnapshot() async throws -> RepositorySnapshot {
-        Self.snapshot
+    func loadRepositoryState() async throws -> RepositoryLoadState {
+        RepositoryLoadState(
+            identity: Self.fixture.identity,
+            references: Self.fixture.references,
+            navigation: Self.fixture.navigation,
+            status: Self.fixture.status,
+            revisionReadRequest: Self.readRequest
+        )
+    }
+
+    func revisionReadRequest() async throws -> RevisionReadRequest {
+        Self.readRequest
     }
 
     func loadRevisionDetails(for commit: Commit) async throws -> RepositoryRevisionDetails {
         RepositoryRevisionDetails(
-            files: Self.snapshot.filesByCommit[commit.id] ?? [],
-            diffsByFile: Self.snapshot.diffsByFile,
+            files: Self.fixture.filesByCommit[commit.id] ?? [],
+            diffsByFile: Self.fixture.diffsByFile,
             repositoryFiles: [],
-            gpgInfo: Self.snapshot.gpgInfoByCommit[commit.id]
+            gpgInfo: Self.fixture.gpgInfoByCommit[commit.id]
         )
     }
 
     func loadRepositoryFiles(for commit: Commit) async throws -> [RepositoryFileEntry] {
-        Self.snapshot.repositoryFilesByCommit[commit.id] ?? []
+        Self.fixture.repositoryFilesByCommit[commit.id] ?? []
     }
 
     func loadDiff(for commit: Commit, file: ChangedFile) async throws -> FileDiff? {
-        Self.snapshot.diffsByFile[file.id]
+        Self.fixture.diffsByFile[file.id]
     }
 
     func loadFileContent(for commit: Commit, file: RepositoryFileEntry) async throws -> RepositoryFileEntry {
@@ -28,7 +40,31 @@ struct MockRepositoryDataSource: RepositoryBrowsingDataSource {
 }
 
 private extension MockRepositoryDataSource {
-    static let snapshot: RepositorySnapshot = {
+    struct Fixture {
+        let identity: RepositoryIdentityState
+        let references: RepositoryReferenceState
+        let navigation: RepositoryNavigationState
+        let status: RepositoryStatusSummary
+        let revisions: [Commit]
+        let filesByCommit: [RevisionID: [ChangedFile]]
+        let diffsByFile: [String: FileDiff]
+        let repositoryFilesByCommit: [RevisionID: [RepositoryFileEntry]]
+        let gpgInfoByCommit: [RevisionID: RevisionGPGInfo]
+    }
+
+    static var readRequest: RevisionReadRequest {
+        RevisionReadRequest(
+            context: RevisionReadContext(
+                stashes: [],
+                referencesByCommit: [:],
+                headID: fixture.identity.headID,
+                includeArtificial: true
+            ),
+            reader: RevisionReader(revisions: fixture.revisions)
+        )
+    }
+
+    static let fixture: Fixture = {
         let repository = Repository(
             id: "gitextensions",
             name: "gitextensions",
@@ -42,22 +78,27 @@ private extension MockRepositoryDataSource {
             Repository(id: "app", name: "GitExtensionsMac", path: "/example/GitExtensionsMac", description: "macOS implementation")
         ]
 
+        func objectID(_ token: String) -> ObjectID {
+            let suffix = token.hasPrefix("c") ? String(token.dropFirst()) : token
+            return try! ObjectID.parse(String(repeating: "0", count: 40 - suffix.count) + suffix)
+        }
+
         let branches = [
-            Branch(id: "refs/heads/main", name: "main", commitID: "c18", isCurrent: true, isRemote: false, remoteName: nil, ahead: 2, behind: 0),
-            Branch(id: "refs/heads/feature/command-palette", name: "feature/command-palette", commitID: "c14", isCurrent: false, isRemote: false, remoteName: nil, ahead: 3, behind: 1),
-            Branch(id: "refs/heads/release/7.2", name: "release/7.2", commitID: "c16", isCurrent: false, isRemote: false, remoteName: nil, ahead: 0, behind: 2),
-            Branch(id: "refs/heads/hotfix/diff-scroll", name: "hotfix/diff-scroll", commitID: "c10", isCurrent: false, isRemote: false, remoteName: nil, ahead: 1, behind: 5),
-            Branch(id: "refs/heads/maintenance", name: "maintenance", commitID: "c07", isCurrent: false, isRemote: false, remoteName: nil, ahead: 0, behind: 9)
+            Branch(id: "refs/heads/main", name: "main", commitID: objectID("c18"), isCurrent: true, isRemote: false, remoteName: nil, ahead: 2, behind: 0),
+            Branch(id: "refs/heads/feature/command-palette", name: "feature/command-palette", commitID: objectID("c14"), isCurrent: false, isRemote: false, remoteName: nil, ahead: 3, behind: 1),
+            Branch(id: "refs/heads/release/7.2", name: "release/7.2", commitID: objectID("c16"), isCurrent: false, isRemote: false, remoteName: nil, ahead: 0, behind: 2),
+            Branch(id: "refs/heads/hotfix/diff-scroll", name: "hotfix/diff-scroll", commitID: objectID("c10"), isCurrent: false, isRemote: false, remoteName: nil, ahead: 1, behind: 5),
+            Branch(id: "refs/heads/maintenance", name: "maintenance", commitID: objectID("c07"), isCurrent: false, isRemote: false, remoteName: nil, ahead: 0, behind: 9)
         ]
 
         let originBranches = [
-            Branch(id: "refs/remotes/origin/main", name: "main", commitID: "c17", isCurrent: false, isRemote: true, remoteName: "origin", ahead: 0, behind: 2),
-            Branch(id: "refs/remotes/origin/release/7.2", name: "release/7.2", commitID: "c16", isCurrent: false, isRemote: true, remoteName: "origin", ahead: 0, behind: 0),
-            Branch(id: "refs/remotes/origin/feature/command-palette", name: "feature/command-palette", commitID: "c14", isCurrent: false, isRemote: true, remoteName: "origin", ahead: 0, behind: 0)
+            Branch(id: "refs/remotes/origin/main", name: "main", commitID: objectID("c17"), isCurrent: false, isRemote: true, remoteName: "origin", ahead: 0, behind: 2),
+            Branch(id: "refs/remotes/origin/release/7.2", name: "release/7.2", commitID: objectID("c16"), isCurrent: false, isRemote: true, remoteName: "origin", ahead: 0, behind: 0),
+            Branch(id: "refs/remotes/origin/feature/command-palette", name: "feature/command-palette", commitID: objectID("c14"), isCurrent: false, isRemote: true, remoteName: "origin", ahead: 0, behind: 0)
         ]
         let upstreamBranches = [
-            Branch(id: "refs/remotes/upstream/main", name: "main", commitID: "c17", isCurrent: false, isRemote: true, remoteName: "upstream", ahead: 0, behind: 0),
-            Branch(id: "refs/remotes/upstream/release/7.1", name: "release/7.1", commitID: "c09", isCurrent: false, isRemote: true, remoteName: "upstream", ahead: 0, behind: 0)
+            Branch(id: "refs/remotes/upstream/main", name: "main", commitID: objectID("c17"), isCurrent: false, isRemote: true, remoteName: "upstream", ahead: 0, behind: 0),
+            Branch(id: "refs/remotes/upstream/release/7.1", name: "release/7.1", commitID: objectID("c09"), isCurrent: false, isRemote: true, remoteName: "upstream", ahead: 0, behind: 0)
         ]
         let remotes = [
             Remote(id: "origin", name: "origin", fetchURL: "https://github.com/example/gitextensions.git", branches: originBranches),
@@ -65,13 +106,13 @@ private extension MockRepositoryDataSource {
         ]
 
         let tags = [
-            Tag(id: "refs/tags/v7.2.0", name: "v7.2.0", commitID: "c16"),
-            Tag(id: "refs/tags/v7.1.0", name: "v7.1.0", commitID: "c09"),
-            Tag(id: "refs/tags/v7.0.1", name: "v7.0.1", commitID: "c04")
+            Tag(id: "refs/tags/v7.2.0", name: "v7.2.0", commitID: objectID("c16")),
+            Tag(id: "refs/tags/v7.1.0", name: "v7.1.0", commitID: objectID("c09")),
+            Tag(id: "refs/tags/v7.0.1", name: "v7.0.1", commitID: objectID("c04"))
         ]
         let stashes = [
-            Stash(id: "stash@{0}", selector: "stash@{0}", subject: "WIP on main: toolbar overflow", branchName: "main", commitID: "c18"),
-            Stash(id: "stash@{1}", selector: "stash@{1}", subject: "On release/7.2: translation updates", branchName: "release/7.2", commitID: "c16")
+            Stash(id: "stash@{0}", selector: "stash@{0}", subject: "WIP on main: toolbar overflow", branchName: "main", commitID: objectID("c18")),
+            Stash(id: "stash@{1}", selector: "stash@{1}", subject: "On release/7.2: translation updates", branchName: "release/7.2", commitID: objectID("c16"))
         ]
         let worktrees = [
             Worktree(id: "main-worktree", name: "gitextensions", path: repository.path, branchName: "main", isCurrent: true),
@@ -106,8 +147,8 @@ private extension MockRepositoryDataSource {
         ) -> Commit {
             let email = author.lowercased().replacingOccurrences(of: " ", with: ".") + "@example.com"
             return Commit(
-                id: id,
-                shortID: String("\(id)8cbe7c9f2fafe49163ac41e2e81b9e12".prefix(8)),
+                id: .object(objectID(id)),
+                shortID: objectID(id).shortString,
                 subject: subject,
                 body: body,
                 authorName: author,
@@ -116,7 +157,7 @@ private extension MockRepositoryDataSource {
                 committerName: author,
                 committerEmail: email,
                 commitDate: date(hoursAgo: hoursAgo),
-                parentIDs: parents,
+                parentIDs: parents.map(objectID),
                 references: refs
             )
         }
@@ -145,7 +186,7 @@ private extension MockRepositoryDataSource {
         let artificialAuthor = "John Doe"
         let artificialEmail = "john.doe@example.com"
         let workingDirectory = Commit(
-            id: "$working-directory",
+            id: .workingDirectory,
             shortID: "",
             subject: "Working directory",
             body: "",
@@ -155,12 +196,12 @@ private extension MockRepositoryDataSource {
             committerName: artificialAuthor,
             committerEmail: artificialEmail,
             commitDate: base,
-            parentIDs: ["$index"],
+            parentIDs: [],
             references: [],
             kind: .workingDirectory
         )
         let commitIndex = Commit(
-            id: "$index",
+            id: .index,
             shortID: "",
             subject: "Commit index",
             body: "",
@@ -170,7 +211,7 @@ private extension MockRepositoryDataSource {
             committerName: artificialAuthor,
             committerEmail: artificialEmail,
             commitDate: base,
-            parentIDs: ["c18"],
+            parentIDs: [objectID("c18")],
             references: [],
             kind: .index
         )
@@ -184,12 +225,12 @@ private extension MockRepositoryDataSource {
             ChangedFile(id: "tests", path: "tests/app/UnitTests/GitUI/CommandPaletteTests.cs", oldPath: nil, changeType: .added, additions: 87, deletions: 0)
         ]
 
-        var filesByCommit: [String: [ChangedFile]] = [:]
+        var filesByCommit: [RevisionID: [ChangedFile]] = [:]
         for (index, item) in commits.enumerated() {
             let count = max(1, min(files.count, (index % files.count) + 1))
             filesByCommit[item.id] = Array(files.prefix(count))
         }
-        filesByCommit["c18"] = files
+        filesByCommit[.object(objectID("c18"))] = files
         filesByCommit[workingDirectory.id] = []
         filesByCommit[commitIndex.id] = []
 
@@ -314,32 +355,32 @@ private extension MockRepositoryDataSource {
             )
         ]
 
-        var repositoryFilesByCommit: [String: [RepositoryFileEntry]] = [:]
+        var repositoryFilesByCommit: [RevisionID: [RepositoryFileEntry]] = [:]
         for (index, item) in commits.enumerated() {
             let omittedTailCount = min(index % 4, repositoryFiles.count - 8)
             repositoryFilesByCommit[item.id] = Array(repositoryFiles.dropLast(omittedTailCount))
         }
 
-        let gpgInfoByCommit: [String: RevisionGPGInfo] = [
-            "c18": RevisionGPGInfo(
+        let gpgInfoByCommit: [RevisionID: RevisionGPGInfo] = [
+            .object(objectID("c18")): RevisionGPGInfo(
                 commitStatus: .goodSignature,
                 commitVerificationMessage: "Good signature from Mara Klein <mara.klein@example.com>\nPrimary key fingerprint: A18F 93B2 0D44 7A10 2F66  14C8 61A0 4B3C 889D 721E",
                 tagStatus: .noTag,
                 tagVerificationMessage: nil
             ),
-            "c16": RevisionGPGInfo(
+            .object(objectID("c16")): RevisionGPGInfo(
                 commitStatus: .goodSignature,
                 commitVerificationMessage: "Good signature from Henrik Larsson <henrik.larsson@example.com>\nKey ID: 22D4E7B8923A1710",
                 tagStatus: .oneGood,
                 tagVerificationMessage: "Good signature on tag v7.2.0 from Git Extensions Release Signing Key"
             ),
-            "c09": RevisionGPGInfo(
+            .object(objectID("c09")): RevisionGPGInfo(
                 commitStatus: .missingPublicKey,
                 commitVerificationMessage: "Can't check signature: No public key\nKey ID: 12A40E918D71C0BF",
                 tagStatus: .missingPublicKey,
                 tagVerificationMessage: "Tag v7.1.0 is signed, but the public key is unavailable."
             ),
-            "c04": RevisionGPGInfo(
+            .object(objectID("c04")): RevisionGPGInfo(
                 commitStatus: .signatureError,
                 commitVerificationMessage: "BAD signature from an unknown release key",
                 tagStatus: .oneBad,
@@ -347,24 +388,37 @@ private extension MockRepositoryDataSource {
             )
         ]
 
-        return RepositorySnapshot(
+        let identity = RepositoryIdentityState(
             repositories: repositories,
             currentRepository: repository,
+            headID: objectID("c18")
+        )
+        let references = RepositoryReferenceState(
             branches: branches,
             tags: tags,
+            referencesByCommit: Dictionary(grouping: commits.flatMap { commit in
+                commit.objectID.map { objectID in commit.references.map { (objectID, $0) } } ?? []
+            }, by: \.0).mapValues { $0.map(\.1) }
+        )
+        let navigation = RepositoryNavigationState(
             remotes: remotes,
             stashes: stashes,
             worktrees: worktrees,
             submodules: [
                 Submodule(id: "externals/conemu-inside", name: "conemu-inside", path: "externals/conemu-inside", url: nil, commitID: nil, description: nil, state: .clean),
                 Submodule(id: "externals/Git.hub", name: "Git.hub", path: "externals/Git.hub", url: nil, commitID: nil, description: nil, state: .clean)
-            ],
-            commits: commits,
+            ]
+        )
+        return Fixture(
+            identity: identity,
+            references: references,
+            navigation: navigation,
+            status: RepositoryStatusSummary(workingDirectoryChangeCount: 3),
+            revisions: commits,
             filesByCommit: filesByCommit,
             diffsByFile: diffsByFile,
             repositoryFilesByCommit: repositoryFilesByCommit,
-            gpgInfoByCommit: gpgInfoByCommit,
-            workingDirectoryChangeCount: 3
+            gpgInfoByCommit: gpgInfoByCommit
         )
     }()
 }

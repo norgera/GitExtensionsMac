@@ -1,28 +1,29 @@
+import GitExtensionsCore
 import Foundation
 
-enum RepositoryPushDestination: Hashable, Sendable {
+package enum RepositoryPushDestination: Hashable, Sendable {
     case remote(String)
     case url(String)
 
-    var commandValue: String {
+    package var commandValue: String {
         switch self {
         case .remote(let value), .url(let value): value
         }
     }
 }
 
-enum RepositoryForcePushMode: String, Codable, CaseIterable, Sendable {
+package enum RepositoryForcePushMode: String, Codable, CaseIterable, Sendable {
     case doNotForce
     case force
     case forceWithLease
 }
 
-enum RepositoryPushSubmoduleMode: Int, Codable, CaseIterable, Sendable {
+package enum RepositoryPushSubmoduleMode: Int, Codable, CaseIterable, Sendable {
     case none = 0
     case check = 1
     case onDemand = 2
 
-    var title: String {
+    package var title: String {
         switch self {
         case .none: "None"
         case .check: "Check"
@@ -31,25 +32,25 @@ enum RepositoryPushSubmoduleMode: Int, Codable, CaseIterable, Sendable {
     }
 }
 
-enum RepositoryPushActionMode: String, Hashable, Sendable {
+package enum RepositoryPushActionMode: String, Hashable, Sendable {
     case push
     case force
     case delete
 }
 
-struct RepositoryPushAction: Hashable, Sendable {
-    let localBranch: String?
-    let remoteBranch: String
-    let mode: RepositoryPushActionMode
+package struct RepositoryPushAction: Hashable, Sendable {
+    package let localBranch: String?
+    package let remoteBranch: String
+    package let mode: RepositoryPushActionMode
 
-    init(localBranch: String?, remoteBranch: String, mode: RepositoryPushActionMode) {
+    package init(localBranch: String?, remoteBranch: String, mode: RepositoryPushActionMode) {
         self.localBranch = localBranch
         self.remoteBranch = remoteBranch
         self.mode = mode
     }
 }
 
-enum RepositoryPushOperation: Hashable, Sendable {
+package enum RepositoryPushOperation: Hashable, Sendable {
     case branch(source: String, destination: String?)
     case allBranches
     case tag(String)
@@ -57,15 +58,15 @@ enum RepositoryPushOperation: Hashable, Sendable {
     case multiple([RepositoryPushAction])
 }
 
-struct RepositoryPushRequest: Hashable, Sendable {
-    let destination: RepositoryPushDestination
-    let operation: RepositoryPushOperation
-    let force: RepositoryForcePushMode
-    let setUpstream: Bool
-    let recursiveSubmodules: RepositoryPushSubmoduleMode
-    let environment: [String: String]
+package struct RepositoryPushRequest: Hashable, Sendable {
+    package let destination: RepositoryPushDestination
+    package let operation: RepositoryPushOperation
+    package let force: RepositoryForcePushMode
+    package let setUpstream: Bool
+    package let recursiveSubmodules: RepositoryPushSubmoduleMode
+    package let environment: [String: String]
 
-    init(
+    package init(
         destination: RepositoryPushDestination,
         operation: RepositoryPushOperation,
         force: RepositoryForcePushMode = .doNotForce,
@@ -82,34 +83,34 @@ struct RepositoryPushRequest: Hashable, Sendable {
     }
 }
 
-struct RepositoryPushBranchState: Hashable, Sendable {
-    let name: String
-    let objectID: String
-    let trackingRemote: String?
-    let mergeWith: String?
-    let ahead: Int
-    let behind: Int
+package struct RepositoryPushBranchState: Hashable, Sendable {
+    package let name: String
+    package let objectID: ObjectID
+    package let trackingRemote: String?
+    package let mergeWith: String?
+    package let ahead: Int
+    package let behind: Int
 }
 
-struct RepositoryPushRemoteBranchState: Hashable, Sendable {
-    let remote: String
-    let name: String
-    let objectID: String
+package struct RepositoryPushRemoteBranchState: Hashable, Sendable {
+    package let remote: String
+    package let name: String
+    package let objectID: ObjectID
 }
 
-struct RepositoryPushState: Sendable {
-    let currentBranch: String?
-    let headID: String?
-    let isBare: Bool
-    let localBranches: [RepositoryPushBranchState]
-    let remoteBranches: [RepositoryPushRemoteBranchState]
-    let tags: [String]
-    let remotes: [RepositoryRemoteConfiguration]
-    let autoSetupMerge: Bool
+package struct RepositoryPushState: Sendable {
+    package let currentBranch: String?
+    package let headID: ObjectID?
+    package let isBare: Bool
+    package let localBranches: [RepositoryPushBranchState]
+    package let remoteBranches: [RepositoryPushRemoteBranchState]
+    package let tags: [String]
+    package let remotes: [RepositoryRemoteConfiguration]
+    package let autoSetupMerge: Bool
 
-    var isDetached: Bool { currentBranch == nil && headID != nil }
+    package var isDetached: Bool { currentBranch == nil && headID != nil }
 
-    var preferredRemoteName: String? {
+    package var preferredRemoteName: String? {
         if let currentBranch,
            let tracking = localBranches.first(where: { $0.name == currentBranch })?.trackingRemote,
            let remote = remotes.first(where: { !$0.isDisabled && $0.name.caseInsensitiveCompare(tracking) == .orderedSame }) {
@@ -121,7 +122,7 @@ struct RepositoryPushState: Sendable {
         return remotes.first(where: { !$0.isDisabled })?.name
     }
 
-    func commandSource(for value: String) -> String {
+    package func commandSource(for value: String) -> String {
         let value = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard value != "HEAD",
               !value.hasPrefix("refs/"),
@@ -130,7 +131,7 @@ struct RepositoryPushState: Sendable {
         return "refs/heads/" + value
     }
 
-    func defaultRemoteBranch(localBranch: String, remoteName: String) -> String {
+    package func defaultRemoteBranch(localBranch: String, remoteName: String) -> String {
         guard let remote = remotes.first(where: { !$0.isDisabled && $0.name == remoteName }) else {
             return localBranch
         }
@@ -146,7 +147,7 @@ struct RepositoryPushState: Sendable {
         return (remote.prefix ?? "") + localBranch
     }
 
-    func isBranchKnown(remote: String, branch: String) -> Bool {
+    package func isBranchKnown(remote: String, branch: String) -> Bool {
         if remoteBranches.contains(where: { $0.remote == remote && $0.name == branch }) {
             return true
         }
@@ -155,7 +156,7 @@ struct RepositoryPushState: Sendable {
         }
     }
 
-    func shouldOfferTrackingReference(for localBranch: String) -> Bool {
+    package func shouldOfferTrackingReference(for localBranch: String) -> Bool {
         guard autoSetupMerge,
               let local = localBranches.first(where: { $0.name == localBranch }),
               local.trackingRemote?.isEmpty != false
@@ -192,19 +193,18 @@ struct RepositoryPushState: Sendable {
     }
 }
 
-enum RepositoryPushOutcome: Equatable, Sendable {
+package enum RepositoryPushOutcome: Equatable, Sendable {
     case completed
     case rejected
     case failed
 }
 
-struct RepositoryPushResult: Sendable {
-    let snapshot: RepositorySnapshot
-    let selectedCommitID: String?
-    let outcome: RepositoryPushOutcome
-    let command: GitCommandResult
+package struct RepositoryPushResult: Sendable {
+    package let selectedCommitID: RevisionID?
+    package let outcome: RepositoryPushOutcome
+    package let command: GitCommandResult
 
-    var message: String {
+    package var message: String {
         let stderr = command.standardErrorString.trimmingCharacters(in: .whitespacesAndNewlines)
         let stdout = command.standardOutputString.trimmingCharacters(in: .whitespacesAndNewlines)
         if !stderr.isEmpty { return stderr }
@@ -216,14 +216,14 @@ struct RepositoryPushResult: Sendable {
         }
     }
 
-    var rejectionText: String? {
+    package var rejectionText: String? {
         guard outcome == .rejected else { return nil }
         let value = command.standardErrorString + command.standardOutputString
         return value.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 
-enum RepositoryPushError: LocalizedError, Equatable, Sendable {
+package enum RepositoryPushError: LocalizedError, Equatable, Sendable {
     case unavailable
     case missingDestination
     case missingRemote(String)
@@ -232,7 +232,7 @@ enum RepositoryPushError: LocalizedError, Equatable, Sendable {
     case missingTag
     case invalidRemoteBranch(String)
 
-    var errorDescription: String? {
+    package var errorDescription: String? {
         switch self {
         case .unavailable:
             "Push is unavailable because no repository is open."
@@ -252,7 +252,7 @@ enum RepositoryPushError: LocalizedError, Equatable, Sendable {
     }
 }
 
-protocol RepositoryPushingDataSource: RepositoryPullingDataSource {
+package protocol RepositoryPushingDataSource: RepositoryPullingDataSource {
     func loadPushState() async throws -> RepositoryPushState
     func loadPushRemoteBranches(named remoteName: String) async throws -> [RepositoryPushRemoteBranchState]
     func loadMergedRemoteBranches() async throws -> Set<String>
@@ -260,7 +260,7 @@ protocol RepositoryPushingDataSource: RepositoryPullingDataSource {
         _ request: RepositoryPushRequest,
         output: @escaping GitOutputHandler
     ) async throws -> RepositoryPushResult
-    func deleteLocalTrackingBranches(_ branches: [String], force: Bool) async throws -> RepositorySnapshot
+    func deleteLocalTrackingBranches(_ branches: [String], force: Bool) async throws
 }
 
 enum GitPushCommandBuilder {
@@ -341,8 +341,8 @@ enum GitPushCommandBuilder {
     }
 }
 
-enum RepositoryPullRequestURLBuilder {
-    static func url(remoteURL: String, branch: String) -> URL? {
+package enum RepositoryPullRequestURLBuilder {
+    package static func url(remoteURL: String, branch: String) -> URL? {
         let branch = branch.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !branch.isEmpty else { return nil }
         if let azure = azureURL(remoteURL: remoteURL, branch: branch) { return azure }
@@ -387,13 +387,13 @@ enum RepositoryPullRequestURLBuilder {
     }
 }
 
-extension GitRepositoryBrowsingDataSource: RepositoryPushingDataSource {
-    func loadPushState() async throws -> RepositoryPushState {
+extension GitRepositoryModule: RepositoryPushingDataSource {
+    package func loadPushState() async throws -> RepositoryPushState {
         guard let repository = resolvedRepository else { throw RepositoryPushError.unavailable }
-        let snapshot = try await loadSnapshot()
+        let state = try await loadRepositoryState()
         let remotes = try await loadRemoteConfigurations()
-        let references = snapshot.commits.lazy.flatMap(\.references)
-        let localBranches = snapshot.branches.filter { !$0.isRemote }.map { branch in
+        let references = state.references.references
+        let localBranches = state.references.branches.filter { !$0.isRemote }.map { branch in
             let reference = references.first {
                 ($0.kind == .currentBranch || $0.kind == .localBranch) && $0.name == branch.name
             }
@@ -406,33 +406,32 @@ extension GitRepositoryBrowsingDataSource: RepositoryPushingDataSource {
                 behind: branch.behind
             )
         }
-        let remoteBranches = snapshot.branches.compactMap { branch -> RepositoryPushRemoteBranchState? in
+        let remoteBranches = state.references.branches.compactMap { branch -> RepositoryPushRemoteBranchState? in
             guard branch.isRemote, let remote = branch.remoteName else { return nil }
             return RepositoryPushRemoteBranchState(remote: remote, name: branch.name, objectID: branch.commitID)
         }
         let autoSetupMerge = try await optionalPushConfig("branch.autosetupmerge", repository: repository)?
             .caseInsensitiveCompare("false") != .orderedSame
-        let head = snapshot.commits.first(where: \.isHEAD)
         return RepositoryPushState(
-            currentBranch: snapshot.branches.first(where: \.isCurrent)?.name,
-            headID: head?.id,
+            currentBranch: state.references.branches.first(where: \.isCurrent)?.name,
+            headID: state.identity.headID,
             isBare: repository.isBare,
             localBranches: localBranches,
             remoteBranches: remoteBranches,
-            tags: snapshot.tags.map(\.name),
+            tags: state.references.tags.map(\.name),
             remotes: remotes,
             autoSetupMerge: autoSetupMerge
         )
     }
 
-    func loadPushRemoteBranches(named remoteName: String) async throws -> [RepositoryPushRemoteBranchState] {
+    package func loadPushRemoteBranches(named remoteName: String) async throws -> [RepositoryPushRemoteBranchState] {
         guard let repository = resolvedRepository else { throw RepositoryPushError.unavailable }
         let remotes = try await loadRemoteConfigurations()
         guard remotes.contains(where: { !$0.isDisabled && $0.name == remoteName }) else {
             throw RepositoryPushError.missingRemote(remoteName)
         }
         let result = try await git.runStreaming(
-            arguments: ["ls-remote", "--heads", "--refs", remoteName],
+            GitCommand(arguments: ["ls-remote", "--heads", "--refs", remoteName], accessesRemote: true, changesRepositoryState: false),
             in: repository.rootURL,
             standardInput: nil,
             environment: [:],
@@ -454,11 +453,12 @@ extension GitRepositoryBrowsingDataSource: RepositoryPushingDataSource {
             else { return nil }
             let name = String(fields[1].dropFirst(prefix.count))
             guard !name.isEmpty else { return nil }
-            return RepositoryPushRemoteBranchState(remote: remoteName, name: name, objectID: String(fields[0]))
+            guard let objectID = try? ObjectID.parse(String(fields[0])) else { return nil }
+            return RepositoryPushRemoteBranchState(remote: remoteName, name: name, objectID: objectID)
         }.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
     }
 
-    func performPush(
+    package func performPush(
         _ request: RepositoryPushRequest,
         output: @escaping GitOutputHandler
     ) async throws -> RepositoryPushResult {
@@ -472,13 +472,12 @@ extension GitRepositoryBrowsingDataSource: RepositoryPushingDataSource {
         try await validateRemoteBranches(in: request, repository: repository)
         let arguments = try GitPushCommandBuilder.arguments(for: request)
         let command = try await git.runStreaming(
-            arguments: arguments,
+            GitCommand(arguments: arguments, accessesRemote: true, changesRepositoryState: false),
             in: repository.rootURL,
             standardInput: nil,
             environment: request.environment,
             output: output
         )
-        let snapshot = try await loadSnapshot()
         let outcome: RepositoryPushOutcome
         if command.succeeded {
             outcome = .completed
@@ -487,19 +486,18 @@ extension GitRepositoryBrowsingDataSource: RepositoryPushingDataSource {
         } else {
             outcome = .failed
         }
+        let selectedCommitID = try await loadPushState().headID
         return RepositoryPushResult(
-            snapshot: snapshot,
-            selectedCommitID: snapshot.commits.first(where: \.isHEAD)?.id
-                ?? snapshot.commits.first(where: { !$0.isArtificial })?.id,
+            selectedCommitID: selectedCommitID.map(RevisionID.object),
             outcome: outcome,
             command: command
         )
     }
 
-    func loadMergedRemoteBranches() async throws -> Set<String> {
+    package func loadMergedRemoteBranches() async throws -> Set<String> {
         guard let repository = resolvedRepository else { throw RepositoryPushError.unavailable }
         let result = try await git.run(
-            arguments: ["for-each-ref", "--merged=HEAD", "--format=%(refname:short)", "refs/remotes"],
+            GitCommand(arguments: ["for-each-ref", "--merged=HEAD", "--format=%(refname:short)", "refs/remotes"], accessesRemote: false, changesRepositoryState: false),
             in: repository.rootURL
         )
         guard result.succeeded else {
@@ -515,17 +513,17 @@ extension GitRepositoryBrowsingDataSource: RepositoryPushingDataSource {
             .filter { !$0.hasSuffix("/HEAD") })
     }
 
-    func deleteLocalTrackingBranches(_ branches: [String], force: Bool) async throws -> RepositorySnapshot {
+    package func deleteLocalTrackingBranches(_ branches: [String], force: Bool) async throws {
         guard let repository = resolvedRepository else { throw RepositoryPushError.unavailable }
         let names = branches
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
-        guard !names.isEmpty else { return try await loadSnapshot() }
+        guard !names.isEmpty else { return }
         for name in names {
-            let check = try await git.run(arguments: ["check-ref-format", "--branch", name], in: repository.rootURL)
+            let check = try await git.run(GitCommand(arguments: ["check-ref-format", "--branch", name], accessesRemote: false, changesRepositoryState: false), in: repository.rootURL)
             guard check.succeeded else { throw RepositoryPushError.invalidRemoteBranch(name) }
         }
-        let result = try await git.run(arguments: ["branch", force ? "-D" : "-d", "--"] + names, in: repository.rootURL)
+        let result = try await git.run(GitCommand(arguments: ["branch", force ? "-D" : "-d", "--"] + names, accessesRemote: false, changesRepositoryState: true), in: repository.rootURL)
         guard result.succeeded else {
             throw GitError.commandFailed(
                 arguments: result.arguments,
@@ -533,7 +531,6 @@ extension GitRepositoryBrowsingDataSource: RepositoryPushingDataSource {
                 stderr: result.standardErrorString.isEmpty ? result.standardOutputString : result.standardErrorString
             )
         }
-        return try await loadSnapshot()
     }
 
     private func validateRemoteBranches(
@@ -548,13 +545,13 @@ extension GitRepositoryBrowsingDataSource: RepositoryPushingDataSource {
         for branch in branches {
             let value = branch.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !value.isEmpty else { throw RepositoryPushError.missingRemoteBranch }
-            let check = try await git.run(arguments: ["check-ref-format", "--branch", value], in: repository.rootURL)
+            let check = try await git.run(GitCommand(arguments: ["check-ref-format", "--branch", value], accessesRemote: false, changesRepositoryState: false), in: repository.rootURL)
             guard check.succeeded else { throw RepositoryPushError.invalidRemoteBranch(value) }
         }
     }
 
     private func optionalPushConfig(_ key: String, repository: ResolvedGitRepository) async throws -> String? {
-        let result = try await git.run(arguments: ["config", "--get", key], in: repository.rootURL)
+        let result = try await git.run(GitCommand(arguments: ["config", "--get", key], accessesRemote: false, changesRepositoryState: false), in: repository.rootURL)
         if result.exitStatus == 1 { return nil }
         guard result.succeeded else {
             throw GitError.commandFailed(

@@ -1,7 +1,9 @@
+import GitExtensionsCore
+import GitCommands
 import AppKit
 
 final class CommitDetailViewController: NSViewController, NSMenuDelegate {
-    var onSelectRevision: ((String) -> Void)?
+    var onSelectRevision: ((ObjectID) -> Void)?
 
     private let documentView = FlippedView()
     private let stack = NSStackView()
@@ -140,8 +142,8 @@ final class CommitDetailViewController: NSViewController, NSMenuDelegate {
         authorDateValue.stringValue = Self.dateFormatter.string(from: commit.authorDate)
         committerValue.stringValue = "\(commit.committerName) <\(commit.committerEmail)>"
         commitDateValue.stringValue = Self.dateFormatter.string(from: commit.commitDate)
-        parentsValue.apply(revisions: relations.parentIDs.map { ($0, shortIDByID[$0] ?? $0) })
-        childrenValue.apply(revisions: relations.childIDs.map { ($0, shortIDByID[$0] ?? $0) })
+        parentsValue.apply(revisions: relations.parentIDs.map { ($0, shortIDByID[.object($0)] ?? $0.shortString) })
+        childrenValue.apply(revisions: relations.childIDs.map { ($0, shortIDByID[.object($0)] ?? $0.shortString) })
         branchesValue.stringValue = Self.joinedOrNone(relations.branchNames)
         tagsValue.stringValue = Self.joinedOrNone(relations.tagNames)
         subjectLabel.stringValue = commit.subject
@@ -222,7 +224,7 @@ class FlippedView: NSView {
 }
 
 private final class RevisionLinkListView: NSView {
-    var onSelectRevision: ((String) -> Void)?
+    var onSelectRevision: ((ObjectID) -> Void)?
 
     private let stack = NSStackView()
 
@@ -243,7 +245,7 @@ private final class RevisionLinkListView: NSView {
 
     required init?(coder: NSCoder) { nil }
 
-    func apply(revisions: [(id: String, title: String)]) {
+    func apply(revisions: [(id: ObjectID, title: String)]) {
         stack.arrangedSubviews.forEach {
             stack.removeArrangedSubview($0)
             $0.removeFromSuperview()
@@ -260,15 +262,16 @@ private final class RevisionLinkListView: NSView {
             button.font = .monospacedSystemFont(ofSize: 10.5, weight: .regular)
             button.contentTintColor = .linkColor
             button.toolTip = "Go to revision \(revision.title)"
-            button.identifier = NSUserInterfaceItemIdentifier(revision.id)
+            button.identifier = NSUserInterfaceItemIdentifier(revision.id.string)
             button.setButtonType(.momentaryChange)
             stack.addArrangedSubview(button)
         }
     }
 
     @objc private func selectRevision(_ sender: NSButton) {
-        guard let revisionID = sender.identifier?.rawValue else { return }
-        onSelectRevision?(revisionID)
+        guard let revisionID = sender.identifier?.rawValue,
+              let objectID = try? ObjectID.parse(revisionID) else { return }
+        onSelectRevision?(objectID)
     }
 
     private func valueLabel(_ value: String) -> NSTextField {

@@ -1,6 +1,7 @@
+import GitExtensionsCore
+import GitCommands
 import AppKit
 
-/// AppKit counterpart of Git Extensions' shared CommitSummaryUserControl.
 @MainActor
 final class CommitSummaryView: NSBox {
     private let subject = NSTextField(labelWithString: "")

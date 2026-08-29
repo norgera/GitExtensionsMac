@@ -1,17 +1,18 @@
+import GitExtensionsCore
 import Foundation
 
-enum RepositoryPullMode: String, Codable, CaseIterable, Sendable {
+package enum RepositoryPullMode: String, Codable, CaseIterable, Sendable {
     case merge
     case rebase
     case fetch
 }
 
-enum RepositoryPullSource: Hashable, Sendable {
+package enum RepositoryPullSource: Hashable, Sendable {
     case remote(String)
     case url(String)
     case allRemotes
 
-    var commandValue: String {
+    package var commandValue: String {
         switch self {
         case .remote(let name), .url(let name): name
         case .allRemotes: "--all"
@@ -19,27 +20,27 @@ enum RepositoryPullSource: Hashable, Sendable {
     }
 }
 
-enum RepositoryFetchTagMode: String, Codable, CaseIterable, Sendable {
+package enum RepositoryFetchTagMode: String, Codable, CaseIterable, Sendable {
     case followTagOption
     case noTags
     case allTags
 }
 
-struct RepositoryPullRequest: Sendable {
-    let source: RepositoryPullSource
-    let mode: RepositoryPullMode
-    let localBranch: String?
-    let remoteBranch: String?
-    let tagMode: RepositoryFetchTagMode
-    let unshallow: Bool
-    let prune: Bool
-    let pruneTags: Bool
-    let autoStash: Bool
-    let includeUntrackedInAutoStash: Bool
-    let updateSubmodulesAfterPull: Bool
-    let environment: [String: String]
+package struct RepositoryPullRequest: Sendable {
+    package let source: RepositoryPullSource
+    package let mode: RepositoryPullMode
+    package let localBranch: String?
+    package let remoteBranch: String?
+    package let tagMode: RepositoryFetchTagMode
+    package let unshallow: Bool
+    package let prune: Bool
+    package let pruneTags: Bool
+    package let autoStash: Bool
+    package let includeUntrackedInAutoStash: Bool
+    package let updateSubmodulesAfterPull: Bool
+    package let environment: [String: String]
 
-    init(
+    package init(
         source: RepositoryPullSource,
         mode: RepositoryPullMode,
         localBranch: String? = nil,
@@ -68,44 +69,43 @@ struct RepositoryPullRequest: Sendable {
     }
 }
 
-struct RepositoryPullState: Equatable, Sendable {
-    let currentBranch: String?
-    let headID: String?
-    let configuredRemote: String?
-    let configuredMergeBranch: String?
-    let isBare: Bool
-    let isShallow: Bool
-    let hasTrackedChanges: Bool
-    let hasUntrackedFiles: Bool
-    let conflictedPaths: [String]
-    let mergeInProgress: Bool
-    let rebaseInProgress: Bool
-    let cherryPickInProgress: Bool
+package struct RepositoryPullState: Equatable, Sendable {
+    package let currentBranch: String?
+    package let headID: ObjectID?
+    package let configuredRemote: String?
+    package let configuredMergeBranch: String?
+    package let isBare: Bool
+    package let isShallow: Bool
+    package let hasTrackedChanges: Bool
+    package let hasUntrackedFiles: Bool
+    package let conflictedPaths: [String]
+    package let mergeInProgress: Bool
+    package let rebaseInProgress: Bool
+    package let cherryPickInProgress: Bool
 
-    var isDetached: Bool { currentBranch == nil && headID != nil }
+    package var isDetached: Bool { currentBranch == nil && headID != nil }
 }
 
-enum RepositoryPullConflictKind: String, Equatable, Sendable {
+package enum RepositoryPullConflictKind: String, Equatable, Sendable {
     case merge
     case rebase
 }
 
-enum RepositoryPullOutcome: Equatable, Sendable {
+package enum RepositoryPullOutcome: Equatable, Sendable {
     case completed
     case conflicts(kind: RepositoryPullConflictKind, paths: [String])
     case failed
 }
 
-struct RepositoryPullResult: Sendable {
-    let snapshot: RepositorySnapshot
-    let selectedCommitID: String?
-    let outcome: RepositoryPullOutcome
-    let command: GitCommandResult
-    let followUpCommands: [GitCommandResult]
-    let automaticStashCreated: Bool
-    let suggestsRemotePrune: String?
+package struct RepositoryPullResult: Sendable {
+    package let selectedCommitID: RevisionID?
+    package let outcome: RepositoryPullOutcome
+    package let command: GitCommandResult
+    package let followUpCommands: [GitCommandResult]
+    package let automaticStashCreated: Bool
+    package let suggestsRemotePrune: String?
 
-    var message: String {
+    package var message: String {
         let reportedCommand = followUpCommands.first(where: { !$0.succeeded }) ?? command
         let stderr = reportedCommand.standardErrorString.trimmingCharacters(in: .whitespacesAndNewlines)
         let stdout = reportedCommand.standardOutputString.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -119,7 +119,7 @@ struct RepositoryPullResult: Sendable {
     }
 }
 
-enum RepositoryPullError: LocalizedError, Equatable, Sendable {
+package enum RepositoryPullError: LocalizedError, Equatable, Sendable {
     case unavailable
     case bareRepository
     case missingSource
@@ -130,7 +130,7 @@ enum RepositoryPullError: LocalizedError, Equatable, Sendable {
     case unresolvedConflicts([String])
     case operationInProgress(String)
 
-    var errorDescription: String? {
+    package var errorDescription: String? {
         switch self {
         case .unavailable:
             "Pull is unavailable because no repository is open."
@@ -154,7 +154,10 @@ enum RepositoryPullError: LocalizedError, Equatable, Sendable {
     }
 }
 
-protocol RepositoryPullingDataSource: RepositoryRemoteManagingDataSource, RepositoryMutatingDataSource {
+package protocol RepositoryPullingDataSource:
+    RepositoryRemoteManagingDataSource,
+    RepositoryCheckoutBranchDataSource,
+    RepositoryStashWorkflowDataSource {
     func loadPullState() async throws -> RepositoryPullState
     func hasUnpushedMergeCommit(remote: String, branch: String?) async throws -> Bool
     func pruneRemote(named remote: String, output: @escaping GitOutputHandler) async throws -> RepositoryPullResult
@@ -241,15 +244,17 @@ enum GitPullCommandBuilder {
     }
 }
 
-extension GitRepositoryBrowsingDataSource: RepositoryPullingDataSource {
-    func loadPullState() async throws -> RepositoryPullState {
+extension GitRepositoryModule: RepositoryPullingDataSource {
+    package func loadPullState() async throws -> RepositoryPullState {
         guard let repository = resolvedRepository else { throw RepositoryPullError.unavailable }
         let state: RepositoryMutationState
         if repository.isBare {
-            let head = try await git.run(arguments: ["rev-parse", "--verify", "HEAD"], in: repository.rootURL)
+            let head = try await git.run(GitCommand(arguments: ["rev-parse", "--verify", "HEAD"], accessesRemote: false, changesRepositoryState: false), in: repository.rootURL)
             state = RepositoryMutationState(
                 currentBranch: nil,
-                headID: head.succeeded ? head.standardOutputString.trimmingCharacters(in: .whitespacesAndNewlines) : nil,
+                headID: head.succeeded
+                    ? try ObjectID.parse(head.standardOutputString.trimmingCharacters(in: .whitespacesAndNewlines))
+                    : nil,
                 hasStagedChanges: false,
                 hasUnstagedChanges: false,
                 hasUntrackedFiles: false,
@@ -285,7 +290,7 @@ extension GitRepositoryBrowsingDataSource: RepositoryPullingDataSource {
         )
     }
 
-    func hasUnpushedMergeCommit(remote: String, branch: String?) async throws -> Bool {
+    package func hasUnpushedMergeCommit(remote: String, branch: String?) async throws -> Bool {
         guard let repository = resolvedRepository else { throw RepositoryPullError.unavailable }
         let state = try await loadPullState()
         guard let currentBranch = state.currentBranch else { return false }
@@ -295,30 +300,29 @@ extension GitRepositoryBrowsingDataSource: RepositoryPullingDataSource {
         guard let remoteBranch, !remoteBranch.isEmpty else { return false }
         let start = "\(remote)/\(remoteBranch)"
         let result = try await git.run(
-            arguments: ["rev-list", "--parents", "--no-walk", "--min-parents=2", "\(start)..\(currentBranch)"],
+            GitCommand(arguments: ["rev-list", "--parents", "--no-walk", "--min-parents=2", "\(start)..\(currentBranch)"], accessesRemote: false, changesRepositoryState: false),
             in: repository.rootURL
         )
         guard result.succeeded else { return false }
         return !result.standardOutputString.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines).isEmpty
     }
 
-    func pruneRemote(named remote: String, output: @escaping GitOutputHandler) async throws -> RepositoryPullResult {
+    package func pruneRemote(named remote: String, output: @escaping GitOutputHandler) async throws -> RepositoryPullResult {
         guard let repository = resolvedRepository else { throw RepositoryPullError.unavailable }
         let remotes = try await loadRemoteConfigurations()
         guard remotes.contains(where: { !$0.isDisabled && $0.name == remote }) else {
             throw RepositoryPullError.missingRemote(remote)
         }
         let command = try await git.runStreaming(
-            arguments: ["remote", "prune", remote],
+            GitCommand(arguments: ["remote", "prune", remote], accessesRemote: true, changesRepositoryState: true),
             in: repository.rootURL,
             standardInput: nil,
             environment: [:],
             output: output
         )
-        let snapshot = try await loadSnapshot()
+        let headID = try await loadPullState().headID
         return RepositoryPullResult(
-            snapshot: snapshot,
-            selectedCommitID: snapshot.commits.first(where: \.isHEAD)?.id,
+            selectedCommitID: headID.map(RevisionID.object),
             outcome: command.succeeded ? .completed : .failed,
             command: command,
             followUpCommands: [],
@@ -327,7 +331,7 @@ extension GitRepositoryBrowsingDataSource: RepositoryPullingDataSource {
         )
     }
 
-    func performPull(
+    package func performPull(
         _ request: RepositoryPullRequest,
         output: @escaping GitOutputHandler
     ) async throws -> RepositoryPullResult {
@@ -344,7 +348,7 @@ extension GitRepositoryBrowsingDataSource: RepositoryPullingDataSource {
             var stashArguments = ["stash"]
             if request.includeUntrackedInAutoStash { stashArguments.append("-u") }
             let stash = try await git.runStreaming(
-                arguments: stashArguments,
+                GitCommand(arguments: stashArguments, accessesRemote: false, changesRepositoryState: true),
                 in: repository.rootURL,
                 standardInput: nil,
                 environment: request.environment,
@@ -363,7 +367,7 @@ extension GitRepositoryBrowsingDataSource: RepositoryPullingDataSource {
             configureSubmoduleFetchJobs: submoduleJobs
         )
         let command = try await git.runStreaming(
-            arguments: arguments,
+            GitCommand(arguments: arguments, accessesRemote: true, changesRepositoryState: true),
             in: repository.rootURL,
             standardInput: nil,
             environment: request.environment,
@@ -376,7 +380,7 @@ extension GitRepositoryBrowsingDataSource: RepositoryPullingDataSource {
            request.updateSubmodulesAfterPull,
            FileManager.default.fileExists(atPath: repository.rootURL.appendingPathComponent(".gitmodules").path) {
             let submodules = try await git.runStreaming(
-                arguments: ["submodule", "update", "--init", "--recursive"],
+                GitCommand(arguments: ["submodule", "update", "--init", "--recursive"], accessesRemote: false, changesRepositoryState: true),
                 in: repository.rootURL,
                 standardInput: nil,
                 environment: request.environment,
@@ -395,11 +399,13 @@ extension GitRepositoryBrowsingDataSource: RepositoryPullingDataSource {
         } else {
             outcome = command.succeeded && followUpCommands.allSatisfy(\.succeeded) ? .completed : .failed
         }
-        let snapshot = try await loadSnapshot()
-        let selected = snapshot.commits.first(where: \.isHEAD)?.id
-            ?? snapshot.commits.first(where: { !$0.isArtificial })?.id
+        let selected: RevisionID?
+        if let after {
+            selected = after.headID.map(RevisionID.object)
+        } else {
+            selected = (try await loadPullState().headID).map(RevisionID.object)
+        }
         return RepositoryPullResult(
-            snapshot: snapshot,
             selectedCommitID: selected,
             outcome: outcome,
             command: command,
@@ -431,13 +437,13 @@ extension GitRepositoryBrowsingDataSource: RepositoryPullingDataSource {
         }
         if request.mode == .fetch,
            let local = GitPullCommandBuilder.normalizedLocalBranch(request.localBranch) {
-            let check = try await git.run(arguments: ["check-ref-format", "--branch", local], in: repository.rootURL)
+            let check = try await git.run(GitCommand(arguments: ["check-ref-format", "--branch", local], accessesRemote: false, changesRepositoryState: false), in: repository.rootURL)
             guard check.succeeded else { throw RepositoryPullError.invalidLocalBranch(local) }
         }
     }
 
     private func optionalConfig(_ key: String, repository: ResolvedGitRepository) async throws -> String? {
-        let result = try await git.run(arguments: ["config", "--get", key], in: repository.rootURL)
+        let result = try await git.run(GitCommand(arguments: ["config", "--get", key], accessesRemote: false, changesRepositoryState: false), in: repository.rootURL)
         guard result.exitStatus == 0 else {
             if result.exitStatus == 1 { return nil }
             throw commandError(result)
@@ -448,7 +454,7 @@ extension GitRepositoryBrowsingDataSource: RepositoryPullingDataSource {
 
     private func stashObjectID(repository: ResolvedGitRepository) async throws -> String? {
         let result = try await git.run(
-            arguments: ["rev-parse", "--verify", "--quiet", "refs/stash"],
+            GitCommand(arguments: ["rev-parse", "--verify", "--quiet", "refs/stash"], accessesRemote: false, changesRepositoryState: false),
             in: repository.rootURL
         )
         guard result.succeeded else { return nil }

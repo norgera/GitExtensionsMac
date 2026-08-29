@@ -1,18 +1,19 @@
+import GitExtensionsCore
 import Foundation
 
-struct RepositoryMergeRequest: Sendable {
-    let targets: [String]
-    let allowFastForward: Bool
-    let squash: Bool
-    let noCommit: Bool
-    let strategy: String?
-    let allowUnrelatedHistories: Bool
-    let message: String?
-    let logCount: Int?
-    let updateSubmodulesAfterMerge: Bool
-    let environment: [String: String]
+package struct RepositoryMergeRequest: Sendable {
+    package let targets: [String]
+    package let allowFastForward: Bool
+    package let squash: Bool
+    package let noCommit: Bool
+    package let strategy: String?
+    package let allowUnrelatedHistories: Bool
+    package let message: String?
+    package let logCount: Int?
+    package let updateSubmodulesAfterMerge: Bool
+    package let environment: [String: String]
 
-    init(
+    package init(
         targets: [String],
         allowFastForward: Bool = true,
         squash: Bool = false,
@@ -37,7 +38,7 @@ struct RepositoryMergeRequest: Sendable {
     }
 }
 
-enum RepositoryMergeOutcome: Equatable, Sendable {
+package enum RepositoryMergeOutcome: Equatable, Sendable {
     case completed
     case alreadyUpToDate
     case readyToCommit
@@ -45,14 +46,13 @@ enum RepositoryMergeOutcome: Equatable, Sendable {
     case failed
 }
 
-struct RepositoryMergeResult: Sendable {
-    let snapshot: RepositorySnapshot
-    let selectedCommitID: String?
-    let outcome: RepositoryMergeOutcome
-    let command: GitCommandResult
-    let followUpCommands: [GitCommandResult]
+package struct RepositoryMergeResult: Sendable {
+    package let selectedCommitID: RevisionID?
+    package let outcome: RepositoryMergeOutcome
+    package let command: GitCommandResult
+    package let followUpCommands: [GitCommandResult]
 
-    var message: String {
+    package var message: String {
         let displayedCommand = followUpCommands.first(where: { !$0.succeeded }) ?? command
         let stderr = displayedCommand.standardErrorString.trimmingCharacters(in: .whitespacesAndNewlines)
         let stdout = displayedCommand.standardOutputString.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -68,14 +68,14 @@ struct RepositoryMergeResult: Sendable {
     }
 }
 
-enum RepositoryMergeError: LocalizedError, Equatable, Sendable {
+package enum RepositoryMergeError: LocalizedError, Equatable, Sendable {
     case unavailable
     case bareRepository
     case missingTarget
     case unresolvedConflicts([String])
     case operationInProgress(String)
 
-    var errorDescription: String? {
+    package var errorDescription: String? {
         switch self {
         case .unavailable:
             "Merge is unavailable because no repository is open."
@@ -91,7 +91,7 @@ enum RepositoryMergeError: LocalizedError, Equatable, Sendable {
     }
 }
 
-protocol RepositoryMergingDataSource: RepositoryConflictResolutionDataSource {
+package protocol RepositoryMergingDataSource: RepositoryConflictResolutionDataSource {
     func performMerge(
         _ request: RepositoryMergeRequest,
         output: @escaping GitOutputHandler
@@ -122,8 +122,8 @@ enum GitMergeCommandBuilder {
     }
 }
 
-extension GitRepositoryBrowsingDataSource: RepositoryMergingDataSource {
-    func performMerge(
+extension GitRepositoryModule: RepositoryMergingDataSource {
+    package func performMerge(
         _ request: RepositoryMergeRequest,
         output: @escaping GitOutputHandler
     ) async throws -> RepositoryMergeResult {
@@ -139,7 +139,7 @@ extension GitRepositoryBrowsingDataSource: RepositoryMergingDataSource {
         let messageFile = try await writeMergeMessage(request.message, repository: repository)
         let arguments = try GitMergeCommandBuilder.arguments(for: request, messageFile: messageFile)
         let command = try await git.runStreaming(
-            arguments: arguments,
+            GitCommand(arguments: arguments, accessesRemote: false, changesRepositoryState: true),
             in: repository.rootURL,
             standardInput: nil,
             environment: request.environment,
@@ -153,7 +153,7 @@ extension GitRepositoryBrowsingDataSource: RepositoryMergingDataSource {
            request.updateSubmodulesAfterMerge,
            FileManager.default.fileExists(atPath: repository.rootURL.appendingPathComponent(".gitmodules").path) {
             let submodules = try await git.runStreaming(
-                arguments: ["submodule", "update", "--init", "--recursive"],
+                GitCommand(arguments: ["submodule", "update", "--init", "--recursive"], accessesRemote: false, changesRepositoryState: true),
                 in: repository.rootURL,
                 standardInput: nil,
                 environment: request.environment,
@@ -176,11 +176,8 @@ extension GitRepositoryBrowsingDataSource: RepositoryMergingDataSource {
             outcome = command.succeeded && followUpCommands.allSatisfy(\.succeeded) ? .completed : .failed
         }
 
-        let snapshot = try await loadSnapshot()
         return RepositoryMergeResult(
-            snapshot: snapshot,
-            selectedCommitID: snapshot.commits.first(where: \.isHEAD)?.id
-                ?? snapshot.commits.first(where: { !$0.isArtificial })?.id,
+            selectedCommitID: after.headID.map(RevisionID.object),
             outcome: outcome,
             command: command,
             followUpCommands: followUpCommands
@@ -193,7 +190,11 @@ extension GitRepositoryBrowsingDataSource: RepositoryMergingDataSource {
     ) async throws -> String? {
         guard let message else { return nil }
         let configured = try await git.run(
-            arguments: ["config", "--get", "i18n.commitEncoding"],
+            GitCommand(
+                arguments: ["config", "--get", "i18n.commitEncoding"],
+                accessesRemote: false,
+                changesRepositoryState: false
+            ),
             in: repository.rootURL
         )
         let encodingName = configured.succeeded

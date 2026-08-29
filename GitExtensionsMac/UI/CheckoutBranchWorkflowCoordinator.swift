@@ -1,3 +1,5 @@
+import GitExtensionsCore
+import GitCommands
 import AppKit
 
 @MainActor
@@ -6,8 +8,9 @@ final class CheckoutBranchWorkflowCoordinator {
     private let stashSource: (any RepositoryStashDataSource)?
     private let pullSource: (any RepositoryPullingDataSource)?
     private weak var owner: NSWindow?
-    private var snapshot: RepositorySnapshot
-    private let onSnapshot: (RepositorySnapshot, String?) -> Void
+    private var context: RepositoryBranchContext
+    private let revisions: [Commit]
+    private let onRepositoryChanged: (RevisionID?) -> Void
     private let onStatus: (String) -> Void
     private let onConflicts: () -> Void
     private var task: Task<Void, Never>?
@@ -16,18 +19,20 @@ final class CheckoutBranchWorkflowCoordinator {
         source: any RepositoryCheckoutBranchDataSource,
         stashSource: (any RepositoryStashDataSource)?,
         pullSource: (any RepositoryPullingDataSource)?,
-        snapshot: RepositorySnapshot,
+        context: RepositoryBranchContext,
+        revisions: [Commit],
         owner: NSWindow,
-        onSnapshot: @escaping (RepositorySnapshot, String?) -> Void,
+        onRepositoryChanged: @escaping (RevisionID?) -> Void,
         onStatus: @escaping (String) -> Void,
         onConflicts: @escaping () -> Void
     ) {
         self.source = source
         self.stashSource = stashSource
         self.pullSource = pullSource
-        self.snapshot = snapshot
+        self.context = context
+        self.revisions = revisions
         self.owner = owner
-        self.onSnapshot = onSnapshot
+        self.onRepositoryChanged = onRepositoryChanged
         self.onStatus = onStatus
         self.onConflicts = onConflicts
     }
@@ -42,9 +47,9 @@ final class CheckoutBranchWorkflowCoordinator {
     }
 
     func checkoutBranch(initialTarget: CheckoutDialogTarget?, confirmDirectCheckout: Bool = false) {
-        guard !snapshot.currentRepository.isBare, let owner else { return }
-        let startingSnapshot = snapshot
-        let previousSelection = startingSnapshot.commits.first(where: \.isHEAD)?.id
+        guard !context.repository.isBare, let owner else { return }
+        let startingContext = context
+        let previousSelection = startingContext.headID.map(RevisionID.object)
         replaceTask { [weak self, weak owner] in
             guard let self, let owner else { return }
             do {
@@ -85,7 +90,8 @@ final class CheckoutBranchWorkflowCoordinator {
                 } else {
                     draft = await CheckoutBranchDialogs.checkoutBranch(
                         source: source,
-                        snapshot: startingSnapshot,
+                        context: startingContext,
+                        revisions: revisions,
                         state: state,
                         initialTarget: initialTarget,
                         updateSubmodules: false,
@@ -93,7 +99,7 @@ final class CheckoutBranchWorkflowCoordinator {
                     )
                 }
                 guard let draft else { onStatus("Checkout cancelled"); return }
-                guard await confirmRemoteResetIfNeeded(draft.request, snapshot: startingSnapshot, owner: owner) else {
+                guard await confirmRemoteResetIfNeeded(draft.request, context: startingContext, owner: owner) else {
                     onStatus("Checkout cancelled")
                     return
                 }
@@ -101,8 +107,8 @@ final class CheckoutBranchWorkflowCoordinator {
                 onStatus("Checking out…")
                 var result = try await source.checkout(draft.request)
                 guard !Task.isCancelled else { return }
-                publish(result.snapshot, selected: result.selectedCommitID)
-                result = try await updateSubmodulesIfRequested(result, previousSnapshot: startingSnapshot, owner: owner)
+                await publish(selected: result.selectedCommitID)
+                result = try await updateSubmodulesIfRequested(result, previousContext: startingContext, owner: owner)
 
                 if draft.needsAutoPopPrompt,
                    case .stash = draft.request.localChanges,
@@ -110,7 +116,7 @@ final class CheckoutBranchWorkflowCoordinator {
                    let stashSource {
                     onStatus("Reapplying stashed changes…")
                     result = try await stashSource.popStash(nil)
-                    publish(result.snapshot, selected: result.selectedCommitID)
+                    await publish(selected: result.selectedCommitID)
                 }
                 present(result)
             } catch is CancellationError {
@@ -124,14 +130,14 @@ final class CheckoutBranchWorkflowCoordinator {
     }
 
     func checkoutRevision(_ commit: Commit) {
-        guard !snapshot.currentRepository.isBare, !commit.isArtificial, let owner else { return }
-        let startingSnapshot = snapshot
-        let previousSelection = startingSnapshot.commits.first(where: \.isHEAD)?.id
+        guard !context.repository.isBare, !commit.isArtificial, let owner else { return }
+        let startingContext = context
+        let previousSelection = startingContext.headID.map(RevisionID.object)
         replaceTask { [weak self, weak owner] in
             guard let self, let owner else { return }
             guard let request = await CheckoutBranchDialogs.checkoutRevision(
                 commit: commit,
-                snapshot: startingSnapshot,
+                revisions: revisions,
                 source: source,
                 updateSubmodules: false,
                 owner: owner
@@ -140,8 +146,8 @@ final class CheckoutBranchWorkflowCoordinator {
                 onStatus("Checking out \(commit.shortID)…")
                 var result = try await source.checkout(request)
                 guard !Task.isCancelled else { return }
-                publish(result.snapshot, selected: result.selectedCommitID)
-                result = try await updateSubmodulesIfRequested(result, previousSnapshot: startingSnapshot, owner: owner)
+                await publish(selected: result.selectedCommitID)
+                result = try await updateSubmodulesIfRequested(result, previousContext: startingContext, owner: owner)
                 present(result)
             } catch is CancellationError {
                 return
@@ -154,16 +160,17 @@ final class CheckoutBranchWorkflowCoordinator {
     }
 
     func createBranch(sourceRevision: Commit?, suggestedPrefix: String? = nil) {
-        guard !snapshot.currentRepository.isBare, sourceRevision?.isArtificial != true, let owner else { return }
-        let startingSnapshot = snapshot
-        let previousSelection = startingSnapshot.commits.first(where: \.isHEAD)?.id
+        guard !context.repository.isBare, sourceRevision?.isArtificial != true, let owner else { return }
+        let startingContext = context
+        let previousSelection = startingContext.headID.map(RevisionID.object)
         replaceTask { [weak self, weak owner] in
             guard let self, let owner else { return }
             do {
                 let state = try await source.loadMutationState()
                 guard let request = await CheckoutBranchDialogs.createBranch(
                     source: source,
-                    snapshot: startingSnapshot,
+                    context: startingContext,
+                    revisions: revisions,
                     sourceRevision: sourceRevision,
                     suggestedPrefix: suggestedPrefix,
                     isUnbornRepository: state.headID == nil,
@@ -173,9 +180,9 @@ final class CheckoutBranchWorkflowCoordinator {
                 onStatus("Creating branch…")
                 var result = try await source.createBranch(request)
                 guard !Task.isCancelled else { return }
-                publish(result.snapshot, selected: result.selectedCommitID ?? previousSelection)
+                await publish(selected: result.selectedCommitID ?? previousSelection)
                 if request.checkoutAfterCreation {
-                    result = try await updateSubmodulesIfRequested(result, previousSnapshot: startingSnapshot, owner: owner)
+                    result = try await updateSubmodulesIfRequested(result, previousContext: startingContext, owner: owner)
                 }
                 onStatus(result.message)
             } catch is CancellationError {
@@ -189,13 +196,13 @@ final class CheckoutBranchWorkflowCoordinator {
     }
 
     func deleteBranches(initiallySelected: [String]) {
-        guard !snapshot.currentRepository.isBare, let owner else { return }
-        let startingSnapshot = snapshot
-        let previousSelection = startingSnapshot.commits.first(where: \.isHEAD)?.id
+        guard !context.repository.isBare, let owner else { return }
+        let startingContext = context
+        let previousSelection = startingContext.headID.map(RevisionID.object)
         replaceTask { [weak self, weak owner] in
             guard let self, let owner else { return }
             guard let names = await CheckoutBranchDialogs.deleteBranches(
-                availableBranches: startingSnapshot.branches,
+                availableBranches: startingContext.branches,
                 initiallySelected: initiallySelected,
                 owner: owner
             ) else { onStatus("Delete branch cancelled"); return }
@@ -237,7 +244,7 @@ final class CheckoutBranchWorkflowCoordinator {
                     removeLinkedWorktrees: removeLinkedWorktrees
                 ))
                 guard !Task.isCancelled else { return }
-                publish(result.snapshot, selected: previousSelection)
+                await publish(selected: previousSelection)
                 onStatus(result.message)
             } catch is CancellationError {
                 return
@@ -251,11 +258,11 @@ final class CheckoutBranchWorkflowCoordinator {
 
     func renameBranch(_ name: String) {
         guard let owner else { return }
-        let startingSnapshot = snapshot
-        let previousSelection = startingSnapshot.commits.first(where: \.isHEAD)?.id
+        let startingContext = context
+        let previousSelection = startingContext.headID.map(RevisionID.object)
         replaceTask { [weak self, weak owner] in
             guard let self, let owner else { return }
-            let names = Set(startingSnapshot.branches.filter { !$0.isRemote }.map(\.name))
+            let names = Set(startingContext.branches.filter { !$0.isRemote }.map(\.name))
             guard let request = await CheckoutBranchDialogs.renameBranch(
                 name: name,
                 existingNames: names,
@@ -266,7 +273,7 @@ final class CheckoutBranchWorkflowCoordinator {
                 onStatus("Renaming branch…")
                 let result = try await source.renameBranch(request)
                 guard !Task.isCancelled else { return }
-                publish(result.snapshot, selected: previousSelection)
+                await publish(selected: previousSelection)
                 onStatus(result.message)
             } catch is CancellationError {
                 return
@@ -280,7 +287,7 @@ final class CheckoutBranchWorkflowCoordinator {
 
     func fetchRemoteBranch(_ branch: Branch, then followUp: CheckoutBranchFetchFollowUp) {
         guard let pullSource, let remote = branch.remoteName, let owner else { return }
-        let previousSelection = snapshot.commits.first(where: \.isHEAD)?.id
+        let previousSelection = context.headID.map(RevisionID.object)
         replaceTask { [weak self, weak owner] in
             guard let self, let owner else { return }
             do {
@@ -291,21 +298,26 @@ final class CheckoutBranchWorkflowCoordinator {
                     remoteBranch: branch.name
                 )) { _ in }
                 guard !Task.isCancelled else { return }
-                publish(result.snapshot, selected: previousSelection)
+                await publish(selected: previousSelection)
                 guard result.outcome == .completed else {
                     onStatus(result.message)
                     await showInformation(result.message, title: "Fetch failed", owner: owner)
                     return
                 }
                 onStatus(result.message)
-                let refreshed = result.snapshot.remotes
+                let refreshedContext = try await source.loadRepositoryState().branchContext
+                context = refreshedContext
+                let refreshed = refreshedContext.remotes
                     .first(where: { $0.name == remote })?
                     .branches.first(where: { $0.name == branch.name }) ?? branch
                 switch followUp {
                 case .none: break
                 case .checkout: checkout(.remote(refreshed), confirmDirectCheckout: true)
                 case .create:
-                    createBranch(sourceRevision: result.snapshot.commits.first { $0.id == refreshed.commitID })
+                    createBranch(
+                        sourceRevision: revisions.first { $0.id == .object(refreshed.commitID) }
+                            ?? RevisionCommitBuilder.placeholderRevision(id: refreshed.commitID)
+                    )
                 }
             } catch is CancellationError {
                 return
@@ -321,14 +333,17 @@ final class CheckoutBranchWorkflowCoordinator {
         task = Task { @MainActor in await operation() }
     }
 
-    private func publish(_ updated: RepositorySnapshot, selected: String?) {
-        snapshot = updated
-        onSnapshot(updated, selected)
+    private func publish(selected: RevisionID?) async {
+        if let refreshed = try? await source.loadRepositoryState().branchContext, !Task.isCancelled {
+            context = refreshed
+        }
+        onRepositoryChanged(selected)
     }
 
-    private func refreshAfterFailure(previousSelection: String?) async {
-        guard let refreshed = try? await source.loadSnapshot(), !Task.isCancelled else { return }
-        publish(refreshed, selected: previousSelection)
+    private func refreshAfterFailure(previousSelection: RevisionID?) async {
+        guard let refreshed = try? await source.loadRepositoryState().branchContext, !Task.isCancelled else { return }
+        context = refreshed
+        onRepositoryChanged(previousSelection)
     }
 
     private func checkoutAction(
@@ -359,13 +374,13 @@ final class CheckoutBranchWorkflowCoordinator {
 
     private func confirmRemoteResetIfNeeded(
         _ request: RepositoryCheckoutRequest,
-        snapshot: RepositorySnapshot,
+        context: RepositoryBranchContext,
         owner: NSWindow
     ) async -> Bool {
         guard case .remoteBranch(let remote, let branch, let mode) = request.target,
               case .resetTracking(let localName) = mode,
-              let local = snapshot.branches.first(where: { !$0.isRemote && $0.name == localName }),
-              let remoteBranch = snapshot.remotes
+              let local = context.branches.first(where: { !$0.isRemote && $0.name == localName }),
+              let remoteBranch = context.remotes
                   .first(where: { $0.name == remote })?
                   .branches.first(where: { $0.name == branch }),
               (try? await source.isAncestor(local.commitID, of: remoteBranch.commitID)) == false else { return true }
@@ -380,17 +395,18 @@ final class CheckoutBranchWorkflowCoordinator {
 
     private func updateSubmodulesIfRequested(
         _ result: RepositoryMutationResult,
-        previousSnapshot: RepositorySnapshot,
+        previousContext: RepositoryBranchContext,
         owner: NSWindow
     ) async throws -> RepositoryMutationResult {
-        let previousHEAD = previousSnapshot.commits.first(where: \.isHEAD)?.id
-        let currentHEAD = result.snapshot.commits.first(where: \.isHEAD)?.id
+        let previousHEAD = previousContext.headID
+        let refreshedContext = try await source.loadRepositoryState().branchContext
+        context = refreshedContext
+        let currentHEAD = refreshedContext.headID
         guard previousHEAD != currentHEAD,
-              await shouldUpdateSubmodules(snapshot: result.snapshot, owner: owner) else { return result }
+              await shouldUpdateSubmodules(context: refreshedContext, owner: owner) else { return result }
         let updated = try await source.updateSubmodulesAfterCheckout()
-        publish(updated.snapshot, selected: updated.selectedCommitID ?? result.selectedCommitID)
+        await publish(selected: updated.selectedCommitID ?? result.selectedCommitID)
         return RepositoryMutationResult(
-            snapshot: updated.snapshot,
             selectedCommitID: updated.selectedCommitID ?? result.selectedCommitID,
             outcome: updated.outcome,
             message: result.message + " Updated submodules."
@@ -423,8 +439,8 @@ final class CheckoutBranchWorkflowCoordinator {
         return apply
     }
 
-    private func shouldUpdateSubmodules(snapshot: RepositorySnapshot, owner: NSWindow) async -> Bool {
-        guard !snapshot.submodules.isEmpty else { return false }
+    private func shouldUpdateSubmodules(context: RepositoryBranchContext, owner: NSWindow) async -> Bool {
+        guard !context.submodules.isEmpty else { return false }
         if let value = AppSettingsStore.shared.checkoutBranchPreferences.updateSubmodulesOnCheckout { return value }
         let alert = NSAlert()
         alert.messageText = "Update submodules"

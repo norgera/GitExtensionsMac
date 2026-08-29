@@ -1,3 +1,5 @@
+import GitExtensionsCore
+import GitCommands
 import AppKit
 
 final class RevisionGridViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate {
@@ -16,14 +18,14 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
     private var quickSearchString = ""
     private var lastQuickSearchString = ""
     private var quickSearchTimer: Timer?
-    private var menuFocusedCommitID: String?
+    private var menuFocusedCommitID: RevisionID?
     private var isCherryPicking = false
     private var cherryPickHasConflicts = false
     private var isRebasing = false
     private var rebaseHasConflicts = false
     private var graphTask: Task<Void, Never>?
     private var graphGeneration = 0
-    private var pendingSelectionID: String?
+    private var pendingSelectionID: RevisionID?
     private var lastViewportSize = NSSize.zero
     private var graphWidthRefreshScheduled = false
     private var graphConfiguration = RevisionGraphLayout.Configuration.gitExtensionsDefault
@@ -113,9 +115,23 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
         scheduleGraphColumnWidthRefresh()
     }
 
-    func apply(commits: [Commit], preferredCommitID: String? = nil) {
+    func apply(commits: [Commit], preferredCommitID: RevisionID? = nil) {
         pendingSelectionID = preferredCommitID
         allCommits = commits
+        applyFilters(selectFirst: true)
+    }
+
+    func beginIncrementalLoad(preferredCommitID: RevisionID? = nil) {
+        pendingSelectionID = preferredCommitID
+        allCommits = []
+        commits = []
+        graphRows = []
+        tableView.reloadData()
+    }
+
+    func appendIncrementalBatch(_ batch: [Commit]) {
+        guard !batch.isEmpty else { return }
+        allCommits.append(contentsOf: batch)
         applyFilters(selectFirst: true)
     }
 
@@ -139,7 +155,7 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
         applyFilters(selectFirst: true)
     }
 
-    func selectCommit(id: String) {
+    func selectCommit(id: RevisionID) {
         guard let index = commits.firstIndex(where: { $0.id == id }) else {
             if allCommits.contains(where: { $0.id == id }) { pendingSelectionID = id }
             return
@@ -168,7 +184,7 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
                 || commit.subject.localizedCaseInsensitiveContains(textFilter)
                 || commit.body.localizedCaseInsensitiveContains(textFilter)
                 || commit.authorName.localizedCaseInsensitiveContains(textFilter)
-                || commit.id.localizedCaseInsensitiveContains(textFilter)
+                || commit.id.description.localizedCaseInsensitiveContains(textFilter)
             let matchesBranch = branchFilter.isEmpty
                 || commit.references.contains { $0.name.localizedCaseInsensitiveContains(branchFilter) }
                 || commit.subject.localizedCaseInsensitiveContains(branchFilter)
@@ -190,9 +206,12 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
             self.tableView.reloadData()
             self.updateGraphColumnWidthForVisibleRows(fallbackLaneCount: graph.maximumLaneCount)
             guard !filteredCommits.isEmpty else { return }
-            let requestedIndex = self.pendingSelectionID.flatMap { id in filteredCommits.firstIndex(where: { $0.id == id }) }
+            let requestedID = self.pendingSelectionID
+            let requestedIndex = requestedID.flatMap { id in filteredCommits.firstIndex(where: { $0.id == id }) }
             let index = requestedIndex ?? (selectFirst ? filteredCommits.firstIndex(where: { !$0.isArtificial }) ?? 0 : 0)
-            self.pendingSelectionID = nil
+            if requestedIndex != nil || requestedID == nil {
+                self.pendingSelectionID = nil
+            }
             self.tableView.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
             self.tableView.scrollRowToVisible(index)
             self.onSelection?(filteredCommits[index])
@@ -309,7 +328,7 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
 
     private func copySelectedCommitIDs() {
         let ids = tableView.selectedRowIndexes.compactMap { index in
-            index < commits.count ? commits[index].id : nil
+            index < commits.count ? commits[index].id.description : nil
         }
         guard !ids.isEmpty else { return }
         NSPasteboard.general.clearContents()
@@ -417,7 +436,7 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
             commit.authorEmail,
             commit.committerName,
             commit.committerEmail,
-            commit.id,
+            commit.id.description,
             commit.shortID,
             commit.references.map(\.name).joined(separator: " ")
         ].contains { $0.localizedCaseInsensitiveContains(query) }
@@ -522,9 +541,9 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
         performNavigation(identifier, focusedCommitID: menuFocusedCommitID)
     }
 
-    private func performNavigation(_ identifier: String, focusedCommitID: String? = nil) {
+    private func performNavigation(_ identifier: String, focusedCommitID: RevisionID? = nil) {
         guard let focused = focusedCommit(id: focusedCommitID) else { return }
-        let targetID: String?
+        let targetID: RevisionID?
 
         switch identifier {
         case "revision.navigate.child":
@@ -545,13 +564,13 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
         selectCommit(id: targetID)
     }
 
-    private func focusedCommit(id: String?) -> Commit? {
+    private func focusedCommit(id: RevisionID?) -> Commit? {
         if let id, let commit = allCommits.first(where: { $0.id == id }) { return commit }
         guard tableView.selectedRow >= 0, tableView.selectedRow < commits.count else { return nil }
         return commits[tableView.selectedRow]
     }
 
-    private func mergeBaseForCurrentSelection(focused: Commit) -> String? {
+    private func mergeBaseForCurrentSelection(focused: Commit) -> RevisionID? {
         var selected = tableView.selectedRowIndexes.compactMap { index in
             index < commits.count ? commits[index] : nil
         }

@@ -1,3 +1,6 @@
+@testable import GitExtensionsCore
+@testable import GitCommands
+@testable import GitUI
 import Foundation
 
 enum ContextMenuStateTests {
@@ -174,14 +177,14 @@ enum ContextMenuStateTests {
         let topic = commit("topic", parents: ["base"])
         let history = [head, topic, base, root]
 
-        expect(RevisionNavigationResolver.parentID(of: topic) == "base", "navigation: first parent follows commit topology")
-        expect(RevisionNavigationResolver.childID(of: base, in: history) == "head", "navigation: first visible child follows history order")
+        expect(RevisionNavigationResolver.parentID(of: topic) == testRevisionID("base"), "navigation: first parent follows commit topology")
+        expect(RevisionNavigationResolver.childID(of: base, in: history) == testRevisionID("head"), "navigation: first visible child follows history order")
         expect(
-            RevisionNavigationResolver.mergeBaseID(selectedCommits: [topic], history: history, headCommit: head) == "base",
+            RevisionNavigationResolver.mergeBaseID(selectedCommits: [topic], history: history, headCommit: head) == testRevisionID("base"),
             "navigation: single selection uses HEAD for merge base"
         )
         expect(
-            RevisionNavigationResolver.mergeBaseID(selectedCommits: [head, topic], history: history, headCommit: head) == "base",
+            RevisionNavigationResolver.mergeBaseID(selectedCommits: [head, topic], history: history, headCommit: head) == testRevisionID("base"),
             "navigation: multi-selection resolves newest common ancestor"
         )
     }
@@ -395,7 +398,7 @@ enum ContextMenuStateTests {
         kind: Commit.Kind = .revision
     ) -> Commit {
         Commit(
-            id: id,
+            id: kind == .workingDirectory ? .workingDirectory : kind == .index ? .index : testRevisionID(id),
             shortID: id,
             subject: id,
             body: "",
@@ -405,7 +408,7 @@ enum ContextMenuStateTests {
             committerName: "Test",
             committerEmail: "test@example.com",
             commitDate: Date(timeIntervalSince1970: 1),
-            parentIDs: parents,
+            parentIDs: parents.filter { !$0.hasPrefix("$") }.map(testObjectID),
             references: refs,
             kind: kind
         )
@@ -485,8 +488,8 @@ enum RepositoryDetailModelTests {
             history: [commit("child-one", parents: ["selected"]), selected, commit("child-two", parents: ["selected"])]
         )
 
-        expect(relations.parentIDs == ["parent"], "commit detail: parents are retained")
-        expect(relations.childIDs == ["child-one", "child-two"], "commit detail: direct children follow history order")
+        expect(relations.parentIDs == [testObjectID("parent")], "commit detail: parents are retained")
+        expect(relations.childIDs == [testObjectID("child-one"), testObjectID("child-two")], "commit detail: direct children follow history order")
         expect(relations.branchNames == ["main"], "commit detail: branch refs are separate")
         expect(relations.tagNames == ["v1.0"], "commit detail: tag refs are separate")
     }
@@ -532,7 +535,7 @@ enum RepositoryDetailModelTests {
         )
 
         let artificial = Commit(
-            id: "$working-directory",
+            id: .workingDirectory,
             shortID: "",
             subject: "Working directory",
             body: "",
@@ -542,7 +545,7 @@ enum RepositoryDetailModelTests {
             committerName: "",
             committerEmail: "",
             commitDate: Date(timeIntervalSince1970: 1),
-            parentIDs: ["$index"],
+            parentIDs: [],
             references: [],
             kind: .workingDirectory
         )
@@ -559,7 +562,7 @@ enum RepositoryDetailModelTests {
         refs: [RevisionReference] = []
     ) -> Commit {
         Commit(
-            id: id,
+            id: testRevisionID(id),
             shortID: id,
             subject: id,
             body: "",
@@ -569,7 +572,7 @@ enum RepositoryDetailModelTests {
             committerName: "Test",
             committerEmail: "test@example.com",
             commitDate: Date(timeIntervalSince1970: 1),
-            parentIDs: parents,
+            parentIDs: parents.map(testObjectID),
             references: refs
         )
     }

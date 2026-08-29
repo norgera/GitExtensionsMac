@@ -1,3 +1,5 @@
+import GitExtensionsCore
+import GitCommands
 import AppKit
 
 class RetainingSplitViewController: NSViewController, NSSplitViewDelegate {

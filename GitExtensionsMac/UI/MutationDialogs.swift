@@ -1,3 +1,5 @@
+import GitExtensionsCore
+import GitCommands
 import AppKit
 
 enum CheckoutDialogTarget {
@@ -144,7 +146,7 @@ enum MutationDialogs {
         case .local(let branch):
             checkoutTarget = .localBranch(branch.name)
         case .revision(let commit):
-            checkoutTarget = .revision(commit.id)
+            checkoutTarget = .revision(commit.objectID?.string ?? "HEAD")
         case .remote(let branch):
             let remote = branch.remoteName ?? "origin"
             let modeTitle = remoteMode?.titleOfSelectedItem ?? "Create tracking local branch"
@@ -445,13 +447,13 @@ enum MutationDialogs {
         _ = coordinator
         let useRange = specificRange.state == .on
         return RepositoryRebaseRequest(
-            upstream: target.id,
+            upstream: target.objectID?.string ?? "HEAD",
             autoStash: autoStash.state == .on,
             rebaseMerges: rebaseMerges.state == .on,
             updateRefs: updateRefs.state == .on ? true : nil,
             ignoreDate: ignoreDate.state == .on,
             committerDateIsAuthorDate: committerDate.state == .on,
-            onto: useRange ? target.id : nil,
+            onto: useRange ? target.objectID?.string : nil,
             from: useRange ? from.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) : nil,
             branch: useRange ? branch.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) : nil
         )
@@ -460,7 +462,7 @@ enum MutationDialogs {
     static func interactiveRebaseRequest(
         target: Commit,
         plan: [RepositoryRebaseTodoItem],
-        initialActions: [String: RepositoryRebaseTodoAction] = [:],
+        initialActions: [ObjectID: RepositoryRebaseTodoAction] = [:],
         upstream: String? = nil,
         autoStashDefault: Bool? = nil,
         autoSquashDefault: Bool = false,
@@ -522,7 +524,7 @@ enum MutationDialogs {
             action.selectItem(withTitle: rebaseActionTitle(configuredAction))
             let message = NSTextField(string: rebaseMessage(configuredAction, fallback: item.subject))
             message.controlSize = .small
-            message.placeholderString = "\(String(item.commitID.prefix(8))): \(item.subject)"
+            message.placeholderString = "\(item.commitID.shortString): \(item.subject)"
             message.widthAnchor.constraint(equalToConstant: 390).isActive = true
             row.addArrangedSubview(order)
             row.addArrangedSubview(action)
@@ -575,7 +577,7 @@ enum MutationDialogs {
             )
         }
         return RepositoryInteractiveRebaseRequest(
-            upstream: upstream ?? target.id,
+            upstream: upstream ?? target.objectID?.string ?? "HEAD",
             items: items,
             autoStash: autoStash.state == .on,
             autoSquash: autoSquash.state == .on,
@@ -591,7 +593,7 @@ enum MutationDialogs {
         target: Commit,
         upstream: String,
         todo: String,
-        initialActions: [String: RepositoryRebaseTodoAction],
+        initialActions: [ObjectID: RepositoryRebaseTodoAction],
         autoStash: Bool,
         autoSquash: Bool,
         rebaseMerges: Bool,
@@ -607,7 +609,7 @@ enum MutationDialogs {
             guard fields.count >= 2 else { return line }
             let commitID = String(fields[1])
             guard let action = initialActions.first(where: { key, _ in
-                key.hasPrefix(commitID) || commitID.hasPrefix(key)
+                key.string.hasPrefix(commitID) || commitID.hasPrefix(key.string)
             })?.value else { return line }
             let subject = fields.count > 2 ? String(fields[2]) : ""
             let command: String
@@ -694,10 +696,12 @@ enum MutationDialogs {
         alert.addButton(withTitle: "Cancel")
         alert.accessoryView = scroll
         guard await begin(alert: alert, for: window) == .alertFirstButtonReturn else { return nil }
-        return rows.sorted {
+        let orderedRows = rows.sorted {
             (Int($0.order.stringValue) ?? $0.index + 1, $0.index) <
             (Int($1.order.stringValue) ?? $1.index + 1, $1.index)
-        }.map { row in
+        }
+        return orderedRows.compactMap { row -> RepositoryRebaseTodoItem? in
+            guard let commitID = try? ObjectID.parse(row.patch.revisionToken) else { return nil }
             let action: RepositoryRebaseTodoAction = switch row.action.titleOfSelectedItem {
             case "reword": .reword(row.message.stringValue)
             case "edit": .edit
@@ -706,7 +710,7 @@ enum MutationDialogs {
             case "drop": .drop
             default: .pick
             }
-            return RepositoryRebaseTodoItem(commitID: row.patch.commitID, subject: row.patch.subject, action: action)
+            return RepositoryRebaseTodoItem(commitID: commitID, subject: row.patch.subject, action: action)
         }
     }
 

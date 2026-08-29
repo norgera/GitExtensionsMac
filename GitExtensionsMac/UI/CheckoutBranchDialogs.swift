@@ -1,3 +1,5 @@
+import GitExtensionsCore
+import GitCommands
 import AppKit
 
 struct CheckoutBranchDialogResult {
@@ -9,14 +11,15 @@ struct CheckoutBranchDialogResult {
 enum CheckoutBranchDialogs {
     static func checkoutBranch(
         source: any RepositoryCheckoutBranchDataSource,
-        snapshot: RepositorySnapshot,
+        context: RepositoryBranchContext,
+        revisions: [Commit],
         state: RepositoryMutationState,
         initialTarget: CheckoutDialogTarget?,
         updateSubmodules: Bool,
         owner: NSWindow
     ) async -> CheckoutBranchDialogResult? {
         let controller = CheckoutBranchViewController(
-            snapshot: snapshot,
+            context: context,
             state: state,
             source: source,
             initialTarget: initialTarget,
@@ -33,14 +36,14 @@ enum CheckoutBranchDialogs {
 
     static func checkoutRevision(
         commit: Commit,
-        snapshot: RepositorySnapshot,
+        revisions: [Commit],
         source: any RepositoryCheckoutBranchDataSource,
         updateSubmodules: Bool,
         owner: NSWindow
     ) async -> RepositoryCheckoutRequest? {
         let controller = CheckoutRevisionViewController(
             commit: commit,
-            snapshot: snapshot,
+            revisions: revisions,
             source: source,
             updateSubmodules: updateSubmodules
         )
@@ -55,7 +58,8 @@ enum CheckoutBranchDialogs {
 
     static func createBranch(
         source: any RepositoryCheckoutBranchDataSource,
-        snapshot: RepositorySnapshot,
+        context: RepositoryBranchContext,
+        revisions: [Commit],
         sourceRevision: Commit?,
         suggestedPrefix: String? = nil,
         isUnbornRepository: Bool,
@@ -63,7 +67,8 @@ enum CheckoutBranchDialogs {
         owner: NSWindow
     ) async -> RepositoryCreateBranchRequest? {
         let controller = CreateBranchViewController(
-            snapshot: snapshot,
+            context: context,
+            revisions: revisions,
             source: source,
             sourceRevision: sourceRevision,
             suggestedPrefix: suggestedPrefix,
@@ -194,7 +199,7 @@ private class BranchFormViewController<Result>: NSViewController, NSWindowDelega
 
 @MainActor
 private final class CheckoutBranchViewController: BranchFormViewController<CheckoutBranchDialogResult>, NSComboBoxDelegate {
-    private let snapshot: RepositorySnapshot
+    private let context: RepositoryBranchContext
     private let state: RepositoryMutationState
     private let source: any RepositoryCheckoutBranchDataSource
     private let updateSubmodules: Bool
@@ -221,18 +226,18 @@ private final class CheckoutBranchViewController: BranchFormViewController<Check
     private var divergenceTask: Task<Void, Never>?
 
     init(
-        snapshot: RepositorySnapshot,
+        context: RepositoryBranchContext,
         state: RepositoryMutationState,
         source: any RepositoryCheckoutBranchDataSource,
         initialTarget: CheckoutDialogTarget?,
         updateSubmodules: Bool
     ) {
-        self.snapshot = snapshot
+        self.context = context
         self.state = state
         self.source = source
         self.updateSubmodules = updateSubmodules
-        localBranches = snapshot.branches.filter { !$0.isRemote }
-        remoteBranches = snapshot.remotes.flatMap(\.branches)
+        localBranches = context.branches.filter { !$0.isRemote }
+        remoteBranches = context.remotes.flatMap(\.branches)
         super.init(nibName: nil, bundle: nil)
 
         switch initialTarget {
@@ -497,7 +502,7 @@ private final class CheckoutBranchViewController: BranchFormViewController<Check
     private func trackingLocalBranch(_ remote: Branch) -> Branch? {
         guard let remoteName = remote.remoteName else { return nil }
         return localBranches.first { local in
-            snapshot.commits.first(where: { $0.id == local.commitID })?.references.contains { reference in
+            context.referencesByCommit[local.commitID]?.contains { reference in
                 (reference.kind == .currentBranch || reference.kind == .localBranch)
                     && reference.name == local.name
                     && reference.trackingRemote == remoteName
@@ -523,8 +528,8 @@ private final class CheckoutBranchViewController: BranchFormViewController<Check
     private func updateDivergence() {
         divergenceTask?.cancel()
         aheadBehind.stringValue = ""
-        guard let headID = snapshot.commits.first(where: \.isHEAD)?.id else { return }
-        let target: String?
+        guard let headID = context.headID else { return }
+        let target: ObjectID?
         if remoteRadio.state == .on {
             target = selectedRemote?.commitID
         } else {
@@ -552,7 +557,7 @@ private final class CheckoutBranchViewController: BranchFormViewController<Check
 
 @MainActor
 private final class CheckoutRevisionViewController: BranchFormViewController<RepositoryCheckoutRequest>, NSComboBoxDelegate {
-    private let snapshot: RepositorySnapshot
+    private let revisions: [Commit]
     private let source: any RepositoryCheckoutBranchDataSource
     private let updateSubmodules: Bool
     private let revision = NSComboBox()
@@ -562,11 +567,11 @@ private final class CheckoutRevisionViewController: BranchFormViewController<Rep
 
     init(
         commit: Commit,
-        snapshot: RepositorySnapshot,
+        revisions: [Commit],
         source: any RepositoryCheckoutBranchDataSource,
         updateSubmodules: Bool
     ) {
-        self.snapshot = snapshot
+        self.revisions = revisions
         self.source = source
         self.updateSubmodules = updateSubmodules
         super.init(nibName: nil, bundle: nil)
@@ -577,7 +582,7 @@ private final class CheckoutRevisionViewController: BranchFormViewController<Rep
 
     override func loadView() {
         let root = NSView()
-        revision.addItems(withObjectValues: snapshot.commits.filter { !$0.isArtificial }.map {
+        revision.addItems(withObjectValues: revisions.filter { !$0.isArtificial }.map {
             "\($0.shortID)  \($0.subject)"
         })
         revision.completes = true
@@ -651,13 +656,14 @@ private final class CheckoutRevisionViewController: BranchFormViewController<Rep
     private var selectedRevision: String {
         let value = revision.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         let prefix = value.split(separator: " ", maxSplits: 1).first.map(String.init) ?? value
-        return snapshot.commits.first { $0.shortID == prefix || $0.id == prefix }?.id ?? prefix
+        return revisions.first { $0.shortID == prefix || $0.id.description == prefix }?.objectID?.string ?? prefix
     }
 }
 
 @MainActor
 private final class CreateBranchViewController: BranchFormViewController<RepositoryCreateBranchRequest>, NSComboBoxDelegate {
-    private let snapshot: RepositorySnapshot
+    private let context: RepositoryBranchContext
+    private let revisions: [Commit]
     private let sourceCapability: any RepositoryCheckoutBranchDataSource
     private let initialRevision: Commit?
     private let updateSubmodules: Bool
@@ -672,8 +678,8 @@ private final class CreateBranchViewController: BranchFormViewController<Reposit
     private let validation = NSTextField(labelWithString: "")
     private let summary = CommitSummaryView()
 
-    init(snapshot: RepositorySnapshot, source: any RepositoryCheckoutBranchDataSource, sourceRevision: Commit?, suggestedPrefix: String?, isUnbornRepository: Bool, updateSubmodules: Bool) {
-        self.snapshot = snapshot; self.sourceCapability = source; initialRevision = sourceRevision; self.isUnbornRepository = isUnbornRepository; self.updateSubmodules = updateSubmodules
+    init(context: RepositoryBranchContext, revisions: [Commit], source: any RepositoryCheckoutBranchDataSource, sourceRevision: Commit?, suggestedPrefix: String?, isUnbornRepository: Bool, updateSubmodules: Bool) {
+        self.context = context; self.revisions = revisions; self.sourceCapability = source; initialRevision = sourceRevision; self.isUnbornRepository = isUnbornRepository; self.updateSubmodules = updateSubmodules
         name = NSTextField(string: suggestedPrefix ?? Self.suggestedName(from: sourceRevision))
         super.init(nibName: nil, bundle: nil)
     }
@@ -681,7 +687,7 @@ private final class CreateBranchViewController: BranchFormViewController<Reposit
 
     override func loadView() {
         let root = NSView()
-        source.addItems(withObjectValues: snapshot.commits.filter { !$0.isArtificial }.map { "\($0.shortID)  \($0.subject)" })
+        source.addItems(withObjectValues: revisions.filter { !$0.isArtificial }.map { "\($0.shortID)  \($0.subject)" })
         source.stringValue = initialRevision.map { "\($0.shortID)  \($0.subject)" } ?? "HEAD"
         source.completes = true
         source.delegate = self
@@ -757,7 +763,7 @@ private final class CreateBranchViewController: BranchFormViewController<Reposit
                 replacementToken: preferences.branchNameReplacement
             )
         }
-        if snapshot.branches.contains(where: { !$0.isRemote && $0.name == branchName }) {
+        if context.branches.contains(where: { !$0.isRemote && $0.name == branchName }) {
             validation.stringValue = "A local branch named ‘\(branchName)’ already exists."
             return
         }
@@ -800,12 +806,12 @@ private final class CreateBranchViewController: BranchFormViewController<Reposit
     private var selectedRevision: String? {
         let prefix = source.stringValue.split(separator: " ", maxSplits: 1).first.map(String.init) ?? source.stringValue
         if prefix == "HEAD" || prefix.isEmpty { return nil }
-        return snapshot.commits.first { $0.shortID == prefix || $0.id == prefix }?.id ?? prefix
+        return revisions.first { $0.shortID == prefix || $0.id.description == prefix }?.objectID?.string ?? prefix
     }
     private func updateSummary() {
         let selected = selectedRevision
-        let commit = snapshot.commits.first { $0.id == selected || $0.shortID == selected }
-            ?? (!isUnbornRepository ? snapshot.commits.first(where: \.isHEAD) : nil)
+        let commit = revisions.first { $0.objectID?.string == selected || $0.shortID == selected }
+            ?? (!isUnbornRepository ? revisions.first(where: \.isHEAD) : nil)
         summary.apply(commit)
     }
     private static func suggestedName(from commit: Commit?) -> String {

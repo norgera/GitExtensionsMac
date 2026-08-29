@@ -1,3 +1,5 @@
+import GitExtensionsCore
+import GitCommands
 import AppKit
 
 private final class PullDialogRootView: NSView {
@@ -22,20 +24,20 @@ extension ApplicationShellDialogs {
     static func presentPullWindow(
         initialAction: NetworkDialogInitialAction,
         executeImmediately: Bool,
-        snapshot: RepositorySnapshot,
+        context: RepositoryNetworkContext,
         source: any RepositoryPullingDataSource,
-        onSnapshot: @escaping (RepositorySnapshot, String?) -> Void,
+        onRepositoryChanged: @escaping (RevisionID?) -> Void,
         onClose: @escaping () -> Void
     ) -> NSWindowController {
         let controller = PullDialogViewController(
             initialAction: initialAction,
             executeImmediately: executeImmediately,
-            snapshot: snapshot,
+            context: context,
             source: source,
-            onSnapshot: onSnapshot
+            onRepositoryChanged: onRepositoryChanged
         )
         let window = NSWindow(contentViewController: controller)
-        window.title = "Pull (\(snapshot.currentRepository.path))"
+        window.title = "Pull (\(context.repository.path))"
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
         let helpWidth: CGFloat = AppSettingsStore.shared.pullPreferences.helpExpanded ? 307 : 80
         window.setContentSize(NSSize(width: 920 - (307 - helpWidth), height: 620))
@@ -58,9 +60,9 @@ private final class PullDialogViewController: NSViewController, NSWindowDelegate
 
     private let initialAction: NetworkDialogInitialAction
     private let executeImmediately: Bool
-    private var snapshot: RepositorySnapshot
+    private var context: RepositoryNetworkContext
     private let source: any RepositoryPullingDataSource
-    private let onSnapshot: (RepositorySnapshot, String?) -> Void
+    private let onRepositoryChanged: (RevisionID?) -> Void
     private let settings = AppSettingsStore.shared
     private var pullState: RepositoryPullState?
     private var remoteBranchTask: Task<Void, Never>?
@@ -103,15 +105,15 @@ private final class PullDialogViewController: NSViewController, NSWindowDelegate
     init(
         initialAction: NetworkDialogInitialAction,
         executeImmediately: Bool,
-        snapshot: RepositorySnapshot,
+        context: RepositoryNetworkContext,
         source: any RepositoryPullingDataSource,
-        onSnapshot: @escaping (RepositorySnapshot, String?) -> Void
+        onRepositoryChanged: @escaping (RevisionID?) -> Void
     ) {
         self.initialAction = initialAction
         self.executeImmediately = executeImmediately
-        self.snapshot = snapshot
+        self.context = context
         self.source = source
-        self.onSnapshot = onSnapshot
+        self.onRepositoryChanged = onRepositoryChanged
         isHelpExpanded = AppSettingsStore.shared.pullPreferences.helpExpanded
         super.init(nibName: nil, bundle: nil)
     }
@@ -341,7 +343,7 @@ private final class PullDialogViewController: NSViewController, NSWindowDelegate
         let previous = requested ?? remoteCombo.stringValue
         remoteCombo.removeAllItems()
         remoteCombo.addItem(withObjectValue: "[ All ]")
-        snapshot.remotes.map(\.name).forEach { remoteCombo.addItem(withObjectValue: $0) }
+        context.remotes.map(\.name).forEach { remoteCombo.addItem(withObjectValue: $0) }
         let preferred = previous.isEmpty ? preferredRemoteName() : previous
         let names = remoteCombo.objectValues.compactMap { $0 as? String }
         if let preferred, names.contains(preferred) { remoteCombo.stringValue = preferred }
@@ -349,7 +351,7 @@ private final class PullDialogViewController: NSViewController, NSWindowDelegate
         else { remoteCombo.stringValue = "[ All ]" }
         urlCombo.removeAllItems()
         settings.pullPreferences.recentURLs.forEach { urlCombo.addItem(withObjectValue: $0) }
-        snapshot.remotes.map(\.fetchURL).filter { !$0.isEmpty }.forEach { urlCombo.addItem(withObjectValue: $0) }
+        context.remotes.map(\.fetchURL).filter { !$0.isEmpty }.forEach { urlCombo.addItem(withObjectValue: $0) }
         updateRemoteURL(resetRemoteBranch: true)
     }
 
@@ -392,16 +394,16 @@ private final class PullDialogViewController: NSViewController, NSWindowDelegate
     }
 
     private func preferredRemoteName() -> String? {
-        let current = snapshot.branches.first(where: \.isCurrent)?.name
-        let tracking = snapshot.commits.lazy.flatMap(\.references).first {
+        let current = context.branches.first(where: \.isCurrent)?.name
+        let tracking = context.references.first {
             ($0.kind == .currentBranch || $0.kind == .localBranch) && $0.name == current
         }?.trackingRemote
-        return tracking ?? snapshot.remotes.first?.name
+        return tracking ?? context.remotes.first?.name
     }
 
     private func updateRemoteURL(resetRemoteBranch: Bool = false) {
         let name = remoteCombo.stringValue
-        if let url = snapshot.remotes.first(where: { $0.name == name })?.fetchURL { urlCombo.stringValue = url }
+        if let url = context.remotes.first(where: { $0.name == name })?.fetchURL { urlCombo.stringValue = url }
         let all = name == "[ All ]"
         mergeMode.isEnabled = !all
         rebaseMode.isEnabled = !all
@@ -421,7 +423,7 @@ private final class PullDialogViewController: NSViewController, NSWindowDelegate
             return
         }
         remoteBranchCombo.addItem(withObjectValue: "")
-        let remote = snapshot.remotes.first(where: { $0.name == remoteName })
+        let remote = context.remotes.first(where: { $0.name == remoteName })
         let prefix = remoteName + "/"
         let cached = remote?.branches.map {
             $0.name.hasPrefix(prefix) ? String($0.name.dropFirst(prefix.count)) : $0.name
@@ -436,7 +438,7 @@ private final class PullDialogViewController: NSViewController, NSWindowDelegate
         remoteBranchTask?.cancel()
         guard remoteChoice.state == .on else { return }
         let remote = remoteCombo.stringValue
-        guard !remote.isEmpty, remote != "[ All ]", snapshot.remotes.contains(where: { $0.name == remote }) else { return }
+        guard !remote.isEmpty, remote != "[ All ]", context.remotes.contains(where: { $0.name == remote }) else { return }
         remoteBranchCombo.toolTip = "Loading branches from \(remote)…"
         remoteBranchTask = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -465,7 +467,7 @@ private final class PullDialogViewController: NSViewController, NSWindowDelegate
         rebaseMode.state = mode == .rebase ? .on : .off
         fetchMode.state = mode == .fetch ? .on : .off
         if resetLocal {
-            localBranchField.stringValue = mode == .fetch ? "" : snapshot.branches.first(where: \.isCurrent)?.name ?? ""
+            localBranchField.stringValue = mode == .fetch ? "" : context.branches.first(where: \.isCurrent)?.name ?? ""
         }
         if mode != .fetch, allTags.state == .on {
             allTags.state = .off; reachableTags.state = .on
@@ -490,7 +492,7 @@ private final class PullDialogViewController: NSViewController, NSWindowDelegate
         executeButton.title = isFetch ? "Fetch" : "Pull"
         executeButton.image = AppKitFactory.resourceImage("ArrowDown", accessibilityDescription: executeButton.title)
         executeButton.isEnabled = true
-        view.window?.title = "\(executeButton.title) (\(snapshot.currentRepository.path))"
+        view.window?.title = "\(executeButton.title) (\(context.repository.path))"
     }
 
     private func updateSourceControls() {
@@ -512,7 +514,7 @@ private final class PullDialogViewController: NSViewController, NSWindowDelegate
         let selected = preserveSelection ? remoteBranchCombo.stringValue : ""
         remoteBranchCombo.removeAllItems()
         remoteBranchCombo.addItem(withObjectValue: "")
-        snapshot.branches.filter { !$0.isRemote }.map(\.name).forEach { remoteBranchCombo.addItem(withObjectValue: $0) }
+        context.branches.filter { !$0.isRemote }.map(\.name).forEach { remoteBranchCombo.addItem(withObjectValue: $0) }
         remoteBranchCombo.stringValue = selected
     }
 
@@ -564,13 +566,11 @@ private final class PullDialogViewController: NSViewController, NSWindowDelegate
             let process = await PullProcessDialog.run(request: prepared, source: source, parent: window)
             switch process {
             case .success(let result):
-                snapshot = result.snapshot
-                onSnapshot(result.snapshot, result.selectedCommitID)
+                onRepositoryChanged(result.selectedCommitID)
                 statusLabel.stringValue = result.message
                 if case .conflicts = result.outcome {
-                    if let refreshed = await WorkflowManagementDialogs.resolveConflicts(source: source, window: window) {
-                        snapshot = refreshed
-                        onSnapshot(refreshed, refreshed.commits.first(where: \.isHEAD)?.id)
+                    if await WorkflowManagementDialogs.resolveConflicts(source: source, window: window) {
+                        onRepositoryChanged(result.selectedCommitID)
                     }
                 } else if result.automaticStashCreated, result.outcome == .completed {
                     await handleAutomaticStash()
@@ -680,14 +680,14 @@ private final class PullDialogViewController: NSViewController, NSWindowDelegate
         }
 
         var updateSubmodules = false
-        if original.mode != .fetch, !snapshot.submodules.isEmpty {
+        if original.mode != .fetch, !context.submodules.isEmpty {
             switch settings.pullPreferences.updateSubmodulesAfterPull {
             case true:
                 updateSubmodules = true
             case false:
                 updateSubmodules = false
             case nil:
-                let initializing = snapshot.submodules.contains(where: { $0.state == .uninitialized })
+                let initializing = context.submodules.contains(where: { $0.state == .uninitialized })
                 let alert = NSAlert()
                 alert.messageText = "Submodules"
                 if initializing {
@@ -734,7 +734,7 @@ private final class PullDialogViewController: NSViewController, NSWindowDelegate
 
     private func checkoutBranchForDetachedHead() async -> Bool {
         guard view.window != nil else { return false }
-        let branches = snapshot.branches.filter { !$0.isRemote }
+        let branches = context.branches.filter { !$0.isRemote }
         guard !branches.isEmpty else {
             await showError(RepositoryPullError.operationInProgress("HEAD is detached and no local branch is available"), title: "Checkout branch")
             return false
@@ -751,8 +751,7 @@ private final class PullDialogViewController: NSViewController, NSWindowDelegate
               let name = selector.titleOfSelectedItem else { return false }
         do {
             let result = try await source.checkout(RepositoryCheckoutRequest(target: .localBranch(name), localChanges: .keep))
-            snapshot = result.snapshot
-            onSnapshot(result.snapshot, result.selectedCommitID)
+            onRepositoryChanged(result.selectedCommitID)
             localBranchField.stringValue = name
             return true
         } catch {
@@ -763,9 +762,8 @@ private final class PullDialogViewController: NSViewController, NSWindowDelegate
 
     private func refreshAfterInterruptedOperation() async {
         do {
-            let refreshed = try await source.loadSnapshot()
-            snapshot = refreshed
-            onSnapshot(refreshed, nil)
+            context = try await source.loadRepositoryState().networkContext
+            onRepositoryChanged(nil)
             pullState = try await source.loadPullState()
             updateEnabledState()
         } catch {
@@ -807,14 +805,12 @@ private final class PullDialogViewController: NSViewController, NSWindowDelegate
         guard shouldPop else { return }
         do {
             let result = try await source.popStash(nil)
-            snapshot = result.snapshot
-            onSnapshot(result.snapshot, result.selectedCommitID)
+            onRepositoryChanged(result.selectedCommitID)
             statusLabel.stringValue = result.message
             if case .conflicts = result.outcome,
                let window = view.window,
-               let refreshed = await WorkflowManagementDialogs.resolveConflicts(source: source, window: window) {
-                snapshot = refreshed
-                onSnapshot(refreshed, refreshed.commits.first(where: \.isHEAD)?.id)
+               await WorkflowManagementDialogs.resolveConflicts(source: source, window: window) {
+                onRepositoryChanged(result.selectedCommitID)
             }
         } catch { await showError(error, title: "Automatic stash could not be applied") }
     }
@@ -829,8 +825,7 @@ private final class PullDialogViewController: NSViewController, NSWindowDelegate
         guard await begin(alert) == .alertFirstButtonReturn, let window = view.window else { return }
         let result = await PullProcessDialog.runPrune(remote: remote, source: source, parent: window)
         if case .success(let value) = result {
-            snapshot = value.snapshot
-            onSnapshot(value.snapshot, value.selectedCommitID)
+            onRepositoryChanged(value.selectedCommitID)
             statusLabel.stringValue = value.message
         }
     }
@@ -895,9 +890,9 @@ private final class PullDialogViewController: NSViewController, NSWindowDelegate
         remoteWindowController = RemoteManagementDialog.present(
             source: source,
             selectedRemote: selected,
-            onSnapshot: { [weak self] snapshot in
+            onRepositoryChanged: { [weak self] in
                 guard let self else { return }
-                self.snapshot = snapshot; self.onSnapshot(snapshot, nil)
+                self.onRepositoryChanged(nil)
                 self.populateRemotes(selecting: self.remoteCombo.stringValue)
             },
             onClose: { [weak self] in self?.remoteWindowController = nil }
@@ -908,9 +903,8 @@ private final class PullDialogViewController: NSViewController, NSWindowDelegate
         guard operationTask == nil, let window = view.window else { return }
         operationTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            if let refreshed = await WorkflowManagementDialogs.resolveConflicts(source: source, window: window) {
-                snapshot = refreshed
-                onSnapshot(refreshed, refreshed.commits.first(where: \.isHEAD)?.id)
+            if await WorkflowManagementDialogs.resolveConflicts(source: source, window: window) {
+                onRepositoryChanged(context.headID.map(RevisionID.object))
             }
             operationTask = nil
             reloadRepositoryState()
@@ -921,14 +915,17 @@ private final class PullDialogViewController: NSViewController, NSWindowDelegate
         guard operationTask == nil, let window = view.window else { return }
         operationTask = Task { @MainActor [weak self] in
             guard let self else { return }
+            guard let stashContext = try? await source.loadRepositoryState().stashContext else {
+                operationTask = nil
+                return
+            }
             let result = await WorkflowManagementDialogs.manageStashes(
                 source: source,
-                snapshot: snapshot,
+                context: stashContext,
                 window: window,
                 manageStashes: true
             )
-            snapshot = result.snapshot
-            onSnapshot(result.snapshot, result.selectedCommitID)
+            if result.repositoryChanged { onRepositoryChanged(result.selectedCommitID) }
             statusLabel.stringValue = "Repository state refreshed."
             operationTask = nil
             reloadRepositoryState()

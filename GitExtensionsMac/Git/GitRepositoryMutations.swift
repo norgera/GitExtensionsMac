@@ -1,31 +1,32 @@
+import GitExtensionsCore
 import CoreFoundation
 import Foundation
 
-enum CheckoutLocalChangesAction: Hashable, Sendable {
+package enum CheckoutLocalChangesAction: Hashable, Sendable {
     case keep
     case merge
     case stash(includeUntracked: Bool, reapply: Bool)
     case force
 }
 
-enum RemoteCheckoutMode: Hashable, Sendable {
+package enum RemoteCheckoutMode: Hashable, Sendable {
     case createTracking(localBranch: String)
     case resetTracking(localBranch: String)
     case detached
 }
 
-enum RepositoryCheckoutTarget: Hashable, Sendable {
+package enum RepositoryCheckoutTarget: Hashable, Sendable {
     case localBranch(String)
     case remoteBranch(remote: String, branch: String, mode: RemoteCheckoutMode)
     case revision(String)
 }
 
-struct RepositoryCheckoutRequest: Hashable, Sendable {
-    let target: RepositoryCheckoutTarget
-    let localChanges: CheckoutLocalChangesAction
-    let updateSubmodulesAfterCheckout: Bool
+package struct RepositoryCheckoutRequest: Hashable, Sendable {
+    package let target: RepositoryCheckoutTarget
+    package let localChanges: CheckoutLocalChangesAction
+    package let updateSubmodulesAfterCheckout: Bool
 
-    init(
+    package init(
         target: RepositoryCheckoutTarget,
         localChanges: CheckoutLocalChangesAction,
         updateSubmodulesAfterCheckout: Bool = false
@@ -36,53 +37,67 @@ struct RepositoryCheckoutRequest: Hashable, Sendable {
     }
 }
 
-enum RepositoryHunkDirection: Hashable, Sendable {
+package enum RepositoryHunkDirection: Hashable, Sendable {
     case stage
     case unstage
 }
 
-struct RepositoryHunkSelection: Hashable, Sendable {
-    let file: ChangedFile
-    let diff: FileDiff
-    let lineID: String
-    let direction: RepositoryHunkDirection
+package struct RepositoryHunkSelection: Hashable, Sendable {
+    package let file: ChangedFile
+    package let diff: FileDiff
+    package let lineID: String
+    package let direction: RepositoryHunkDirection
+
+    package init(file: ChangedFile, diff: FileDiff, lineID: String, direction: RepositoryHunkDirection) {
+        self.file = file
+        self.diff = diff
+        self.lineID = lineID
+        self.direction = direction
+    }
 }
 
-struct RepositoryLineSelection: Hashable, Sendable {
-    let file: ChangedFile
-    let diff: FileDiff
-    let lineIDs: Set<String>
-    let direction: RepositoryHunkDirection
+package struct RepositoryLineSelection: Hashable, Sendable {
+    package let file: ChangedFile
+    package let diff: FileDiff
+    package let lineIDs: Set<String>
+    package let direction: RepositoryHunkDirection
+
+    package init(file: ChangedFile, diff: FileDiff, lineIDs: Set<String>, direction: RepositoryHunkDirection) {
+        self.file = file
+        self.diff = diff
+        self.lineIDs = lineIDs
+        self.direction = direction
+    }
 }
 
-enum RepositoryCommitMode: Hashable, Sendable {
+package enum RepositoryCommitMode: Hashable, Sendable {
     case normal
     case amend
     case amendMessageOnly
 }
 
-enum RepositoryCommitGPGSigning: Hashable, Sendable {
+package enum RepositoryCommitGPGSigning: Hashable, Sendable {
     case gitDefault
     case doNotSign
     case signDefault
     case signSpecificKey(String)
 }
 
-struct RepositoryCommitRequest: Hashable, Sendable {
-    let message: String
-    let mode: RepositoryCommitMode
-    let stageAllBeforeCommit: Bool
-    let allowEmpty: Bool
-    let signOff: Bool
-    let author: String?
-    let resetAuthor: Bool
-    let noVerify: Bool
-    let gpgSigning: RepositoryCommitGPGSigning
-    let messageEncoding: String?
-    let usingTemplate: Bool
-    let ensureSecondLineEmpty: Bool
+package struct RepositoryCommitRequest: Hashable, Sendable {
+    package let message: String
+    package let mode: RepositoryCommitMode
+    package let stageAllBeforeCommit: Bool
+    package let allowEmpty: Bool
+    package let signOff: Bool
+    package let author: String?
+    package let resetAuthor: Bool
+    package let noVerify: Bool
+    package let gpgSigning: RepositoryCommitGPGSigning
+    package let messageEncoding: String?
+    package let usingTemplate: Bool
+    package let ensureSecondLineEmpty: Bool
 
-    init(
+    package init(
         message: String,
         mode: RepositoryCommitMode,
         stageAllBeforeCommit: Bool,
@@ -111,36 +126,41 @@ struct RepositoryCommitRequest: Hashable, Sendable {
     }
 }
 
-struct RepositoryCommitState: Sendable {
-    let mutationState: RepositoryMutationState
-    let message: String
-    let loadedTemplate: String?
-    let commitEncoding: String
-    let previousMessages: [String]
-    let committer: String
-    let isMergeCommit: Bool
-    let rememberedAmend: Bool
-    let messageLoadError: String?
+package struct RepositoryCommitState: Sendable {
+    package let mutationState: RepositoryMutationState
+    package let message: String
+    package let loadedTemplate: String?
+    package let commitEncoding: String
+    package let previousMessages: [String]
+    package let committer: String
+    package let isMergeCommit: Bool
+    package let rememberedAmend: Bool
+    package let messageLoadError: String?
 }
 
-enum RepositoryResetChangesScope: Hashable, Sendable {
+package enum RepositoryResetChangesScope: Hashable, Sendable {
     case worktree
     case all
 }
 
-struct RepositoryResetChangesRequest: Hashable, Sendable {
-    let scope: RepositoryResetChangesScope
-    let deleteUntracked: Bool
+package struct RepositoryResetChangesRequest: Hashable, Sendable {
+    package let scope: RepositoryResetChangesScope
+    package let deleteUntracked: Bool
+
+    package init(scope: RepositoryResetChangesScope, deleteUntracked: Bool) {
+        self.scope = scope
+        self.deleteUntracked = deleteUntracked
+    }
 }
 
-struct RepositoryStashCreateRequest: Hashable, Sendable {
-    let message: String
-    let includeUntracked: Bool
-    let keepIndex: Bool
-    let stagedOnly: Bool
-    let selectedPaths: [String]
+package struct RepositoryStashCreateRequest: Hashable, Sendable {
+    package let message: String
+    package let includeUntracked: Bool
+    package let keepIndex: Bool
+    package let stagedOnly: Bool
+    package let selectedPaths: [String]
 
-    init(
+    package init(
         message: String,
         includeUntracked: Bool,
         keepIndex: Bool,
@@ -155,22 +175,37 @@ struct RepositoryStashCreateRequest: Hashable, Sendable {
     }
 }
 
-struct RepositoryCherryPickItem: Hashable, Sendable {
-    let commitID: String
-    let mainlineParent: Int?
+package struct RepositoryCherryPickItem: Hashable, Sendable {
+    package let commitID: ObjectID
+    package let mainlineParent: Int?
+
+    package init(commitID: ObjectID, mainlineParent: Int?) {
+        self.commitID = commitID
+        self.mainlineParent = mainlineParent
+    }
 }
 
-struct RepositoryCherryPickOptions: Hashable, Sendable {
-    let automaticallyCommit: Bool
-    let addReference: Bool
+package struct RepositoryCherryPickOptions: Hashable, Sendable {
+    package let automaticallyCommit: Bool
+    package let addReference: Bool
+
+    package init(automaticallyCommit: Bool, addReference: Bool) {
+        self.automaticallyCommit = automaticallyCommit
+        self.addReference = addReference
+    }
 }
 
-struct RepositoryCherryPickRequest: Hashable, Sendable {
-    let items: [RepositoryCherryPickItem]
-    let options: RepositoryCherryPickOptions
+package struct RepositoryCherryPickRequest: Hashable, Sendable {
+    package let items: [RepositoryCherryPickItem]
+    package let options: RepositoryCherryPickOptions
+
+    package init(items: [RepositoryCherryPickItem], options: RepositoryCherryPickOptions) {
+        self.items = items
+        self.options = options
+    }
 }
 
-enum RepositoryRebaseTodoAction: Hashable, Sendable {
+package enum RepositoryRebaseTodoAction: Hashable, Sendable {
     case pick
     case reword(String)
     case edit
@@ -179,24 +214,30 @@ enum RepositoryRebaseTodoAction: Hashable, Sendable {
     case drop
 }
 
-struct RepositoryRebaseTodoItem: Hashable, Sendable {
-    let commitID: String
-    let subject: String
-    let action: RepositoryRebaseTodoAction
+package struct RepositoryRebaseTodoItem: Hashable, Sendable {
+    package let commitID: ObjectID
+    package let subject: String
+    package let action: RepositoryRebaseTodoAction
+
+    package init(commitID: ObjectID, subject: String, action: RepositoryRebaseTodoAction) {
+        self.commitID = commitID
+        self.subject = subject
+        self.action = action
+    }
 }
 
-struct RepositoryRebaseRequest: Hashable, Sendable {
-    let upstream: String
-    let autoStash: Bool
-    let rebaseMerges: Bool
-    let updateRefs: Bool?
-    let ignoreDate: Bool
-    let committerDateIsAuthorDate: Bool
-    let onto: String?
-    let from: String?
-    let branch: String?
+package struct RepositoryRebaseRequest: Hashable, Sendable {
+    package let upstream: String
+    package let autoStash: Bool
+    package let rebaseMerges: Bool
+    package let updateRefs: Bool?
+    package let ignoreDate: Bool
+    package let committerDateIsAuthorDate: Bool
+    package let onto: String?
+    package let from: String?
+    package let branch: String?
 
-    init(
+    package init(
         upstream: String,
         autoStash: Bool,
         rebaseMerges: Bool = false,
@@ -219,19 +260,19 @@ struct RepositoryRebaseRequest: Hashable, Sendable {
     }
 }
 
-struct RepositoryInteractiveRebaseRequest: Hashable, Sendable {
-    let upstream: String
-    let items: [RepositoryRebaseTodoItem]
-    let autoStash: Bool
-    let autoSquash: Bool
-    let rebaseMerges: Bool
-    let updateRefs: Bool?
-    let onto: String?
-    let from: String?
-    let branch: String?
-    let nativeTodo: String?
+package struct RepositoryInteractiveRebaseRequest: Hashable, Sendable {
+    package let upstream: String
+    package let items: [RepositoryRebaseTodoItem]
+    package let autoStash: Bool
+    package let autoSquash: Bool
+    package let rebaseMerges: Bool
+    package let updateRefs: Bool?
+    package let onto: String?
+    package let from: String?
+    package let branch: String?
+    package let nativeTodo: String?
 
-    init(
+    package init(
         upstream: String,
         items: [RepositoryRebaseTodoItem],
         autoStash: Bool,
@@ -256,85 +297,128 @@ struct RepositoryInteractiveRebaseRequest: Hashable, Sendable {
     }
 }
 
-struct RepositoryInteractiveRebaseTodoRequest: Hashable, Sendable {
-    let upstream: String
-    let autoStash: Bool
-    let autoSquash: Bool
-    let rebaseMerges: Bool
-    let updateRefs: Bool?
-    let onto: String?
-    let from: String?
-    let branch: String?
+package struct RepositoryInteractiveRebaseTodoRequest: Hashable, Sendable {
+    package let upstream: String
+    package let autoStash: Bool
+    package let autoSquash: Bool
+    package let rebaseMerges: Bool
+    package let updateRefs: Bool?
+    package let onto: String?
+    package let from: String?
+    package let branch: String?
+
+    package init(
+        upstream: String,
+        autoStash: Bool,
+        autoSquash: Bool,
+        rebaseMerges: Bool,
+        updateRefs: Bool?,
+        onto: String?,
+        from: String?,
+        branch: String?
+    ) {
+        self.upstream = upstream
+        self.autoStash = autoStash
+        self.autoSquash = autoSquash
+        self.rebaseMerges = rebaseMerges
+        self.updateRefs = updateRefs
+        self.onto = onto
+        self.from = from
+        self.branch = branch
+    }
 }
 
-enum RepositoryRebasePatchStatus: String, Hashable, Sendable {
+package enum RepositoryRebasePatchStatus: String, Hashable, Sendable {
     case applied = "Applied"
     case applying = "Applying…"
     case pending = ""
     case skipped = "Skipped"
 }
 
-struct RepositoryRebasePatch: Hashable, Sendable {
-    let action: String
-    let commitID: String
-    let subject: String
-    let author: String
-    let date: String
-    let status: RepositoryRebasePatchStatus
+package struct RepositoryRebasePatch: Hashable, Sendable {
+    package let action: String
+    package let revisionToken: String
+    package let subject: String
+    package let author: String
+    package let date: String
+    package let status: RepositoryRebasePatchStatus
 }
 
-struct RepositoryRebaseState: Hashable, Sendable {
-    let inProgress: Bool
-    let hasConflicts: Bool
-    let currentBranch: String?
-    let currentCommitID: String?
-    let patches: [RepositoryRebasePatch]
-    let canEditTodo: Bool
-    let hasAutoStash: Bool
+package struct RepositoryRebaseState: Hashable, Sendable {
+    package let inProgress: Bool
+    package let hasConflicts: Bool
+    package let currentBranch: String?
+    package let currentCommitID: ObjectID?
+    package let patches: [RepositoryRebasePatch]
+    package let canEditTodo: Bool
+    package let hasAutoStash: Bool
+
+    package init(
+        inProgress: Bool,
+        hasConflicts: Bool,
+        currentBranch: String?,
+        currentCommitID: ObjectID?,
+        patches: [RepositoryRebasePatch],
+        canEditTodo: Bool,
+        hasAutoStash: Bool
+    ) {
+        self.inProgress = inProgress
+        self.hasConflicts = hasConflicts
+        self.currentBranch = currentBranch
+        self.currentCommitID = currentCommitID
+        self.patches = patches
+        self.canEditTodo = canEditTodo
+        self.hasAutoStash = hasAutoStash
+    }
 }
 
-struct RepositoryRebaseConfiguration: Hashable, Sendable {
-    let autoSquash: Bool
-    let updateRefs: Bool
-    let supportsUpdateRefs: Bool
-    let isDirty: Bool
+package struct RepositoryRebaseConfiguration: Hashable, Sendable {
+    package let autoSquash: Bool
+    package let updateRefs: Bool
+    package let supportsUpdateRefs: Bool
+    package let isDirty: Bool
 }
 
-struct RepositoryMergeToolConfiguration: Hashable, Sendable {
-    let name: String
-    let usesGUISetting: Bool
+package struct RepositoryMergeToolConfiguration: Hashable, Sendable {
+    package let name: String
+    package let usesGUISetting: Bool
 }
 
-struct RepositoryMutationState: Equatable, Sendable {
-    let currentBranch: String?
-    let headID: String?
-    let hasStagedChanges: Bool
-    let hasUnstagedChanges: Bool
-    let hasUntrackedFiles: Bool
-    let conflictedPaths: [String]
-    let mergeInProgress: Bool
-    let cherryPickInProgress: Bool
-    let rebaseInProgress: Bool
+package struct RepositoryMutationState: Equatable, Sendable {
+    package let currentBranch: String?
+    package let headID: ObjectID?
+    package let hasStagedChanges: Bool
+    package let hasUnstagedChanges: Bool
+    package let hasUntrackedFiles: Bool
+    package let conflictedPaths: [String]
+    package let mergeInProgress: Bool
+    package let cherryPickInProgress: Bool
+    package let rebaseInProgress: Bool
 
-    var isDirty: Bool {
+    package var isDirty: Bool {
         hasStagedChanges || hasUnstagedChanges || hasUntrackedFiles || !conflictedPaths.isEmpty
     }
 }
 
-enum RepositoryMutationOutcome: Equatable, Sendable {
+package enum RepositoryMutationOutcome: Equatable, Sendable {
     case completed
     case conflicts([String])
     case paused(String)
 }
 
-struct RepositoryMutationResult: Sendable {
-    let snapshot: RepositorySnapshot
-    let selectedCommitID: String?
-    let outcome: RepositoryMutationOutcome
-    let message: String
+package struct RepositoryMutationResult: Sendable {
+    package let selectedCommitID: RevisionID?
+    package let outcome: RepositoryMutationOutcome
+    package let message: String
+
+    package init(selectedCommitID: RevisionID?, outcome: RepositoryMutationOutcome, message: String) {
+        self.selectedCommitID = selectedCommitID
+        self.outcome = outcome
+        self.message = message
+    }
 }
 
-enum RepositoryMutationError: LocalizedError, Sendable {
+package enum RepositoryMutationError: LocalizedError, Sendable {
     case bareRepository
     case currentBranch(String)
     case invalidRevision(String)
@@ -352,7 +436,7 @@ enum RepositoryMutationError: LocalizedError, Sendable {
     case invalidStash(String)
     case noStashes
     case noRevisions
-    case invalidMainline(commitID: String, parent: Int?, parentCount: Int)
+    case invalidMainline(commitID: ObjectID, parent: Int?, parentCount: Int)
     case cherryPickNotInProgress
     case mergeNotInProgress
     case mergeToolNotConfigured
@@ -362,7 +446,7 @@ enum RepositoryMutationError: LocalizedError, Sendable {
     case invalidRebasePlan(String)
     case unavailable
 
-    var errorDescription: String? {
+    package var errorDescription: String? {
         switch self {
         case .bareRepository:
             "This operation is unavailable in a bare repository."
@@ -400,9 +484,9 @@ enum RepositoryMutationError: LocalizedError, Sendable {
             "Select at least one real revision."
         case .invalidMainline(let commitID, let parent, let parentCount):
             if parentCount > 1 {
-                "Cherry-picking merge \(commitID.prefix(8)) requires a mainline parent from 1 through \(parentCount); received \(parent.map(String.init) ?? "none")."
+                "Cherry-picking merge \(commitID.shortString) requires a mainline parent from 1 through \(parentCount); received \(parent.map(String.init) ?? "none")."
             } else {
-                "Revision \(commitID.prefix(8)) is not a merge and cannot use a mainline parent."
+                "Revision \(commitID.shortString) is not a merge and cannot use a mainline parent."
             }
         case .cherryPickNotInProgress:
             "No cherry-pick is currently in progress."
@@ -424,11 +508,11 @@ enum RepositoryMutationError: LocalizedError, Sendable {
     }
 }
 
-protocol RepositoryMutationStateDataSource: RepositoryBrowsingDataSource {
+package protocol RepositoryMutationStateDataSource: RepositoryBrowsingDataSource {
     func loadMutationState() async throws -> RepositoryMutationState
 }
 
-protocol RepositoryStagingDataSource: RepositoryMutationStateDataSource {
+package protocol RepositoryStagingDataSource: RepositoryMutationStateDataSource {
     func stage(paths: [String]) async throws -> RepositoryMutationResult
     func unstage(paths: [String]) async throws -> RepositoryMutationResult
     func stageAll() async throws -> RepositoryMutationResult
@@ -438,35 +522,35 @@ protocol RepositoryStagingDataSource: RepositoryMutationStateDataSource {
     func resetChanges(_ request: RepositoryResetChangesRequest) async throws -> RepositoryMutationResult
 }
 
-protocol RepositoryCommitDataSource: RepositoryStagingDataSource {
+package protocol RepositoryCommitDataSource: RepositoryStagingDataSource {
     func loadCommitState(historyLimit: Int, showOnlyMyMessages: Bool, rememberAmend: Bool) async throws -> RepositoryCommitState
     func saveCommitDraft(message: String, amend: Bool, rememberAmend: Bool, encoding: String?) async throws
     func commit(_ request: RepositoryCommitRequest) async throws -> RepositoryMutationResult
     func resetSoftToParent() async throws -> RepositoryMutationResult
 }
 
-protocol RepositoryStashDataSource: RepositoryMutationStateDataSource {
+package protocol RepositoryStashDataSource: RepositoryMutationStateDataSource {
     func createStash(_ request: RepositoryStashCreateRequest) async throws -> RepositoryMutationResult
     func applyStash(_ stash: Stash) async throws -> RepositoryMutationResult
     func popStash(_ stash: Stash?) async throws -> RepositoryMutationResult
     func dropStash(_ stash: Stash) async throws -> RepositoryMutationResult
 }
 
-protocol RepositoryConflictDataSource: RepositoryMutationStateDataSource {
+package protocol RepositoryConflictDataSource: RepositoryMutationStateDataSource {
     func abortMerge() async throws -> RepositoryMutationResult
     func loadMergeToolConfiguration() async throws -> RepositoryMergeToolConfiguration?
     func runMergeTool(paths: [String]) async throws -> RepositoryMutationResult
 }
 
-protocol RepositoryConflictResolutionDataSource: RepositoryCommitDataSource, RepositoryConflictDataSource {}
+package protocol RepositoryConflictResolutionDataSource: RepositoryCommitDataSource, RepositoryConflictDataSource {}
 
-protocol RepositoryCherryPickDataSource: RepositoryConflictDataSource {
+package protocol RepositoryCherryPickDataSource: RepositoryConflictResolutionDataSource {
     func cherryPick(_ request: RepositoryCherryPickRequest) async throws -> RepositoryMutationResult
     func continueCherryPick() async throws -> RepositoryMutationResult
     func abortCherryPick() async throws -> RepositoryMutationResult
 }
 
-protocol RepositoryRebaseDataSource: RepositoryConflictDataSource {
+package protocol RepositoryRebaseDataSource: RepositoryConflictResolutionDataSource {
     func loadInteractiveRebasePlan(upstream: String) async throws -> [RepositoryRebaseTodoItem]
     func loadNativeInteractiveRebaseTodo(_ request: RepositoryInteractiveRebaseTodoRequest) async throws -> String
     func loadRebaseConfiguration() async throws -> RepositoryRebaseConfiguration
@@ -481,15 +565,22 @@ protocol RepositoryRebaseDataSource: RepositoryConflictDataSource {
     func abortRebase() async throws -> RepositoryMutationResult
 }
 
-protocol RepositoryMutatingDataSource:
+package protocol RepositoryCommitWorkflowDataSource:
     RepositoryCheckoutBranchDataSource,
     RepositoryConflictResolutionDataSource,
+    RepositoryStashDataSource {}
+
+package protocol RepositoryStashWorkflowDataSource:
     RepositoryStashDataSource,
+    RepositoryConflictResolutionDataSource {}
+
+package protocol RepositoryBrowserMutationDataSource:
+    RepositoryCommitWorkflowDataSource,
     RepositoryCherryPickDataSource,
     RepositoryRebaseDataSource {}
 
-extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
-    func loadMutationState() async throws -> RepositoryMutationState {
+extension GitRepositoryModule: RepositoryBrowserMutationDataSource, RepositoryStashWorkflowDataSource {
+    package func loadMutationState() async throws -> RepositoryMutationState {
         guard let repository = resolvedRepository else {
             throw RepositoryMutationError.unavailable
         }
@@ -497,7 +588,7 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
         return try await mutationState(in: repository)
     }
 
-    func checkout(_ request: RepositoryCheckoutRequest) async throws -> RepositoryMutationResult {
+    package func checkout(_ request: RepositoryCheckoutRequest) async throws -> RepositoryMutationResult {
         guard let repository = resolvedRepository else {
             throw RepositoryMutationError.unavailable
         }
@@ -543,18 +634,15 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
             }
         }
 
-        let snapshot = try await loadSnapshot()
-        let selectedID = snapshot.commits.first(where: \.isHEAD)?.id
-            ?? snapshot.commits.first(where: { !$0.isArtificial })?.id
+        let selectedID = try await mutationState(in: repository).headID
         return RepositoryMutationResult(
-            snapshot: snapshot,
-            selectedCommitID: selectedID,
+            selectedCommitID: selectedID.map(RevisionID.object),
             outcome: outcome,
             message: message
         )
     }
 
-    func stage(paths: [String]) async throws -> RepositoryMutationResult {
+    package func stage(paths: [String]) async throws -> RepositoryMutationResult {
         let repository = try mutationRepository()
         let paths = normalizedPaths(paths)
         guard !paths.isEmpty else { throw RepositoryMutationError.noPaths }
@@ -570,10 +658,10 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
         }
         guard !applicablePaths.isEmpty else { throw RepositoryMutationError.noPaths }
         _ = try await checkedMutation(["add", "--all", "--"] + applicablePaths, in: repository)
-        return try await refreshedMutationResult(message: "Staged \(applicablePaths.count) path(s).", selectedCommitID: "$working-directory")
+        return try await refreshedMutationResult(message: "Staged \(applicablePaths.count) path(s).", selectedCommitID: .workingDirectory)
     }
 
-    func unstage(paths: [String]) async throws -> RepositoryMutationResult {
+    package func unstage(paths: [String]) async throws -> RepositoryMutationResult {
         let repository = try mutationRepository()
         let paths = normalizedPaths(paths)
         guard !paths.isEmpty else { throw RepositoryMutationError.noPaths }
@@ -583,16 +671,16 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
         } else {
             _ = try await checkedMutation(["reset", "--quiet", "HEAD", "--"] + paths, in: repository)
         }
-        return try await refreshedMutationResult(message: "Unstaged \(paths.count) path(s).", selectedCommitID: "$index")
+        return try await refreshedMutationResult(message: "Unstaged \(paths.count) path(s).", selectedCommitID: .index)
     }
 
-    func stageAll() async throws -> RepositoryMutationResult {
+    package func stageAll() async throws -> RepositoryMutationResult {
         let repository = try mutationRepository()
         _ = try await checkedMutation(["add", "--all", "--"], in: repository)
-        return try await refreshedMutationResult(message: "Staged all changes.", selectedCommitID: "$working-directory")
+        return try await refreshedMutationResult(message: "Staged all changes.", selectedCommitID: .workingDirectory)
     }
 
-    func unstageAll() async throws -> RepositoryMutationResult {
+    package func unstageAll() async throws -> RepositoryMutationResult {
         let repository = try mutationRepository()
         let state = try await mutationState(in: repository)
         if state.headID == nil {
@@ -600,10 +688,10 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
         } else {
             _ = try await checkedMutation(["reset", "--mixed", "--quiet", "HEAD"], in: repository)
         }
-        return try await refreshedMutationResult(message: "Unstaged all changes.", selectedCommitID: "$index")
+        return try await refreshedMutationResult(message: "Unstaged all changes.", selectedCommitID: .index)
     }
 
-    func applyHunk(_ selection: RepositoryHunkSelection) async throws -> RepositoryMutationResult {
+    package func applyHunk(_ selection: RepositoryHunkSelection) async throws -> RepositoryMutationResult {
         let repository = try mutationRepository()
         guard let patch = GitHunkPatchBuilder.patch(from: selection.diff, containing: selection.lineID) else {
             throw RepositoryMutationError.hunkUnavailable
@@ -611,18 +699,18 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
         var arguments = ["apply", "--cached", "--index", "--whitespace=nowarn"]
         if selection.direction == .unstage { arguments.append("--reverse") }
         let result = try await git.run(
-            arguments: arguments,
+            GitCommand(arguments: arguments, accessesRemote: false, changesRepositoryState: true),
             in: repository.rootURL,
             standardInput: patch,
             environment: [:]
         )
         guard result.succeeded else { throw commandError(from: result) }
         let verb = selection.direction == .stage ? "Staged" : "Unstaged"
-        let selectedID = selection.direction == .stage ? "$working-directory" : "$index"
+        let selectedID: RevisionID = selection.direction == .stage ? .workingDirectory : .index
         return try await refreshedMutationResult(message: "\(verb) selected hunk in \(selection.file.path).", selectedCommitID: selectedID)
     }
 
-    func applyLines(_ selection: RepositoryLineSelection) async throws -> RepositoryMutationResult {
+    package func applyLines(_ selection: RepositoryLineSelection) async throws -> RepositoryMutationResult {
         let repository = try mutationRepository()
         guard let patch = GitSelectedLinePatchBuilder.patch(
             from: selection.diff,
@@ -636,21 +724,21 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
         var arguments = ["apply", "--cached", "--index", "--whitespace=nowarn"]
         if selection.direction == .unstage { arguments.append("--reverse") }
         let result = try await git.run(
-            arguments: arguments,
+            GitCommand(arguments: arguments, accessesRemote: false, changesRepositoryState: true),
             in: repository.rootURL,
             standardInput: patch,
             environment: [:]
         )
         guard result.succeeded else { throw commandError(from: result) }
         let verb = selection.direction == .stage ? "Staged" : "Unstaged"
-        let selectedID = selection.direction == .stage ? "$working-directory" : "$index"
+        let selectedID: RevisionID = selection.direction == .stage ? .workingDirectory : .index
         return try await refreshedMutationResult(
             message: "\(verb) \(selection.lineIDs.count) selected line(s) in \(selection.file.path).",
             selectedCommitID: selectedID
         )
     }
 
-    func loadCommitState(
+    package func loadCommitState(
         historyLimit: Int,
         showOnlyMyMessages: Bool,
         rememberAmend: Bool
@@ -735,7 +823,7 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
         )
     }
 
-    func saveCommitDraft(
+    package func saveCommitDraft(
         message: String,
         amend: Bool,
         rememberAmend: Bool,
@@ -766,7 +854,7 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
         }
     }
 
-    func commit(_ request: RepositoryCommitRequest) async throws -> RepositoryMutationResult {
+    package func commit(_ request: RepositoryCommitRequest) async throws -> RepositoryMutationResult {
         let repository = try mutationRepository()
         guard !request.message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw RepositoryMutationError.emptyCommitMessage
@@ -823,7 +911,7 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
             normalizedAuthor: author
         )
         let result = try await git.run(
-            arguments: arguments,
+            GitCommand(arguments: arguments, accessesRemote: false, changesRepositoryState: true),
             in: repository.rootURL,
             standardInput: nil,
             environment: [:]
@@ -837,19 +925,16 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
             }
         }
 
-        let snapshot = try await loadSnapshot()
-        let headID = snapshot.commits.first(where: \.isHEAD)?.id
-            ?? snapshot.commits.first(where: { !$0.isArtificial })?.id
+        let headID = try await mutationState(in: repository).headID
         let verb = isAmend ? "Amended" : "Created"
         return RepositoryMutationResult(
-            snapshot: snapshot,
-            selectedCommitID: headID,
+            selectedCommitID: headID.map(RevisionID.object),
             outcome: .completed,
-            message: "\(verb) commit \(headID.map { String($0.prefix(8)) } ?? "")."
+            message: "\(verb) commit \(headID?.shortString ?? "")."
         )
     }
 
-    func resetChanges(_ request: RepositoryResetChangesRequest) async throws -> RepositoryMutationResult {
+    package func resetChanges(_ request: RepositoryResetChangesRequest) async throws -> RepositoryMutationResult {
         let repository = try mutationRepository()
         switch request.scope {
         case .worktree:
@@ -860,16 +945,16 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
         if request.deleteUntracked {
             _ = try await checkedMutation(["clean", "-d", "-f"], in: repository)
         }
-        return try await refreshedMutationResult(message: "Reset repository changes.", selectedCommitID: "$working-directory")
+        return try await refreshedMutationResult(message: "Reset repository changes.", selectedCommitID: .workingDirectory)
     }
 
-    func resetSoftToParent() async throws -> RepositoryMutationResult {
+    package func resetSoftToParent() async throws -> RepositoryMutationResult {
         let repository = try mutationRepository()
         _ = try await checkedMutation(["reset", "--soft", "HEAD~1"], in: repository)
-        return try await refreshedMutationResult(message: "Soft-reset HEAD to its parent.", selectedCommitID: "$index")
+        return try await refreshedMutationResult(message: "Soft-reset HEAD to its parent.", selectedCommitID: .index)
     }
 
-    func createBranch(named name: String) async throws -> RepositoryMutationResult {
+    package func createBranch(named name: String) async throws -> RepositoryMutationResult {
         try await createBranch(RepositoryCreateBranchRequest(
             name: name,
             sourceRevision: nil,
@@ -878,7 +963,7 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
         ))
     }
 
-    func createStash(_ request: RepositoryStashCreateRequest) async throws -> RepositoryMutationResult {
+    package func createStash(_ request: RepositoryStashCreateRequest) async throws -> RepositoryMutationResult {
         let repository = try mutationRepository()
         let beforeRef = try await rawMutation(["rev-parse", "--verify", "--quiet", "refs/stash"], in: repository)
             .standardOutputString.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -921,17 +1006,15 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
 
         let afterRef = try await rawMutation(["rev-parse", "--verify", "--quiet", "refs/stash"], in: repository)
             .standardOutputString.trimmingCharacters(in: .whitespacesAndNewlines)
-        let snapshot = try await loadSnapshot()
         let created = !afterRef.isEmpty && afterRef != beforeRef
         return RepositoryMutationResult(
-            snapshot: snapshot,
             selectedCommitID: nil,
             outcome: .completed,
             message: created ? "Created stash." : "No local changes to save."
         )
     }
 
-    func applyStash(_ stash: Stash) async throws -> RepositoryMutationResult {
+    package func applyStash(_ stash: Stash) async throws -> RepositoryMutationResult {
         let repository = try mutationRepository()
         try await validate(stash: stash, repository: repository)
         let command = try await rawMutation(["stash", "apply", stash.selector], in: repository)
@@ -942,15 +1025,15 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
                     command: command,
                     message: "Applied \(stash.selector) with conflicts.",
                     repository: repository,
-                    selectedCommitID: stash.commitID
+                    selectedCommitID: .object(stash.commitID)
                 )
             }
             throw commandError(from: command)
         }
-        return try await refreshedMutationResult(message: "Applied \(stash.selector).", selectedCommitID: stash.commitID)
+        return try await refreshedMutationResult(message: "Applied \(stash.selector).", selectedCommitID: .object(stash.commitID))
     }
 
-    func popStash(_ stash: Stash?) async throws -> RepositoryMutationResult {
+    package func popStash(_ stash: Stash?) async throws -> RepositoryMutationResult {
         let repository = try mutationRepository()
         if let stash { try await validate(stash: stash, repository: repository) }
         if stash == nil {
@@ -967,40 +1050,38 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
                     command: command,
                     message: "Popped \(stash?.selector ?? "latest stash") with conflicts; the stash was kept.",
                     repository: repository,
-                    selectedCommitID: stash?.commitID
+                    selectedCommitID: stash.map { .object($0.commitID) }
                 )
             }
             throw commandError(from: command)
         }
-        let snapshot = try await loadSnapshot()
-        let selectedID = snapshot.commits.first(where: \.isHEAD)?.id
+        let selectedID = try await mutationState(in: repository).headID
         return RepositoryMutationResult(
-            snapshot: snapshot,
-            selectedCommitID: selectedID,
+            selectedCommitID: selectedID.map(RevisionID.object),
             outcome: .completed,
             message: "Popped \(stash?.selector ?? "latest stash")."
         )
     }
 
-    func dropStash(_ stash: Stash) async throws -> RepositoryMutationResult {
+    package func dropStash(_ stash: Stash) async throws -> RepositoryMutationResult {
         let repository = try mutationRepository()
         try await validate(stash: stash, repository: repository)
         _ = try await checkedMutation(["stash", "drop", stash.selector], in: repository)
-        let snapshot = try await loadSnapshot()
+        let refreshedStashes = try await loadRepositoryState().navigation.stashes
+        let headID = try await mutationState(in: repository).headID
         let droppedIndex = stashIndex(stash.selector)
         let adjacentStash = droppedIndex.flatMap { index -> Stash? in
-            guard !snapshot.stashes.isEmpty else { return nil }
-            return snapshot.stashes[min(index, snapshot.stashes.count - 1)]
+            guard !refreshedStashes.isEmpty else { return nil }
+            return refreshedStashes[min(index, refreshedStashes.count - 1)]
         }
         return RepositoryMutationResult(
-            snapshot: snapshot,
-            selectedCommitID: adjacentStash?.commitID ?? snapshot.commits.first(where: \.isHEAD)?.id,
+            selectedCommitID: (adjacentStash?.commitID ?? headID).map(RevisionID.object),
             outcome: .completed,
             message: "Dropped \(stash.selector)."
         )
     }
 
-    func cherryPick(_ request: RepositoryCherryPickRequest) async throws -> RepositoryMutationResult {
+    package func cherryPick(_ request: RepositoryCherryPickRequest) async throws -> RepositoryMutationResult {
         let repository = try mutationRepository()
         guard !request.items.isEmpty else { throw RepositoryMutationError.noRevisions }
         let state = try await mutationState(in: repository)
@@ -1015,7 +1096,7 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
         return try await runCherryPickItems(request.items, options: request.options, repository: repository)
     }
 
-    func continueCherryPick() async throws -> RepositoryMutationResult {
+    package func continueCherryPick() async throws -> RepositoryMutationResult {
         let repository = try mutationRepository()
         let state = try await mutationState(in: repository)
         guard state.cherryPickInProgress else { throw RepositoryMutationError.cherryPickNotInProgress }
@@ -1023,7 +1104,7 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
             throw RepositoryMutationError.unresolvedConflicts(state.conflictedPaths)
         }
         let continued = try await git.run(
-            arguments: ["cherry-pick", "--continue"],
+            GitCommand(arguments: ["cherry-pick", "--continue"], accessesRemote: false, changesRepositoryState: true),
             in: repository.rootURL,
             standardInput: nil,
             environment: ["GIT_EDITOR": "true"]
@@ -1037,47 +1118,44 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
             return try await runCherryPickItems(remaining, options: options, repository: repository)
         }
         pendingCherryPickOptions = nil
-        let snapshot = try await loadSnapshot()
+        let headID = try await mutationState(in: repository).headID
         return RepositoryMutationResult(
-            snapshot: snapshot,
-            selectedCommitID: snapshot.commits.first(where: \.isHEAD)?.id,
+            selectedCommitID: headID.map(RevisionID.object),
             outcome: .completed,
             message: "Cherry-pick continued."
         )
     }
 
-    func abortCherryPick() async throws -> RepositoryMutationResult {
+    package func abortCherryPick() async throws -> RepositoryMutationResult {
         let repository = try mutationRepository()
         let state = try await mutationState(in: repository)
         guard state.cherryPickInProgress else { throw RepositoryMutationError.cherryPickNotInProgress }
         _ = try await checkedMutation(["cherry-pick", "--abort"], in: repository)
         pendingCherryPickItems = []
         pendingCherryPickOptions = nil
-        let snapshot = try await loadSnapshot()
+        let headID = try await mutationState(in: repository).headID
         return RepositoryMutationResult(
-            snapshot: snapshot,
-            selectedCommitID: snapshot.commits.first(where: \.isHEAD)?.id,
+            selectedCommitID: headID.map(RevisionID.object),
             outcome: .completed,
             message: "Cherry-pick aborted."
         )
     }
 
-    func abortMerge() async throws -> RepositoryMutationResult {
+    package func abortMerge() async throws -> RepositoryMutationResult {
         let repository = try mutationRepository()
         guard FileManager.default.fileExists(atPath: repository.gitDirectoryURL.appendingPathComponent("MERGE_HEAD").path) else {
             throw RepositoryMutationError.mergeNotInProgress
         }
         _ = try await checkedMutation(["merge", "--abort"], in: repository)
-        let snapshot = try await loadSnapshot()
+        let headID = try await mutationState(in: repository).headID
         return RepositoryMutationResult(
-            snapshot: snapshot,
-            selectedCommitID: snapshot.commits.first(where: \.isHEAD)?.id,
+            selectedCommitID: headID.map(RevisionID.object),
             outcome: .completed,
             message: "Merge aborted."
         )
     }
 
-    func loadMergeToolConfiguration() async throws -> RepositoryMergeToolConfiguration? {
+    package func loadMergeToolConfiguration() async throws -> RepositoryMergeToolConfiguration? {
         let repository = try mutationRepository()
         let gui = try await rawMutation(["config", "--get", "merge.guitool"], in: repository)
         let guiName = gui.standardOutputString.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1090,7 +1168,7 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
         return RepositoryMergeToolConfiguration(name: standardName, usesGUISetting: false)
     }
 
-    func runMergeTool(paths: [String]) async throws -> RepositoryMutationResult {
+    package func runMergeTool(paths: [String]) async throws -> RepositoryMutationResult {
         let repository = try mutationRepository()
         let paths = normalizedPaths(paths)
         guard !paths.isEmpty else { throw RepositoryMutationError.noPaths }
@@ -1108,29 +1186,31 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
         _ = try await checkedMutation(arguments, in: repository)
         return try await refreshedMutationResult(
             message: "Merge tool completed for \(paths.count) path(s).",
-            selectedCommitID: "$working-directory"
+            selectedCommitID: .workingDirectory
         )
     }
 
-    func loadInteractiveRebasePlan(upstream: String) async throws -> [RepositoryRebaseTodoItem] {
+    package func loadInteractiveRebasePlan(upstream: String) async throws -> [RepositoryRebaseTodoItem] {
         let repository = try mutationRepository()
         let resolvedUpstream = try await validateRevision(upstream, repository: repository)
         let output = try await checkedMutation([
             "log", "--reverse", "--topo-order", "--no-merges",
-            "--format=%H%x00%s", "\(resolvedUpstream)..HEAD"
+            "--format=%H%x00%s", "\(resolvedUpstream.string)..HEAD"
         ], in: repository).standardOutputString
         return output.split(separator: "\n", omittingEmptySubsequences: true).compactMap { line in
             let fields = line.split(separator: "\0", maxSplits: 1, omittingEmptySubsequences: false)
-            guard fields.count == 2 else { return nil }
+            guard fields.count == 2,
+                  let commitID = try? ObjectID.parse(String(fields[0]))
+            else { return nil }
             return RepositoryRebaseTodoItem(
-                commitID: String(fields[0]),
+                commitID: commitID,
                 subject: String(fields[1]),
                 action: .pick
             )
         }
     }
 
-    func loadNativeInteractiveRebaseTodo(_ request: RepositoryInteractiveRebaseTodoRequest) async throws -> String {
+    package func loadNativeInteractiveRebaseTodo(_ request: RepositoryInteractiveRebaseTodoRequest) async throws -> String {
         let repository = try mutationRepository()
         let state = try await mutationState(in: repository)
         try validateCanStartRebase(state)
@@ -1159,7 +1239,7 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
         try Data(script.utf8).write(to: editor, options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: editor.path)
         let result = try await git.run(
-            arguments: arguments,
+            GitCommand(arguments: arguments, accessesRemote: false, changesRepositoryState: true),
             in: repository.rootURL,
             standardInput: nil,
             environment: [
@@ -1181,7 +1261,7 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
         return todo
     }
 
-    func loadRebaseConfiguration() async throws -> RepositoryRebaseConfiguration {
+    package func loadRebaseConfiguration() async throws -> RepositoryRebaseConfiguration {
         let repository = try mutationRepository()
         let state = try await mutationState(in: repository)
         async let autoSquashResult = rawMutation(["config", "--bool", "--get", "rebase.autosquash"], in: repository)
@@ -1196,7 +1276,7 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
         )
     }
 
-    func loadRebaseState() async throws -> RepositoryRebaseState {
+    package func loadRebaseState() async throws -> RepositoryRebaseState {
         let repository = try mutationRepository()
         let mutation = try await mutationState(in: repository)
         let rebaseDirectory = rebaseDirectoryURL(repository)
@@ -1214,13 +1294,14 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
 
         let stopped = readRebaseFile("stopped-sha", directory: rebaseDirectory)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        let stoppedObjectID = stopped.flatMap { try? ObjectID.parse($0) }
         let done = parseRebaseTodo(readRebaseFile("done", directory: rebaseDirectory) ?? "")
         let todo = parseRebaseTodo(readRebaseFile("git-rebase-todo", directory: rebaseDirectory) ?? "")
         var patches = done.map { item in
-            let isCurrent = stopped.map { item.commitID.hasPrefix($0) || $0.hasPrefix(item.commitID) } ?? false
+            let isCurrent = stopped.map { item.revisionToken.hasPrefix($0) || $0.hasPrefix(item.revisionToken) } ?? false
             return RepositoryRebasePatch(
                 action: item.action,
-                commitID: item.commitID,
+                revisionToken: item.revisionToken,
                 subject: item.subject,
                 author: "",
                 date: "",
@@ -1228,10 +1309,10 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
             )
         }
         patches.append(contentsOf: todo.map { item in
-            let isCurrent = stopped.map { item.commitID.hasPrefix($0) || $0.hasPrefix(item.commitID) } ?? false
+            let isCurrent = stopped.map { item.revisionToken.hasPrefix($0) || $0.hasPrefix(item.revisionToken) } ?? false
             return RepositoryRebasePatch(
                 action: item.action,
-                commitID: item.commitID,
+                revisionToken: item.revisionToken,
                 subject: item.subject,
                 author: "",
                 date: "",
@@ -1242,11 +1323,11 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
             patches = parseApplyRebasePatches(directory: rebaseDirectory)
         }
         if let stopped, !patches.contains(where: { $0.status == .applying }) {
-            patches.append(RepositoryRebasePatch(action: "pick", commitID: stopped, subject: "", author: "", date: "", status: .applying))
+            patches.append(RepositoryRebasePatch(action: "pick", revisionToken: stopped, subject: "", author: "", date: "", status: .applying))
         }
         for index in patches.indices {
             let metadata = try await rawMutation(
-                ["show", "-s", "--format=%an%x00%aI%x00%B", patches[index].commitID],
+                ["show", "-s", "--format=%an%x00%aI%x00%B", patches[index].revisionToken],
                 in: repository
             )
             guard metadata.succeeded else { continue }
@@ -1257,7 +1338,7 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
                 : patches[index].subject
             patches[index] = RepositoryRebasePatch(
                 action: patches[index].action,
-                commitID: patches[index].commitID,
+                revisionToken: patches[index].revisionToken,
                 subject: subject,
                 author: String(fields[0]),
                 date: String(fields[1]),
@@ -1271,14 +1352,14 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
             inProgress: true,
             hasConflicts: !mutation.conflictedPaths.isEmpty,
             currentBranch: mutation.currentBranch ?? (recordedBranch?.isEmpty == false ? recordedBranch : nil),
-            currentCommitID: stopped,
+            currentCommitID: stoppedObjectID,
             patches: patches,
             canEditTodo: FileManager.default.fileExists(atPath: rebaseDirectory.appendingPathComponent("git-rebase-todo").path),
             hasAutoStash: FileManager.default.fileExists(atPath: rebaseDirectory.appendingPathComponent("autostash").path)
         )
     }
 
-    func rebase(_ request: RepositoryRebaseRequest) async throws -> RepositoryMutationResult {
+    package func rebase(_ request: RepositoryRebaseRequest) async throws -> RepositoryMutationResult {
         let repository = try mutationRepository()
         let state = try await mutationState(in: repository)
         try validateCanStartRebase(state)
@@ -1306,7 +1387,7 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
         )
     }
 
-    func interactiveRebase(_ request: RepositoryInteractiveRebaseRequest) async throws -> RepositoryMutationResult {
+    package func interactiveRebase(_ request: RepositoryInteractiveRebaseRequest) async throws -> RepositoryMutationResult {
         let repository = try mutationRepository()
         let state = try await mutationState(in: repository)
         try validateCanStartRebase(state)
@@ -1320,12 +1401,12 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
             pendingRebaseActions = prepared.actions
             todo = prepared.todo
         } else {
-            let expected = try await loadInteractiveRebasePlan(upstream: upstream)
+            let expected = try await loadInteractiveRebasePlan(upstream: upstream.string)
             let effectiveItems = request.autoSquash ? autosquashed(request.items) : request.items
             try validateInteractivePlan(effectiveItems, expected: expected)
-            pendingRebaseActions = Dictionary(uniqueKeysWithValues: effectiveItems.map { ($0.commitID, $0.action) })
+            pendingRebaseActions = Dictionary(uniqueKeysWithValues: effectiveItems.map { ($0.commitID.string, $0.action) })
             todo = effectiveItems.map { item in
-                "\(rebaseTodoCommand(item.action)) \(item.commitID) \(sanitizeTodoSubject(item.subject))"
+                "\(rebaseTodoCommand(item.action)) \(item.commitID.string) \(sanitizeTodoSubject(item.subject))"
             }.joined(separator: "\n") + "\n"
         }
         let arguments = try await rebaseArguments(
@@ -1343,7 +1424,7 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
             repository: repository
         )
         let command = try await git.run(
-            arguments: arguments,
+            GitCommand(arguments: arguments, accessesRemote: false, changesRepositoryState: true),
             in: repository.rootURL,
             standardInput: Data(todo.utf8),
             environment: [
@@ -1358,21 +1439,21 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
         )
     }
 
-    func editRebaseTodo(_ items: [RepositoryRebaseTodoItem]) async throws -> RepositoryRebaseState {
+    package func editRebaseTodo(_ items: [RepositoryRebaseTodoItem]) async throws -> RepositoryRebaseState {
         let repository = try mutationRepository()
         let state = try await loadRebaseState()
         guard state.inProgress, state.canEditTodo else { throw RepositoryMutationError.rebaseNotInProgress }
-        let pendingIDs = Set(state.patches.filter { $0.status == .pending }.map(\.commitID))
-        guard Set(items.map(\.commitID)) == pendingIDs, items.count == pendingIDs.count else {
+        let pendingIDs = Set(state.patches.filter { $0.status == .pending }.map(\.revisionToken))
+        guard Set(items.map { $0.commitID.string }) == pendingIDs, items.count == pendingIDs.count else {
             throw RepositoryMutationError.invalidRebasePlan("the edited todo must contain every pending commit exactly once")
         }
         try validateInteractivePlan(items, expected: items.map {
             RepositoryRebaseTodoItem(commitID: $0.commitID, subject: $0.subject, action: .pick)
         })
-        pendingRebaseActions.merge(Dictionary(uniqueKeysWithValues: items.map { ($0.commitID, $0.action) })) { _, new in new }
-        let todo = items.map { "\(rebaseTodoCommand($0.action)) \($0.commitID) \(sanitizeTodoSubject($0.subject))" }.joined(separator: "\n") + "\n"
+        pendingRebaseActions.merge(Dictionary(uniqueKeysWithValues: items.map { ($0.commitID.string, $0.action) })) { _, new in new }
+        let todo = items.map { "\(rebaseTodoCommand($0.action)) \($0.commitID.string) \(sanitizeTodoSubject($0.subject))" }.joined(separator: "\n") + "\n"
         let result = try await git.run(
-            arguments: ["rebase", "--edit-todo"],
+            GitCommand(arguments: ["rebase", "--edit-todo"], accessesRemote: false, changesRepositoryState: true),
             in: repository.rootURL,
             standardInput: Data(todo.utf8),
             environment: ["GIT_SEQUENCE_EDITOR": "/usr/bin/tee"]
@@ -1381,7 +1462,7 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
         return try await loadRebaseState()
     }
 
-    func loadRebaseTodoText() async throws -> String {
+    package func loadRebaseTodoText() async throws -> String {
         let repository = try mutationRepository()
         let state = try await loadRebaseState()
         guard state.inProgress, state.canEditTodo,
@@ -1391,7 +1472,7 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
         return todo
     }
 
-    func editRebaseTodoText(_ todo: String) async throws -> RepositoryRebaseState {
+    package func editRebaseTodoText(_ todo: String) async throws -> RepositoryRebaseState {
         let repository = try mutationRepository()
         _ = try await loadRebaseTodoText()
         let prepared = prepareNativeRebaseTodo(todo)
@@ -1400,7 +1481,7 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
         }
         pendingRebaseActions.merge(prepared.actions) { _, new in new }
         let result = try await git.run(
-            arguments: ["rebase", "--edit-todo"],
+            GitCommand(arguments: ["rebase", "--edit-todo"], accessesRemote: false, changesRepositoryState: true),
             in: repository.rootURL,
             standardInput: Data(prepared.todo.utf8),
             environment: ["GIT_SEQUENCE_EDITOR": "/usr/bin/tee"]
@@ -1409,7 +1490,7 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
         return try await loadRebaseState()
     }
 
-    func continueRebase() async throws -> RepositoryMutationResult {
+    package func continueRebase() async throws -> RepositoryMutationResult {
         let repository = try mutationRepository()
         let state = try await mutationState(in: repository)
         guard state.rebaseInProgress else { throw RepositoryMutationError.rebaseNotInProgress }
@@ -1417,7 +1498,7 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
             throw RepositoryMutationError.unresolvedConflicts(state.conflictedPaths)
         }
         let command = try await git.run(
-            arguments: ["rebase", "--continue"],
+            GitCommand(arguments: ["rebase", "--continue"], accessesRemote: false, changesRepositoryState: true),
             in: repository.rootURL,
             standardInput: nil,
             environment: ["GIT_EDITOR": "true"]
@@ -1429,12 +1510,12 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
         )
     }
 
-    func skipRebase() async throws -> RepositoryMutationResult {
+    package func skipRebase() async throws -> RepositoryMutationResult {
         let repository = try mutationRepository()
         let state = try await mutationState(in: repository)
         guard state.rebaseInProgress else { throw RepositoryMutationError.rebaseNotInProgress }
         let command = try await git.run(
-            arguments: ["rebase", "--skip"],
+            GitCommand(arguments: ["rebase", "--skip"], accessesRemote: false, changesRepositoryState: true),
             in: repository.rootURL,
             standardInput: nil,
             environment: ["GIT_EDITOR": "true"]
@@ -1446,16 +1527,15 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
         )
     }
 
-    func abortRebase() async throws -> RepositoryMutationResult {
+    package func abortRebase() async throws -> RepositoryMutationResult {
         let repository = try mutationRepository()
         let state = try await mutationState(in: repository)
         guard state.rebaseInProgress else { throw RepositoryMutationError.rebaseNotInProgress }
         _ = try await checkedMutation(["rebase", "--abort"], in: repository)
         pendingRebaseActions = [:]
-        let snapshot = try await loadSnapshot()
+        let headID = try await mutationState(in: repository).headID
         return RepositoryMutationResult(
-            snapshot: snapshot,
-            selectedCommitID: snapshot.commits.first(where: \.isHEAD)?.id,
+            selectedCommitID: headID.map(RevisionID.object),
             outcome: .completed,
             message: "Rebase aborted."
         )
@@ -1516,7 +1596,7 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
             in: repository
         )
         let resolved = result.standardOutputString.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard result.succeeded, resolved == stash.commitID else {
+        guard result.succeeded, (try? ObjectID.parse(resolved)) == stash.commitID else {
             throw RepositoryMutationError.invalidStash(stash.selector)
         }
     }
@@ -1526,18 +1606,15 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
         repository: ResolvedGitRepository
     ) async throws {
         for item in items {
-            guard !item.commitID.isEmpty, !item.commitID.hasPrefix("$") else {
-                throw RepositoryMutationError.invalidRevision(item.commitID)
-            }
             let resolved = try await rawMutation(
-                ["rev-parse", "--verify", "--quiet", "\(item.commitID)^{commit}"],
+                ["rev-parse", "--verify", "--quiet", "\(item.commitID.string)^{commit}"],
                 in: repository
             )
             guard resolved.succeeded,
-                  resolved.standardOutputString.trimmingCharacters(in: .whitespacesAndNewlines) == item.commitID
-            else { throw RepositoryMutationError.invalidRevision(item.commitID) }
+                  (try? ObjectID.parse(resolved.standardOutputString.trimmingCharacters(in: .whitespacesAndNewlines))) == item.commitID
+            else { throw RepositoryMutationError.invalidRevision(item.commitID.string) }
 
-            let parents = try await checkedMutation(["rev-list", "--parents", "-n", "1", item.commitID], in: repository)
+            let parents = try await checkedMutation(["rev-list", "--parents", "-n", "1", item.commitID.string], in: repository)
                 .standardOutputString.split(whereSeparator: \.isWhitespace)
             let parentCount = max(0, parents.count - 1)
             if parentCount > 1 {
@@ -1568,7 +1645,7 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
 
     private struct ParsedRebaseTodo {
         let action: String
-        let commitID: String
+        let revisionToken: String
         let subject: String
     }
 
@@ -1597,7 +1674,7 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
             }
             return ParsedRebaseTodo(
                 action: action,
-                commitID: String(fields[1]),
+                revisionToken: String(fields[1]),
                 subject: fields.count > 2 ? String(fields[2]) : ""
             )
         }
@@ -1630,7 +1707,7 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
             let date = decodeMIMEHeader(headers["date"] ?? "")
             let subject = decodeMIMEHeader(headers["subject"] ?? "")
             let status: RepositoryRebasePatchStatus = number < next ? .applied : (number == next ? .applying : .pending)
-            return (number, RepositoryRebasePatch(action: "pick", commitID: "", subject: subject, author: author, date: date, status: status))
+            return (number, RepositoryRebasePatch(action: "pick", revisionToken: "", subject: subject, author: author, date: date, status: status))
         }
         .sorted { $0.0 < $1.0 }
         .map(\.1)
@@ -1709,7 +1786,7 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
     }
 
     private func rebaseArguments(
-        upstream: String,
+        upstream: ObjectID,
         interactive: Bool,
         autoSquash: Bool,
         autoStash: Bool,
@@ -1744,9 +1821,9 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
             let resolvedOnto = try await validateRevision(onto, repository: repository)
             let resolvedFrom = try await validateRevision(from, repository: repository)
             let resolvedBranch = try await validateRevision(branch ?? "HEAD", repository: repository)
-            arguments.append(contentsOf: ["--onto", resolvedOnto, resolvedFrom, resolvedBranch])
+            arguments.append(contentsOf: ["--onto", resolvedOnto.string, resolvedFrom.string, resolvedBranch.string])
         } else {
-            arguments.append(upstream)
+            arguments.append(upstream.string)
         }
         return arguments
     }
@@ -1754,7 +1831,7 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
     private func validateRevision(
         _ revision: String,
         repository: ResolvedGitRepository
-    ) async throws -> String {
+    ) async throws -> ObjectID {
         guard !revision.isEmpty, !revision.hasPrefix("$") else {
             throw RepositoryMutationError.invalidRevision(revision)
         }
@@ -1763,10 +1840,10 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
             in: repository
         )
         let resolved = result.standardOutputString.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard result.succeeded, !resolved.isEmpty else {
+        guard result.succeeded, let objectID = try? ObjectID.parse(resolved) else {
             throw RepositoryMutationError.invalidRevision(revision)
         }
-        return resolved
+        return objectID
     }
 
     private func validateInteractivePlan(
@@ -1830,7 +1907,7 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
             guard let marker, case .pick = item.action else { index += 1; continue }
             let target = String(item.subject.dropFirst(marker.prefix.count))
             let targetIndex = result[..<index].lastIndex {
-                $0.commitID.hasPrefix(target) || $0.subject == target
+                $0.commitID.string.hasPrefix(target) || $0.subject == target
             }
             guard let targetIndex else { index += 1; continue }
             result.remove(at: index)
@@ -1851,12 +1928,10 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
     ) async throws -> RepositoryMutationResult {
         let state = try await mutationState(in: repository)
         if !state.conflictedPaths.isEmpty {
-            let snapshot = try await loadSnapshot()
             let output = command.standardErrorString.isEmpty ? command.standardOutputString : command.standardErrorString
             let detail = output.trimmingCharacters(in: .whitespacesAndNewlines)
             return RepositoryMutationResult(
-                snapshot: snapshot,
-                selectedCommitID: try await currentRebaseHead(repository: repository),
+                selectedCommitID: (try await currentRebaseHead(repository: repository)).map(RevisionID.object),
                 outcome: .conflicts(state.conflictedPaths),
                 message: detail.isEmpty ? "Rebase stopped with conflicts." : "Rebase stopped with conflicts. \(detail)"
             )
@@ -1865,29 +1940,28 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
         if state.rebaseInProgress {
             guard let stoppedCommit = try await currentRebaseHead(repository: repository) else {
                 if !command.succeeded { throw commandError(from: command) }
-                let snapshot = try await loadSnapshot()
+                let headID = state.headID
                 return RepositoryMutationResult(
-                    snapshot: snapshot,
-                    selectedCommitID: snapshot.commits.first(where: \.isHEAD)?.id,
+                    selectedCommitID: headID.map(RevisionID.object),
                     outcome: .paused("Rebase is waiting for user input."),
                     message: "Rebase is waiting for user input."
                 )
             }
             let stoppedAction = pendingRebaseActions.first {
-                $0.key.hasPrefix(stoppedCommit) || stoppedCommit.hasPrefix($0.key)
+                $0.key.hasPrefix(stoppedCommit.string) || stoppedCommit.string.hasPrefix($0.key)
             }?.value
             if case .reword(let message) = stoppedAction {
                 var messageData = Data(message.utf8)
                 if messageData.last != 10 { messageData.append(10) }
                 let amend = try await git.run(
-                    arguments: ["commit", "--amend", "--file=-"],
+                    GitCommand(arguments: ["commit", "--amend", "--file=-"], accessesRemote: false, changesRepositoryState: true),
                     in: repository.rootURL,
                     standardInput: messageData,
                     environment: [:]
                 )
                 guard amend.succeeded else { throw commandError(from: amend) }
                 let continued = try await git.run(
-                    arguments: ["rebase", "--continue"],
+                    GitCommand(arguments: ["rebase", "--continue"], accessesRemote: false, changesRepositoryState: true),
                     in: repository.rootURL,
                     standardInput: nil,
                     environment: ["GIT_EDITOR": "true"]
@@ -1899,11 +1973,18 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
                 )
             }
             if !command.succeeded { throw commandError(from: command) }
-            let snapshot = try await loadSnapshot()
-            let subject = snapshot.commits.first(where: { $0.id == stoppedCommit })?.subject ?? String(stoppedCommit.prefix(8))
+            let subjectResult = try await git.run(
+                GitCommand(
+                    arguments: ["show", "-s", "--format=%s", stoppedCommit.string],
+                    accessesRemote: false,
+                    changesRepositoryState: false
+                ),
+                in: repository.rootURL
+            )
+            guard subjectResult.succeeded else { throw commandError(from: subjectResult) }
+            let subject = subjectResult.standardOutputString.trimmingCharacters(in: .whitespacesAndNewlines)
             return RepositoryMutationResult(
-                snapshot: snapshot,
-                selectedCommitID: snapshot.commits.first(where: \.isHEAD)?.id,
+                selectedCommitID: state.headID.map(RevisionID.object),
                 outcome: .paused("Edit \(subject), amend it if needed, then continue or abort."),
                 message: "Rebase paused for edit at \(subject)."
             )
@@ -1911,25 +1992,23 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
 
         guard command.succeeded else { throw commandError(from: command) }
         pendingRebaseActions = [:]
-        let snapshot = try await loadSnapshot()
         let output = (command.standardOutputString + "\n" + command.standardErrorString)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let message = output.localizedCaseInsensitiveContains("up to date")
             ? "Current branch is up to date. Nothing to rebase."
             : completionMessage
         return RepositoryMutationResult(
-            snapshot: snapshot,
-            selectedCommitID: snapshot.commits.first(where: \.isHEAD)?.id,
+            selectedCommitID: state.headID.map(RevisionID.object),
             outcome: .completed,
             message: message
         )
     }
 
-    private func currentRebaseHead(repository: ResolvedGitRepository) async throws -> String? {
+    private func currentRebaseHead(repository: ResolvedGitRepository) async throws -> ObjectID? {
         let result = try await rawMutation(["rev-parse", "--verify", "--quiet", "REBASE_HEAD"], in: repository)
         guard result.succeeded else { return nil }
         let value = result.standardOutputString.trimmingCharacters(in: .whitespacesAndNewlines)
-        return value.isEmpty ? nil : value
+        return try ObjectID.parseIfPresent(value)
     }
 
     private func prepareNativeRebaseTodo(_ todo: String) -> (todo: String, actions: [String: RepositoryRebaseTodoAction]) {
@@ -1974,7 +2053,7 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
             if !options.automaticallyCommit { arguments.append("--no-commit") }
             if options.addReference { arguments.append("-x") }
             if let mainline = item.mainlineParent { arguments += ["--mainline", String(mainline)] }
-            arguments.append(item.commitID)
+            arguments.append(item.commitID.string)
 
             let command = try await rawMutation(arguments, in: repository)
             if !command.succeeded {
@@ -1996,12 +2075,10 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
 
         pendingCherryPickItems = []
         pendingCherryPickOptions = nil
-        let snapshot = try await loadSnapshot()
-        let selectedID = options.automaticallyCommit
-            ? snapshot.commits.first(where: \.isHEAD)?.id
-            : "$index"
+        let selectedID: RevisionID? = options.automaticallyCommit
+            ? try await mutationState(in: repository).headID.map(RevisionID.object)
+            : .index
         return RepositoryMutationResult(
-            snapshot: snapshot,
             selectedCommitID: selectedID,
             outcome: .completed,
             message: "Cherry-picked \(items.count) commit(s)."
@@ -2010,17 +2087,15 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
 
     private func cherryPickConflictResult(
         command: GitCommandResult,
-        commitID: String,
+        commitID: ObjectID,
         repository: ResolvedGitRepository
     ) async throws -> RepositoryMutationResult {
         let state = try await mutationState(in: repository)
-        let snapshot = try await loadSnapshot()
         let output = command.standardErrorString.isEmpty ? command.standardOutputString : command.standardErrorString
         let detail = output.trimmingCharacters(in: .whitespacesAndNewlines)
-        let message = "Cherry-pick stopped at \(commitID.prefix(8)) with conflicts."
+        let message = "Cherry-pick stopped at \(commitID.shortString) with conflicts."
         return RepositoryMutationResult(
-            snapshot: snapshot,
-            selectedCommitID: commitID,
+            selectedCommitID: .object(commitID),
             outcome: .conflicts(state.conflictedPaths),
             message: detail.isEmpty ? message : "\(message) \(detail)"
         )
@@ -2030,16 +2105,14 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
         command: GitCommandResult,
         message: String,
         repository: ResolvedGitRepository,
-        selectedCommitID: String? = nil
+        selectedCommitID: RevisionID? = nil
     ) async throws -> RepositoryMutationResult {
         let state = try await mutationState(in: repository)
-        let snapshot = try await loadSnapshot()
         let output = command.standardErrorString.isEmpty
             ? command.standardOutputString
             : command.standardErrorString
         let detail = output.trimmingCharacters(in: .whitespacesAndNewlines)
         return RepositoryMutationResult(
-            snapshot: snapshot,
             selectedCommitID: selectedCommitID,
             outcome: .conflicts(state.conflictedPaths),
             message: detail.isEmpty ? message : "\(message) \(detail)"
@@ -2053,7 +2126,7 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
         return Int(selector[open.upperBound..<close])
     }
 
-    func mutationRepository() throws -> ResolvedGitRepository {
+    package func mutationRepository() throws -> ResolvedGitRepository {
         guard let repository = resolvedRepository else { throw RepositoryMutationError.unavailable }
         if repository.isBare { throw RepositoryMutationError.bareRepository }
         return repository
@@ -2079,22 +2152,20 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
         return value
     }
 
-    func refreshedMutationResult(message: String, selectedCommitID: String?) async throws -> RepositoryMutationResult {
-        let snapshot = try await loadSnapshot()
+    package func refreshedMutationResult(message: String, selectedCommitID: RevisionID?) async throws -> RepositoryMutationResult {
         let repository = try mutationRepository()
         let state = try await mutationState(in: repository)
         let outcome: RepositoryMutationOutcome = state.conflictedPaths.isEmpty
             ? .completed
             : .conflicts(state.conflictedPaths)
         return RepositoryMutationResult(
-            snapshot: snapshot,
             selectedCommitID: selectedCommitID,
             outcome: outcome,
             message: message
         )
     }
 
-    func mutationState(in repository: ResolvedGitRepository) async throws -> RepositoryMutationState {
+    package func mutationState(in repository: ResolvedGitRepository) async throws -> RepositoryMutationState {
         async let branchResult = checkedMutation(["branch", "--show-current"], in: repository)
         async let headResult = rawMutation(["rev-parse", "--verify", "HEAD"], in: repository)
         async let statusResult = checkedMutation(
@@ -2106,7 +2177,9 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
         let records = try GitOutputParser.parsePorcelainV2(try await statusResult.standardOutput)
         return RepositoryMutationState(
             currentBranch: branch.isEmpty ? nil : branch,
-            headID: head.succeeded ? head.standardOutputString.trimmingCharacters(in: .whitespacesAndNewlines) : nil,
+            headID: head.succeeded
+                ? try ObjectID.parse(head.standardOutputString.trimmingCharacters(in: .whitespacesAndNewlines))
+                : nil,
             hasStagedChanges: records.contains { $0.indexStatus != "." && $0.indexStatus != " " },
             hasUnstagedChanges: records.contains { !$0.isUntracked && $0.worktreeStatus != "." && $0.worktreeStatus != " " },
             hasUntrackedFiles: records.contains { $0.isUntracked },
@@ -2125,17 +2198,20 @@ extension GitRepositoryBrowsingDataSource: RepositoryMutatingDataSource {
         )
     }
 
-    func checkedMutation(_ arguments: [String], in repository: ResolvedGitRepository) async throws -> GitCommandResult {
+    package func checkedMutation(_ arguments: [String], in repository: ResolvedGitRepository) async throws -> GitCommandResult {
         let result = try await rawMutation(arguments, in: repository)
         guard result.succeeded else { throw commandError(from: result) }
         return result
     }
 
-    func rawMutation(_ arguments: [String], in repository: ResolvedGitRepository) async throws -> GitCommandResult {
-        try await git.run(arguments: arguments, in: repository.rootURL)
+    package func rawMutation(_ arguments: [String], in repository: ResolvedGitRepository) async throws -> GitCommandResult {
+        try await git.run(
+            GitCommand(arguments: arguments, accessesRemote: false, changesRepositoryState: true),
+            in: repository.rootURL
+        )
     }
 
-    func commandError(from result: GitCommandResult) -> GitError {
+    package func commandError(from result: GitCommandResult) -> GitError {
         let standardOutput = result.standardOutputString.trimmingCharacters(in: .whitespacesAndNewlines)
         let standardError = result.standardErrorString.trimmingCharacters(in: .whitespacesAndNewlines)
         let detail: String

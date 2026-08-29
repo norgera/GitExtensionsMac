@@ -1,18 +1,19 @@
+import GitExtensionsCore
 import Foundation
 
-enum RepositoryBranchCreationMode: Hashable, Sendable {
+package enum RepositoryBranchCreationMode: Hashable, Sendable {
     case normal
     case orphan(clearWorkingDirectoryAndIndex: Bool)
 }
 
-struct RepositoryCreateBranchRequest: Hashable, Sendable {
-    let name: String
-    let sourceRevision: String?
-    let checkoutAfterCreation: Bool
-    let mode: RepositoryBranchCreationMode
-    let updateSubmodulesAfterCheckout: Bool
+package struct RepositoryCreateBranchRequest: Hashable, Sendable {
+    package let name: String
+    package let sourceRevision: String?
+    package let checkoutAfterCreation: Bool
+    package let mode: RepositoryBranchCreationMode
+    package let updateSubmodulesAfterCheckout: Bool
 
-    init(
+    package init(
         name: String,
         sourceRevision: String?,
         checkoutAfterCreation: Bool,
@@ -27,36 +28,47 @@ struct RepositoryCreateBranchRequest: Hashable, Sendable {
     }
 }
 
-struct RepositoryDeleteBranchesRequest: Hashable, Sendable {
-    let names: [String]
-    let allowUnmerged: Bool
-    let removeLinkedWorktrees: Bool
+package struct RepositoryDeleteBranchesRequest: Hashable, Sendable {
+    package let names: [String]
+    package let allowUnmerged: Bool
+    package let removeLinkedWorktrees: Bool
+
+    package init(names: [String], allowUnmerged: Bool, removeLinkedWorktrees: Bool) {
+        self.names = names
+        self.allowUnmerged = allowUnmerged
+        self.removeLinkedWorktrees = removeLinkedWorktrees
+    }
 }
 
-struct RepositoryRenameBranchRequest: Hashable, Sendable {
-    let oldName: String
-    let newName: String
+package struct RepositoryRenameBranchRequest: Hashable, Sendable {
+    package let oldName: String
+    package let newName: String
+
+    package init(oldName: String, newName: String) {
+        self.oldName = oldName
+        self.newName = newName
+    }
 }
 
-struct RepositoryBranchDeletionCandidate: Hashable, Sendable {
-    let name: String
-    let isCurrent: Bool
-    let isMergedIntoHEAD: Bool
-    let worktreePath: String?
-    let isMainWorktree: Bool
+package struct RepositoryBranchDeletionCandidate: Hashable, Sendable {
+    package let name: String
+    package let isCurrent: Bool
+    package let isMergedIntoHEAD: Bool
+    package let worktreePath: String?
+    package let isMainWorktree: Bool
 }
 
-struct RepositoryRevisionDivergence: Hashable, Sendable {
-    let added: Int
-    let removed: Int
+package struct RepositoryRevisionDivergence: Hashable, Sendable {
+    package let added: Int
+    package let removed: Int
 
-    var displayText: String {
+    package var displayText: String {
         added == 0 && removed == 0 ? "=" : "(+\(added)-\(removed))"
     }
 }
 
-enum RepositoryBranchNameNormalizer {
-    static func normalize(
+package enum RepositoryBranchNameNormalizer {
+    package static func normalize(
         _ branchName: String,
         replacementToken: String = "_",
         allowTrailingSlash: Bool = false
@@ -104,13 +116,13 @@ enum RepositoryBranchNameNormalizer {
     }
 }
 
-enum RepositoryBranchError: LocalizedError, Sendable {
+package enum RepositoryBranchError: LocalizedError, Sendable {
     case branchNotFound(String)
     case branchCheckedOut(name: String, path: String)
     case branchCheckedOutInMainWorktree(name: String, path: String)
     case unmergedBranches([String])
 
-    var errorDescription: String? {
+    package var errorDescription: String? {
         switch self {
         case .branchNotFound(let name):
             "The local branch ‘\(name)’ does not exist."
@@ -124,7 +136,7 @@ enum RepositoryBranchError: LocalizedError, Sendable {
     }
 }
 
-protocol RepositoryCheckoutBranchDataSource: RepositoryMutationStateDataSource {
+package protocol RepositoryCheckoutBranchDataSource: RepositoryMutationStateDataSource {
     func checkout(_ request: RepositoryCheckoutRequest) async throws -> RepositoryMutationResult
     func createBranch(_ request: RepositoryCreateBranchRequest) async throws -> RepositoryMutationResult
     func createBranch(named name: String) async throws -> RepositoryMutationResult
@@ -133,12 +145,12 @@ protocol RepositoryCheckoutBranchDataSource: RepositoryMutationStateDataSource {
     func renameBranch(_ request: RepositoryRenameBranchRequest) async throws -> RepositoryMutationResult
     func isValidBranchName(_ name: String) async throws -> Bool
     func isValidRevision(_ revision: String) async throws -> Bool
-    func isAncestor(_ ancestor: String, of descendant: String) async throws -> Bool
-    func divergence(from revision: String, to target: String) async throws -> RepositoryRevisionDivergence
+    func isAncestor(_ ancestor: ObjectID, of descendant: ObjectID) async throws -> Bool
+    func divergence(from revision: ObjectID, to target: ObjectID) async throws -> RepositoryRevisionDivergence
     func updateSubmodulesAfterCheckout() async throws -> RepositoryMutationResult
 }
 
-extension GitRepositoryBrowsingDataSource {
+package extension GitRepositoryModule {
     func createBranch(_ request: RepositoryCreateBranchRequest) async throws -> RepositoryMutationResult {
         let repository = try mutationRepository()
         let name = request.name.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -148,7 +160,7 @@ extension GitRepositoryBrowsingDataSource {
 
         let before = try await mutationState(in: repository)
         let source = request.sourceRevision?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let resolvedSource: String?
+        let resolvedSource: ObjectID?
         if let source, !source.isEmpty {
             resolvedSource = try await resolvedCommit(source, repository: repository)
         } else if before.headID != nil {
@@ -163,13 +175,13 @@ extension GitRepositoryBrowsingDataSource {
                 throw RepositoryMutationError.invalidRevision(source ?? "HEAD")
             }
             let arguments = request.checkoutAfterCreation
-                ? ["checkout", "-b", name, resolvedSource]
-                : ["branch", name, resolvedSource]
+                ? ["checkout", "-b", name, resolvedSource.string]
+                : ["branch", name, resolvedSource.string]
             _ = try await checkedMutation(arguments, in: repository)
 
         case .orphan(let clearWorkingDirectoryAndIndex):
             var arguments = ["checkout", "--orphan", name]
-            if let resolvedSource { arguments.append(resolvedSource) }
+            if let resolvedSource { arguments.append(resolvedSource.string) }
             _ = try await checkedMutation(arguments, in: repository)
             if clearWorkingDirectoryAndIndex {
                 _ = try await checkedMutation(["rm", "--force", "-r", "."], in: repository)
@@ -285,10 +297,19 @@ extension GitRepositoryBrowsingDataSource {
             return try await refreshedMutationResult(message: "Branch name unchanged.", selectedCommitID: nil)
         }
         _ = try await checkedMutation(["branch", "-m", oldName, newName], in: repository)
-        let snapshot = try await loadSnapshot()
+        let head = try await git.run(
+            GitCommand(
+                arguments: ["rev-parse", "--verify", "HEAD"],
+                accessesRemote: false,
+                changesRepositoryState: false
+            ),
+            in: repository.rootURL
+        )
+        let headID = head.succeeded
+            ? try ObjectID.parse(head.standardOutputString.trimmingCharacters(in: .whitespacesAndNewlines))
+            : nil
         return RepositoryMutationResult(
-            snapshot: snapshot,
-            selectedCommitID: snapshot.commits.first(where: { !$0.isArtificial })?.id,
+            selectedCommitID: headID.map(RevisionID.object),
             outcome: .completed,
             message: "Renamed \(oldName) to \(newName)."
         )
@@ -311,10 +332,10 @@ extension GitRepositoryBrowsingDataSource {
             && !result.standardOutputString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    func isAncestor(_ ancestor: String, of descendant: String) async throws -> Bool {
+    func isAncestor(_ ancestor: ObjectID, of descendant: ObjectID) async throws -> Bool {
         let repository = try mutationRepository()
         let result = try await rawMutation(
-            ["merge-base", "--is-ancestor", ancestor, descendant],
+            ["merge-base", "--is-ancestor", ancestor.string, descendant.string],
             in: repository
         )
         if result.exitStatus == 0 { return true }
@@ -322,10 +343,10 @@ extension GitRepositoryBrowsingDataSource {
         throw commandError(from: result)
     }
 
-    func divergence(from revision: String, to target: String) async throws -> RepositoryRevisionDivergence {
+    func divergence(from revision: ObjectID, to target: ObjectID) async throws -> RepositoryRevisionDivergence {
         let repository = try mutationRepository()
         let result = try await rawMutation(
-            ["rev-list", "--count", "--left-right", "\(revision)...\(target)"],
+            ["rev-list", "--count", "--left-right", "\(revision.string)...\(target.string)"],
             in: repository
         )
         guard result.succeeded else { throw commandError(from: result) }
@@ -333,7 +354,7 @@ extension GitRepositoryBrowsingDataSource {
             .split(whereSeparator: { $0 == "\t" || $0 == " " || $0 == "\n" })
             .compactMap { Int($0) }
         guard counts.count == 2 else {
-            throw RepositoryMutationError.invalidRevision(target)
+            throw RepositoryMutationError.invalidRevision(target.string)
         }
         return RepositoryRevisionDivergence(added: counts[0], removed: counts[1])
     }
@@ -344,16 +365,16 @@ extension GitRepositoryBrowsingDataSource {
         return try await refreshedMutationResult(message: "Updated submodules.", selectedCommitID: nil)
     }
 
-    private func resolvedCommit(_ revision: String, repository: ResolvedGitRepository) async throws -> String {
+    private func resolvedCommit(_ revision: String, repository: ResolvedGitRepository) async throws -> ObjectID {
         let result = try await rawMutation(
             ["rev-parse", "--verify", "--quiet", "\(revision)^{commit}"],
             in: repository
         )
         let value = result.standardOutputString.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard result.succeeded, !value.isEmpty else {
+        guard result.succeeded, let objectID = try? ObjectID.parse(value) else {
             throw RepositoryMutationError.invalidRevision(revision)
         }
-        return value
+        return objectID
     }
 
     private func localBranchNames(repository: ResolvedGitRepository) async throws -> Set<String> {

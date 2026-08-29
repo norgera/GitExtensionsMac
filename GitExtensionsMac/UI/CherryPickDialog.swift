@@ -1,3 +1,5 @@
+import GitExtensionsCore
+import GitCommands
 import AppKit
 
 struct CherryPickDialogSelection: Sendable {
@@ -190,7 +192,7 @@ private final class CherryPickViewController: NSViewController, NSTableViewDataS
         let value: String
         switch tableColumn?.identifier.rawValue {
         case "number": value = String(parent.number)
-        case "message": value = parent.commit?.subject ?? String(commit.parentIDs[row].prefix(8))
+        case "message": value = parent.commit?.subject ?? commit.parentIDs[row].shortString
         case "author": value = parent.commit?.authorName ?? ""
         case "date": value = parent.commit.map { Self.shortDateFormatter.string(from: $0.commitDate) } ?? ""
         default: value = ""
@@ -291,7 +293,7 @@ private final class CherryPickViewController: NSViewController, NSTableViewDataS
         self.commit = commit
         summary.apply(commit)
         parentRows = commit.parentIDs.enumerated().map { offset, parentID in
-            (offset + 1, history.first(where: { $0.id == parentID }))
+            (offset + 1, history.first(where: { $0.id == .object(parentID) }))
         }
         parentTable.reloadData()
         parentSection.isHidden = !commit.isMerge
@@ -325,7 +327,7 @@ private final class CherryPickViewController: NSViewController, NSTableViewDataS
 
 @MainActor
 private enum CherryPickRevisionChooser {
-    static func present(history: [Commit], selectedCommitID: String, owner: NSWindow) async -> Commit? {
+    static func present(history: [Commit], selectedCommitID: RevisionID, owner: NSWindow) async -> Commit? {
         let controller = CherryPickRevisionChooserViewController(
             history: history,
             selectedCommitID: selectedCommitID
@@ -355,14 +357,14 @@ private final class CherryPickRevisionChooserViewController: NSViewController, N
     var onClose: ((Commit?) -> Void)?
 
     private let history: [Commit]
-    private let selectedCommitID: String
+    private let selectedCommitID: RevisionID
     private var filtered: [Commit]
     private var didClose = false
     private let search = NSSearchField()
     private let table = NSTableView()
     private let chooseButton = NSButton(title: "Choose", target: nil, action: nil)
 
-    init(history: [Commit], selectedCommitID: String) {
+    init(history: [Commit], selectedCommitID: RevisionID) {
         self.history = history.filter { !$0.isArtificial }
         self.selectedCommitID = selectedCommitID
         filtered = self.history
@@ -471,7 +473,7 @@ private final class CherryPickRevisionChooserViewController: NSViewController, N
     func controlTextDidChange(_ obj: Notification) {
         let value = search.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         filtered = value.isEmpty ? history : history.filter { commit in
-            commit.id.lowercased().contains(value)
+            commit.id.description.lowercased().contains(value)
                 || commit.subject.lowercased().contains(value)
                 || commit.authorName.lowercased().contains(value)
                 || commit.references.contains { $0.name.lowercased().contains(value) }

@@ -1,3 +1,6 @@
+@testable import GitExtensionsCore
+@testable import GitCommands
+@testable import GitUI
 import Foundation
 
 enum GitPullTests {
@@ -73,8 +76,8 @@ enum GitPullTests {
         defer { fixture.remove() }
         let repository = try fixture.clone(named: "Fetch client")
         try fixture.git(["remote", "add", "upstream", fixture.upstreamURL.path], in: repository)
-        let source = GitRepositoryBrowsingDataSource(repositoryURL: repository)
-        _ = try await source.loadSnapshot()
+        let source = GitRepositoryModule(repositoryURL: repository)
+        _ = try await source.loadRepositoryState()
 
         let branches = try await source.loadRemoteBranchNames(named: "upstream")
         try require(branches.contains("main") && branches.contains("upstream-only"), "fetch: branch discovery is scoped to the selected remote")
@@ -125,8 +128,8 @@ enum GitPullTests {
         try fixture.commit("second\n", path: "second.txt", message: "Second", in: peer)
         try fixture.git(["push", "origin", "main"], in: peer)
         let repository = try fixture.shallowClone(named: "Shallow client")
-        let source = GitRepositoryBrowsingDataSource(repositoryURL: repository)
-        _ = try await source.loadSnapshot()
+        let source = GitRepositoryModule(repositoryURL: repository)
+        _ = try await source.loadRepositoryState()
         let initialState = try await source.loadPullState()
         try require(initialState.isShallow, "unshallow: fixture starts shallow")
         let result = try await source.performPull(
@@ -147,15 +150,19 @@ enum GitPullTests {
         try fixture.commit("remote fast-forward\n", path: "remote.txt", message: "Remote fast-forward", in: peer)
         try fixture.git(["push", "origin", "main"], in: peer)
 
-        let source = GitRepositoryBrowsingDataSource(repositoryURL: repository)
-        _ = try await source.loadSnapshot()
+        let source = GitRepositoryModule(repositoryURL: repository)
+        _ = try await source.loadRepositoryState()
         let result = try await source.performPull(
             RepositoryPullRequest(source: .remote("origin"), mode: .merge),
             output: { _ in }
         )
         try require(result.outcome == .completed, "pull: fast-forward completes")
         try require(try fixture.git(["rev-parse", "HEAD"], in: repository).trimmed == fixture.git(["rev-parse", "origin/main"], in: repository).trimmed, "pull: HEAD fast-forwards to the remote")
-        try require(result.selectedCommitID == result.snapshot.commits.first(where: \.isHEAD)?.id, "pull: refreshed HEAD is selected")
+        let repositoryState = try await source.loadRepositoryState()
+        try require(
+            result.selectedCommitID == repositoryState.identity.headID.map(RevisionID.object),
+            "pull: refreshed HEAD is selected"
+        )
 
         let alreadyCurrent = try await source.performPull(
             RepositoryPullRequest(source: .remote("origin"), mode: .merge),
@@ -173,8 +180,8 @@ enum GitPullTests {
         try fixture.commit("remote\n", path: "remote-divergence.txt", message: "Remote divergence", in: peer)
         try fixture.git(["push", "origin", "main"], in: peer)
 
-        let source = GitRepositoryBrowsingDataSource(repositoryURL: repository)
-        _ = try await source.loadSnapshot()
+        let source = GitRepositoryModule(repositoryURL: repository)
+        _ = try await source.loadRepositoryState()
         let result = try await source.performPull(
             RepositoryPullRequest(source: .remote("origin"), mode: .merge, remoteBranch: "main"),
             output: { _ in }
@@ -195,8 +202,8 @@ enum GitPullTests {
         try fixture.commit("remote\n", path: "remote-rebase.txt", message: "Remote rebase", in: peer)
         try fixture.git(["push", "origin", "main"], in: peer)
 
-        let source = GitRepositoryBrowsingDataSource(repositoryURL: repository)
-        _ = try await source.loadSnapshot()
+        let source = GitRepositoryModule(repositoryURL: repository)
+        _ = try await source.loadRepositoryState()
         let result = try await source.performPull(
             RepositoryPullRequest(source: .remote("origin"), mode: .rebase, remoteBranch: "main"),
             output: { _ in }
@@ -222,8 +229,8 @@ enum GitPullTests {
         try fixture.commit("local conflict\n", path: "shared.txt", message: "Local conflict", in: repository)
         try fixture.commit("remote conflict\n", path: "shared.txt", message: "Remote conflict", in: peer)
         try fixture.git(["push", "origin", "main"], in: peer)
-        let source = GitRepositoryBrowsingDataSource(repositoryURL: repository)
-        _ = try await source.loadSnapshot()
+        let source = GitRepositoryModule(repositoryURL: repository)
+        _ = try await source.loadRepositoryState()
 
         let result = try await source.performPull(
             RepositoryPullRequest(source: .remote("origin"), mode: .merge, remoteBranch: "main"),
@@ -261,8 +268,8 @@ enum GitPullTests {
         let localHead = try fixture.git(["rev-parse", "HEAD"], in: repository).trimmed
         try fixture.commit("remote conflict\n", path: "shared.txt", message: "Remote conflict", in: peer)
         try fixture.git(["push", "origin", "main"], in: peer)
-        let source = GitRepositoryBrowsingDataSource(repositoryURL: repository)
-        _ = try await source.loadSnapshot()
+        let source = GitRepositoryModule(repositoryURL: repository)
+        _ = try await source.loadRepositoryState()
         let result = try await source.performPull(
             RepositoryPullRequest(source: .remote("origin"), mode: .merge, remoteBranch: "main"),
             output: { _ in }
@@ -285,8 +292,8 @@ enum GitPullTests {
         try fixture.commit("local conflict\n", path: "shared.txt", message: "Local conflict", in: repository)
         try fixture.commit("remote conflict\n", path: "shared.txt", message: "Remote conflict", in: peer)
         try fixture.git(["push", "origin", "main"], in: peer)
-        let source = GitRepositoryBrowsingDataSource(repositoryURL: repository)
-        _ = try await source.loadSnapshot()
+        let source = GitRepositoryModule(repositoryURL: repository)
+        _ = try await source.loadRepositoryState()
 
         let result = try await source.performPull(
             RepositoryPullRequest(source: .remote("origin"), mode: .rebase, remoteBranch: "main"),
@@ -310,8 +317,8 @@ enum GitPullTests {
         try fixture.git(["push", "origin", "main"], in: peer)
         try fixture.git(["push", "origin", "pull-test-tag"], in: peer)
 
-        let source = GitRepositoryBrowsingDataSource(repositoryURL: repository)
-        _ = try await source.loadSnapshot()
+        let source = GitRepositoryModule(repositoryURL: repository)
+        _ = try await source.loadRepositoryState()
         _ = try await source.performPull(
             RepositoryPullRequest(source: .remote("origin"), mode: .fetch, tagMode: .noTags),
             output: { _ in }
@@ -346,8 +353,8 @@ enum GitPullTests {
         defer { fixture.remove() }
         let repository = try fixture.clone(named: "Fetch all client")
         try fixture.git(["remote", "add", "upstream", fixture.upstreamURL.path], in: repository)
-        let source = GitRepositoryBrowsingDataSource(repositoryURL: repository)
-        _ = try await source.loadSnapshot()
+        let source = GitRepositoryModule(repositoryURL: repository)
+        _ = try await source.loadRepositoryState()
         let fetched = try await source.performPull(RepositoryPullRequest(source: .allRemotes, mode: .fetch), output: { _ in })
         try require(fetched.outcome == .completed, "fetch all: command completes")
         try require(try fixture.refExists("refs/remotes/origin/origin-only", in: repository), "fetch all: origin is fetched")
@@ -398,8 +405,8 @@ enum GitPullTests {
         try fixture.git(["commit", "-m", "Update submodule"], in: fixture.seedURL)
         try fixture.git(["push", "origin", "main"], in: fixture.seedURL)
 
-        let source = GitRepositoryBrowsingDataSource(repositoryURL: repository)
-        _ = try await source.loadSnapshot()
+        let source = GitRepositoryModule(repositoryURL: repository)
+        _ = try await source.loadRepositoryState()
         let result = try await source.performPull(
             RepositoryPullRequest(
                 source: .remote("origin"),
@@ -423,8 +430,8 @@ enum GitPullTests {
         let fixture = try PullGitFixture.make()
         defer { fixture.remove() }
         let repository = try fixture.clone(named: "Tracking client")
-        let source = GitRepositoryBrowsingDataSource(repositoryURL: repository)
-        _ = try await source.loadSnapshot()
+        let source = GitRepositoryModule(repositoryURL: repository)
+        _ = try await source.loadRepositoryState()
         var state = try await source.loadPullState()
         try require(state.currentBranch == "main" && state.configuredRemote == "origin" && state.configuredMergeBranch == "main", "pull state: configured tracking branch is represented")
         try fixture.git(["config", "--unset", "branch.main.remote"], in: repository)
@@ -467,8 +474,8 @@ enum GitPullTests {
         defer { fixture.remove() }
         let repository = try fixture.clone(named: "Autostash client")
         let peer = try fixture.clone(named: "Autostash peer")
-        let source = GitRepositoryBrowsingDataSource(repositoryURL: repository)
-        _ = try await source.loadSnapshot()
+        let source = GitRepositoryModule(repositoryURL: repository)
+        _ = try await source.loadRepositoryState()
         try fixture.write("untracked only\n", to: repository.appendingPathComponent("untracked-only.txt"))
         let untrackedOnly = try await source.performPull(
             RepositoryPullRequest(

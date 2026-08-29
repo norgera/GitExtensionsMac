@@ -1,3 +1,5 @@
+import GitExtensionsCore
+import GitCommands
 import AppKit
 import SwiftUI
 
@@ -65,7 +67,7 @@ final class ApplicationHostViewController: NSViewController {
         case .dashboard:
             showDashboard()
         case .mock:
-            showBrowser(dataSource: MockRepositoryDataSource())
+            showBrowser(repositoryModule: MockRepositoryDataSource())
         case .repository(let url):
             showDashboard()
             openRepository(url)
@@ -106,8 +108,8 @@ final class ApplicationHostViewController: NSViewController {
         if let error { controller.show(error: error) }
     }
 
-    private func showBrowser(dataSource: any RepositoryBrowsingDataSource) {
-        let controller = RepositoryBrowserViewController(dataSource: dataSource)
+    private func showBrowser(repositoryModule: any RepositoryBrowsingDataSource) {
+        let controller = RepositoryBrowserViewController(repositoryModule: repositoryModule)
         controller.onApplicationCommand = { [weak self] command in
             guard let self else { return false }
             switch command {
@@ -167,14 +169,14 @@ final class ApplicationHostViewController: NSViewController {
         openTask?.cancel()
         if !(activeController is RepositoryStartupViewController) { showDashboard() }
         let gitURL = URL(fileURLWithPath: store.preferences.gitExecutablePath)
-        let source = GitRepositoryBrowsingDataSource(repositoryURL: url, git: GitProcess(executableURL: gitURL))
+        let repositoryModule = GitRepositoryModule(repositoryURL: url, git: GitProcess(executableURL: gitURL))
         openTask = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
-                _ = try await source.loadSnapshot()
+                _ = try await repositoryModule.loadRepositoryState()
                 guard !Task.isCancelled else { return }
                 store.recordOpenedRepository(url)
-                showBrowser(dataSource: source)
+                showBrowser(repositoryModule: repositoryModule)
             } catch is CancellationError {
                 return
             } catch {

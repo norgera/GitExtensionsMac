@@ -1,32 +1,67 @@
+import GitExtensionsCore
 import Darwin
 import Foundation
 
-struct GitCommandResult: Sendable {
-    let arguments: [String]
-    let standardOutput: Data
-    let standardError: Data
-    let exitStatus: Int32
+package struct GitCommand: Sendable, Equatable {
+    package enum ExecutionClass: Sendable, Equatable {
+        case local
+        case remote
+    }
 
-    var succeeded: Bool { exitStatus == 0 }
-    var standardOutputString: String { String(decoding: standardOutput, as: UTF8.self) }
-    var standardErrorString: String { String(decoding: standardError, as: UTF8.self) }
+    package let arguments: [String]
+    package let accessesRemote: Bool
+    package let changesRepositoryState: Bool
+
+    package init(arguments: [String], accessesRemote: Bool, changesRepositoryState: Bool) {
+        self.arguments = arguments
+        self.accessesRemote = accessesRemote
+        self.changesRepositoryState = changesRepositoryState
+    }
+
+    package var executionClass: ExecutionClass { accessesRemote ? .remote : .local }
 }
 
-enum GitOutputStream: Sendable {
+package struct GitCommandResult: Sendable {
+    package let arguments: [String]
+    package let standardOutput: Data
+    package let standardError: Data
+    package let exitStatus: Int32
+    package let executionClass: GitCommand.ExecutionClass
+
+    package init(
+        arguments: [String],
+        standardOutput: Data,
+        standardError: Data,
+        exitStatus: Int32,
+        executionClass: GitCommand.ExecutionClass = .local
+    ) {
+        self.arguments = arguments
+        self.standardOutput = standardOutput
+        self.standardError = standardError
+        self.exitStatus = exitStatus
+        self.executionClass = executionClass
+    }
+
+    package var succeeded: Bool { exitStatus == 0 }
+    package var standardOutputString: String { String(decoding: standardOutput, as: UTF8.self) }
+    package var standardErrorString: String { String(decoding: standardError, as: UTF8.self) }
+}
+
+package enum GitOutputStream: Sendable {
     case standardOutput
     case standardError
 }
 
-struct GitOutputEvent: Sendable {
-    let stream: GitOutputStream
-    let data: Data
+package struct GitOutputEvent: Sendable {
+    package let stream: GitOutputStream
+    package let data: Data
 
-    var text: String { String(decoding: data, as: UTF8.self) }
+    package var text: String { String(decoding: data, as: UTF8.self) }
 }
 
-typealias GitOutputHandler = @Sendable (GitOutputEvent) -> Void
+package typealias GitOutputHandler = @Sendable (GitOutputEvent) -> Void
 
-enum GitError: LocalizedError, Sendable {
+package enum GitError: LocalizedError, Sendable {
     case executableUnavailable(String)
     case invalidRepository(String)
     case launchFailed(String)
@@ -34,7 +69,7 @@ enum GitError: LocalizedError, Sendable {
     case malformedOutput(command: String, detail: String)
     case fileUnavailable(String)
 
-    var errorDescription: String? {
+    package var errorDescription: String? {
         switch self {
         case .executableUnavailable(let path):
             "Git executable is unavailable at \(path)."
@@ -52,7 +87,7 @@ enum GitError: LocalizedError, Sendable {
     }
 }
 
-protocol GitCommandRunning: Sendable {
+package protocol GitCommandRunning: Sendable {
     func run(
         arguments: [String],
         in directory: URL,
@@ -69,11 +104,52 @@ protocol GitCommandRunning: Sendable {
     ) async throws -> GitCommandResult
 }
 
-extension GitCommandRunning {
-    func run(arguments: [String], in directory: URL) async throws -> GitCommandResult {
-        try await run(arguments: arguments, in: directory, standardInput: nil, environment: [:])
+package extension GitCommandRunning {
+    /// Structured entry point. The raw runner remains the sole executable seam;
+    /// remote classification is preserved in the result for process/UI policy.
+    func run(
+        _ command: GitCommand,
+        in directory: URL,
+        standardInput: Data? = nil,
+        environment: [String: String] = [:]
+    ) async throws -> GitCommandResult {
+        let result = try await run(
+            arguments: command.arguments,
+            in: directory,
+            standardInput: standardInput,
+            environment: environment
+        )
+        return GitCommandResult(
+            arguments: result.arguments,
+            standardOutput: result.standardOutput,
+            standardError: result.standardError,
+            exitStatus: result.exitStatus,
+            executionClass: command.executionClass
+        )
     }
 
+    func runStreaming(
+        _ command: GitCommand,
+        in directory: URL,
+        standardInput: Data? = nil,
+        environment: [String: String] = [:],
+        output: @escaping GitOutputHandler
+    ) async throws -> GitCommandResult {
+        let result = try await runStreaming(
+            arguments: command.arguments,
+            in: directory,
+            standardInput: standardInput,
+            environment: environment,
+            output: output
+        )
+        return GitCommandResult(
+            arguments: result.arguments,
+            standardOutput: result.standardOutput,
+            standardError: result.standardError,
+            exitStatus: result.exitStatus,
+            executionClass: command.executionClass
+        )
+    }
     func runStreaming(
         arguments: [String],
         in directory: URL,
@@ -97,16 +173,16 @@ extension GitCommandRunning {
     }
 }
 
-final class GitProcess: GitCommandRunning, @unchecked Sendable {
+package final class GitProcess: GitCommandRunning, @unchecked Sendable {
     private let executableURL: URL
     private let executionQueue = DispatchQueue(label: "com.gitextensions.mac.git-process", qos: .userInitiated, attributes: .concurrent)
     private let ioQueue = DispatchQueue(label: "com.gitextensions.mac.git-process-io", qos: .userInitiated, attributes: .concurrent)
 
-    init(executableURL: URL = URL(fileURLWithPath: "/usr/bin/git")) {
+    package init(executableURL: URL = URL(fileURLWithPath: "/usr/bin/git")) {
         self.executableURL = executableURL
     }
 
-    func run(
+    package func run(
         arguments: [String],
         in directory: URL,
         standardInput: Data? = nil,
@@ -115,7 +191,7 @@ final class GitProcess: GitCommandRunning, @unchecked Sendable {
         try await run(arguments: arguments, in: directory, standardInput: standardInput, environment: environment, output: nil)
     }
 
-    func runStreaming(
+    package func runStreaming(
         arguments: [String],
         in directory: URL,
         standardInput: Data? = nil,

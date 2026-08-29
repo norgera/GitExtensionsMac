@@ -1,23 +1,25 @@
+import GitExtensionsCore
+import GitCommands
 import AppKit
 
 struct StashDialogResult: Sendable {
-    let snapshot: RepositorySnapshot
-    let selectedCommitID: String?
+    let selectedCommitID: RevisionID?
+    let repositoryChanged: Bool
 }
 
 @MainActor
 enum StashDialog {
     static func present(
         source: any RepositoryStashDataSource,
-        snapshot: RepositorySnapshot,
+        context: RepositoryStashContext,
         manageStashes: Bool,
         initialStash: String?,
         owner: NSWindow,
-        resolveConflicts: @escaping @MainActor (NSWindow) async -> RepositorySnapshot?
+        resolveConflicts: @escaping @MainActor (NSWindow) async -> Bool
     ) async -> StashDialogResult {
         let controller = StashViewController(
             source: source,
-            snapshot: snapshot,
+            context: context,
             manageStashes: manageStashes,
             initialStash: initialStash,
             resolveConflicts: resolveConflicts
@@ -47,7 +49,7 @@ enum StashDialog {
             controller.onClose = { [windowController] result in
                 panel.orderOut(nil)
                 owner.makeKeyAndOrderFront(nil)
-                _ = windowController // Retain the independent window until dismissal.
+                _ = windowController
                 continuation.resume(returning: result)
             }
             windowController.showWindow(nil)
@@ -64,7 +66,7 @@ enum StashDialog {
 private final class StashViewController: RetainingSplitViewController, NSWindowDelegate {
     private enum Selection: Equatable {
         case workingDirectory
-        case stash(String)
+        case stash(ObjectID)
     }
 
     private struct DisplayFileContext {
@@ -76,10 +78,10 @@ private final class StashViewController: RetainingSplitViewController, NSWindowD
     var onClose: ((StashDialogResult) -> Void)?
 
     private let source: any RepositoryStashDataSource
-    private var snapshot: RepositorySnapshot
+    private var context: RepositoryStashContext
     private let manageStashes: Bool
     private let initialStash: String?
-    private let resolveConflicts: @MainActor (NSWindow) async -> RepositorySnapshot?
+    private let resolveConflicts: @MainActor (NSWindow) async -> Bool
 
     private let leadingController = NSViewController()
     private let filesController = ChangedFilesViewController()
@@ -103,20 +105,21 @@ private final class StashViewController: RetainingSplitViewController, NSWindowD
     private var didClose = false
     private var isMutating = false
     private var isLoadingSelection = false
-    private var lastOperationSelectedCommitID: String?
+    private var lastOperationSelectedCommitID: RevisionID?
+    private var repositoryChanged = false
     private var didSetInitialDivider = false
 
     private var isBusy: Bool { isMutating || isLoadingSelection }
 
     init(
         source: any RepositoryStashDataSource,
-        snapshot: RepositorySnapshot,
+        context: RepositoryStashContext,
         manageStashes: Bool,
         initialStash: String?,
-        resolveConflicts: @escaping @MainActor (NSWindow) async -> RepositorySnapshot?
+        resolveConflicts: @escaping @MainActor (NSWindow) async -> Bool
     ) {
         self.source = source
-        self.snapshot = snapshot
+        self.context = context
         self.manageStashes = manageStashes
         self.initialStash = initialStash
         self.resolveConflicts = resolveConflicts
@@ -276,38 +279,38 @@ private final class StashViewController: RetainingSplitViewController, NSWindowD
 
     private var selection: Selection {
         guard selector.indexOfSelectedItem > 0,
-              selector.indexOfSelectedItem - 1 < snapshot.stashes.count else { return .workingDirectory }
-        return .stash(snapshot.stashes[selector.indexOfSelectedItem - 1].commitID)
+              selector.indexOfSelectedItem - 1 < context.stashes.count else { return .workingDirectory }
+        return .stash(context.stashes[selector.indexOfSelectedItem - 1].commitID)
     }
 
     private var selectedStash: Stash? {
         guard case .stash(let commitID) = selection else { return nil }
-        return snapshot.stashes.first { $0.commitID == commitID }
+        return context.stashes.first { $0.commitID == commitID }
     }
 
-    private func reloadSelector(initial: Bool = false, preferredCommitID: String? = nil, preferredIndex: Int? = nil) {
+    private func reloadSelector(initial: Bool = false, preferredCommitID: RevisionID? = nil, preferredIndex: Int? = nil) {
         let previous = selection
         selector.removeAllItems()
         selector.addItem(withTitle: "Current working directory changes")
-        snapshot.stashes.forEach { stash in
+        context.stashes.forEach { stash in
             selector.addItem(withTitle: "\(stash.selector.replacingOccurrences(of: "stash", with: "")): \(stash.subject)")
         }
 
         let selectedIndex: Int
         if let preferredCommitID,
-           let stashIndex = snapshot.stashes.firstIndex(where: { $0.commitID == preferredCommitID }) {
+           let stashIndex = context.stashes.firstIndex(where: { .object($0.commitID) == preferredCommitID }) {
             selectedIndex = stashIndex + 1
         } else if let preferredIndex {
             selectedIndex = min(max(0, preferredIndex), max(0, selector.numberOfItems - 1))
         } else if initial,
                   let initialStash,
-                  let stashIndex = snapshot.stashes.firstIndex(where: { $0.selector == initialStash }) {
+                  let stashIndex = context.stashes.firstIndex(where: { $0.selector == initialStash }) {
             selectedIndex = stashIndex + 1
-        } else if initial, manageStashes, !snapshot.stashes.isEmpty {
+        } else if initial, manageStashes, !context.stashes.isEmpty {
             selectedIndex = 1
         } else if !initial,
                   case .stash(let commitID) = previous,
-                  let stashIndex = snapshot.stashes.firstIndex(where: { $0.commitID == commitID }) {
+                  let stashIndex = context.stashes.firstIndex(where: { $0.commitID == commitID }) {
             selectedIndex = stashIndex + 1
         } else {
             selectedIndex = 0
@@ -354,8 +357,9 @@ private final class StashViewController: RetainingSplitViewController, NSWindowD
     private func makeSections(for selection: Selection) async throws -> [ChangedFileSection] {
         switch selection {
         case .workingDirectory:
-            guard let indexCommit = snapshot.commits.first(where: { $0.id == "$index" }),
-                  let worktreeCommit = snapshot.commits.first(where: { $0.id == "$working-directory" }) else { return [] }
+            let artificial = RevisionCommitBuilder.artificialRevisions(headID: context.headID)
+            guard let indexCommit = artificial.first(where: { $0.id == .index }),
+                  let worktreeCommit = artificial.first(where: { $0.id == .workingDirectory }) else { return [] }
             async let indexDetails = source.loadRevisionDetails(for: indexCommit)
             async let workspaceDetails = source.loadRevisionDetails(for: worktreeCommit)
             let (index, workspace) = try await (indexDetails, workspaceDetails)
@@ -377,10 +381,10 @@ private final class StashViewController: RetainingSplitViewController, NSWindowD
             ].filter { !$0.files.isEmpty }
 
         case .stash(let commitID):
-            guard let stash = snapshot.stashes.first(where: { $0.commitID == commitID }),
-                  let commit = snapshot.commits.first(where: { $0.id == commitID }) else {
+            guard let stash = context.stashes.first(where: { $0.commitID == commitID }) else {
                 throw RepositoryMutationError.invalidStash(selectedStash?.selector ?? "stash")
             }
+            let commit = RevisionCommitBuilder.stashRevision(stash)
             let details = try await source.loadRevisionDetails(for: commit)
             let files = register(details.files, commit: commit, prefix: stash.selector)
             return [ChangedFileSection(
@@ -434,7 +438,7 @@ private final class StashViewController: RetainingSplitViewController, NSWindowD
         case .workingDirectory:
             messageView.isEditable = true
             messageView.textColor = .labelColor
-            messageView.string = snapshot.stashes.isEmpty ? "There are no stashes." : ""
+            messageView.string = context.stashes.isEmpty ? "There are no stashes." : ""
         case .stash:
             messageView.isEditable = false
             messageView.textColor = .secondaryLabelColor
@@ -466,8 +470,7 @@ private final class StashViewController: RetainingSplitViewController, NSWindowD
         mutate(statusText: selectedOnly ? "Stashing selected changes…" : "Stashing all changes…") {
             try await $0.createStash(request)
         } completion: { [weak self] result in
-            self?.snapshot = result.snapshot
-            self?.lastOperationSelectedCommitID = "$working-directory"
+            self?.lastOperationSelectedCommitID = .workingDirectory
             self?.reloadSelector(preferredIndex: 0)
         }
     }
@@ -477,8 +480,7 @@ private final class StashViewController: RetainingSplitViewController, NSWindowD
         mutate(statusText: "Applying \(stash.selector)…") {
             try await $0.applyStash(stash)
         } completion: { [weak self] result in
-            self?.snapshot = result.snapshot
-            self?.lastOperationSelectedCommitID = "$working-directory"
+            self?.lastOperationSelectedCommitID = .workingDirectory
             self?.reloadSelector(preferredIndex: 0)
         }
     }
@@ -493,7 +495,6 @@ private final class StashViewController: RetainingSplitViewController, NSWindowD
                 try await $0.dropStash(stash)
             } completion: { [weak self] result in
                 guard let self else { return }
-                snapshot = result.snapshot
                 lastOperationSelectedCommitID = result.selectedCommitID
                 reloadSelector(preferredCommitID: result.selectedCommitID, preferredIndex: droppedComboIndex)
             }
@@ -513,13 +514,14 @@ private final class StashViewController: RetainingSplitViewController, NSWindowD
             do {
                 var result = try await operation(source)
                 guard !Task.isCancelled else { return }
+                repositoryChanged = true
+                context = try await source.loadRepositoryState().stashContext
                 if case .conflicts(let paths) = result.outcome, let panel {
-                    snapshot = result.snapshot
                     status.stringValue = "\(result.message) \(paths.count) conflicted path(s) remain."
                     if await MutationDialogs.confirmResolveStashConflicts(paths: paths, window: panel),
-                       let resolved = await resolveConflicts(panel) {
+                       await resolveConflicts(panel) {
+                        context = try await source.loadRepositoryState().stashContext
                         result = RepositoryMutationResult(
-                            snapshot: resolved,
                             selectedCommitID: result.selectedCommitID,
                             outcome: .completed,
                             message: "Repository refreshed after resolving stash conflicts."
@@ -532,8 +534,8 @@ private final class StashViewController: RetainingSplitViewController, NSWindowD
             } catch is CancellationError {
                 return
             } catch {
-                if let refreshed = try? await source.loadSnapshot(), !Task.isCancelled {
-                    snapshot = refreshed
+                if let refreshed = try? await source.loadRepositoryState().stashContext, !Task.isCancelled {
+                    context = refreshed
                     reloadSelector()
                 }
                 setBusy(false, statusText: error.localizedDescription, mutation: true)
@@ -617,7 +619,7 @@ private final class StashViewController: RetainingSplitViewController, NSWindowD
         selectionTask = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
-                snapshot = try await source.loadSnapshot()
+                context = try await source.loadRepositoryState().stashContext
                 guard !Task.isCancelled else { return }
                 reloadSelector(preferredIndex: 0)
                 status.stringValue = "Refreshed working directory changes."
@@ -659,6 +661,9 @@ private final class StashViewController: RetainingSplitViewController, NSWindowD
         }
         let close = onClose
         onClose = nil
-        close?(StashDialogResult(snapshot: snapshot, selectedCommitID: lastOperationSelectedCommitID))
+        close?(StashDialogResult(
+            selectedCommitID: lastOperationSelectedCommitID,
+            repositoryChanged: repositoryChanged
+        ))
     }
 }
