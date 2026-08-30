@@ -284,6 +284,139 @@ final class GitUICommands {
         makeCheckoutWorkflowCoordinator()?.renameBranch(name)
     }
 
+    func startCreateTag(initialTarget: ObjectID? = nil) {
+        guard let browser,
+              let window = browser.view.window,
+              let identity = browser.repositoryIdentity,
+              let source = repositoryModule as? any RepositoryTagManagingDataSource else {
+            browser?.showPlaceholderStatus("Tag creation is unavailable for this data source")
+            return
+        }
+        let remote = preferredTagRemote(browser: browser)
+        let defaultTarget = initialTarget ?? identity.headID
+        var initial = CreateTagDialogValue(target: defaultTarget?.string ?? "")
+        Task { @MainActor [weak self, weak browser, weak window] in
+            guard let self, let browser, let window else { return }
+            while let value = await TagDialogs.createTag(
+                initial: initial,
+                revisions: browser.revisions,
+                remote: remote,
+                window: window
+            ) {
+                initial = value
+                do {
+                    let target = try await source.resolveTagTarget(value.target)
+                    let result = try await source.createTag(RepositoryCreateTagRequest(
+                        name: value.name,
+                        target: target,
+                        operation: value.operation,
+                        message: value.message,
+                        signingKey: value.signingKey,
+                        force: value.force
+                    ))
+                    if value.pushToRemote, let remote,
+                       let pushSource = repositoryModule as? any RepositoryPushingDataSource {
+                        let processResult = await PushProcessDialog.run(
+                            request: RepositoryPushRequest(destination: .remote(remote), operation: .tag(value.name)),
+                            source: pushSource,
+                            parent: window
+                        )
+                        self.notifyRepositoryChanged(preferredCommitID: result.selectedCommitID)
+                        if case .success(let pushed)? = processResult {
+                            browser.statusLabel.stringValue = pushed.message
+                        } else if case .failure(let error)? = processResult {
+                            await TagDialogs.showError(
+                                error,
+                                title: "Push tag failed",
+                                window: window
+                            )
+                        }
+                    } else {
+                        self.notifyRepositoryChanged(preferredCommitID: result.selectedCommitID)
+                        browser.statusLabel.stringValue = result.message
+                    }
+                    return
+                } catch {
+                    await TagDialogs.showError(error, title: "Create tag failed", window: window)
+                }
+            }
+        }
+    }
+
+    func startDeleteTag(initialName: String? = nil) {
+        guard let browser,
+              let window = browser.view.window,
+              let references = browser.repositoryReferences,
+              let navigation = browser.repositoryNavigation,
+              let source = repositoryModule as? any RepositoryTagManagingDataSource else {
+            browser?.showPlaceholderStatus("Tag deletion is unavailable for this data source")
+            return
+        }
+        guard !references.tags.isEmpty else {
+            browser.showPlaceholderStatus("There are no tags to delete")
+            return
+        }
+        let preferredRemote = preferredTagRemote(browser: browser) ?? navigation.remotes.first?.name ?? ""
+        var initial = DeleteTagDialogValue(
+            name: initialName ?? references.tags.first?.name ?? "",
+            remote: preferredRemote
+        )
+        Task { @MainActor [weak self, weak browser, weak window] in
+            guard let self, let browser, let window else { return }
+            while let value = await TagDialogs.deleteTag(
+                initial: initial,
+                tags: references.tags,
+                remotes: navigation.remotes,
+                window: window
+            ) {
+                initial = value
+                do {
+                    let result = try await source.deleteTag(named: value.name)
+                    if value.deleteFromRemote,
+                       !value.remote.isEmpty,
+                       let pushSource = repositoryModule as? any RepositoryPushingDataSource {
+                        let processResult = await PushProcessDialog.run(
+                            request: RepositoryPushRequest(
+                                destination: .remote(value.remote),
+                                operation: .deleteTag(value.name)
+                            ),
+                            source: pushSource,
+                            parent: window
+                        )
+                        self.notifyRepositoryChanged(preferredCommitID: browser.selectedCommitID)
+                        if case .success(let pushed)? = processResult {
+                            browser.statusLabel.stringValue = pushed.message
+                        } else if case .failure(let error)? = processResult {
+                            await TagDialogs.showError(
+                                error,
+                                title: "Delete remote tag failed",
+                                window: window
+                            )
+                        }
+                    } else {
+                        self.notifyRepositoryChanged(preferredCommitID: browser.selectedCommitID)
+                        browser.statusLabel.stringValue = result.message
+                    }
+                    return
+                } catch {
+                    await TagDialogs.showError(error, title: "Delete tag failed", window: window)
+                }
+            }
+        }
+    }
+
+    private func preferredTagRemote(browser: RepositoryBrowserViewController) -> String? {
+        guard let references = browser.repositoryReferences,
+              let navigation = browser.repositoryNavigation else { return nil }
+        if let current = references.branches.first(where: \.isCurrent),
+           let remote = current.remoteName,
+           navigation.remotes.contains(where: { $0.name == remote }) {
+            return remote
+        }
+        if navigation.remotes.contains(where: { $0.name == "origin" }) { return "origin" }
+        return navigation.remotes.first?.name
+    }
+
     private func makeCheckoutWorkflowCoordinator() -> CheckoutBranchWorkflowCoordinator? {
         guard let browser,
               let context = browser.branchContext,

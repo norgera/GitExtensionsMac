@@ -54,6 +54,7 @@ package enum RepositoryPushOperation: Hashable, Sendable {
     case branch(source: String, destination: String?)
     case allBranches
     case tag(String)
+    case deleteTag(String)
     case allTags
     case multiple([RepositoryPushAction])
 }
@@ -277,6 +278,10 @@ enum GitPushCommandBuilder {
             let tag = rawTag.replacingOccurrences(of: " ", with: "")
             guard !tag.isEmpty else { throw RepositoryPushError.missingTag }
             return ["push"] + forceArguments(tagForce(request.force)) + ["--progress", destination, "tag", tag]
+        case .deleteTag(let rawTag):
+            let tag = rawTag.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !tag.isEmpty else { throw RepositoryPushError.missingTag }
+            return ["push", "--progress", destination, ":refs/tags/\(tag)"]
         case .allTags:
             return ["push"] + forceArguments(tagForce(request.force)) + ["--progress", destination, "--tags"]
         case .allBranches:
@@ -540,7 +545,7 @@ extension GitRepositoryModule: RepositoryPushingDataSource {
         let branches: [String] = switch request.operation {
         case .branch(_, let destination): destination.map { [$0] } ?? []
         case .multiple(let actions): actions.map(\.remoteBranch)
-        case .allBranches, .tag, .allTags: []
+        case .allBranches, .tag, .deleteTag, .allTags: []
         }
         for branch in branches {
             let value = branch.trimmingCharacters(in: .whitespacesAndNewlines)

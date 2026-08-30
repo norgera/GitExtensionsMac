@@ -17,6 +17,7 @@ enum BrowserCommand: Equatable, Sendable {
     case openRecentRepository(URL)
 
     case refresh
+    case toggleRevisionTags
     case commit
     case pullFetch
     case pull
@@ -33,6 +34,8 @@ enum BrowserCommand: Equatable, Sendable {
     case deleteBranch
     case checkoutBranch
     case checkoutRevision
+    case createTag
+    case deleteTag
     case manageStashes
     case solveMergeConflicts
     case cherryPick
@@ -80,6 +83,8 @@ final class BrowserCommandAvailability: ObservableObject {
     @Published var canDeleteBranch = false
     @Published var canCheckoutBranch = false
     @Published var canCheckoutRevision = false
+    @Published var canCreateTag = false
+    @Published var canDeleteTag = false
 
     private init() {}
 }

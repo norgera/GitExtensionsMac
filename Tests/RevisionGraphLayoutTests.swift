@@ -51,6 +51,18 @@ private enum RevisionGraphLayoutTests {
             }
             return
         }
+        if CommandLine.arguments.contains("--tags-only") {
+            ContextMenuStateTests.run()
+            AppSettingsTests.run()
+            do {
+                try await GitRepositoryMutationTests.runTags()
+                try await GitPushTests.run()
+            } catch {
+                fatalError("TagTests failed: \(error.localizedDescription)")
+            }
+            print("TagTests: passed")
+            return
+        }
         testObjectIdentity()
         testLinearHistory()
         testRelativeGraphState()
@@ -81,6 +93,7 @@ private enum RevisionGraphLayoutTests {
             try await GitRepositoryMutationTests.runMerge()
             try await GitRepositoryMutationTests.runRebase()
             try await GitRepositoryMutationTests.runRemoteManagement()
+            try await GitRepositoryMutationTests.runTags()
             try await GitPullTests.run()
             try await GitPushTests.run()
             if let flagIndex = CommandLine.arguments.firstIndex(of: "--verify-mutations"),

@@ -766,6 +766,14 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         switch command {
         case .openRepository: presentOpenRepositoryPanel()
         case .refresh: reloadRepositoryState()
+        case .toggleRevisionTags:
+            var preferences = AppSettingsStore.shared.tagPreferences
+            preferences.showTagsInRevisionGrid.toggle()
+            AppSettingsStore.shared.saveTagPreferences(preferences)
+            revisionGridController.setShowsTagReferences(preferences.showTagsInRevisionGrid)
+            statusLabel.stringValue = preferences.showTagsInRevisionGrid
+                ? "Showing tags in revision grid"
+                : "Hiding tags in revision grid"
         case .commit: uiCommands.startCommit()
         case .pullFetch: uiCommands.startPull(action: AppSettingsStore.shared.pullPreferences.formAction, immediately: false)
         case .pull: uiCommands.startPull(action: AppSettingsStore.shared.pullPreferences.defaultAction, immediately: AppSettingsStore.shared.pullPreferences.defaultAction != .openDialog)
@@ -799,6 +807,12 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         case .checkoutRevision:
             guard let commit = revisions.first(where: { $0.id == selectedCommitID && !$0.isArtificial }) else { return }
             uiCommands.startCheckoutRevision(commit)
+        case .createTag:
+            uiCommands.startCreateTag(
+                initialTarget: revisions.first(where: { $0.id == selectedCommitID && !$0.isArtificial })?.objectID
+            )
+        case .deleteTag:
+            uiCommands.startDeleteTag()
         case .manageStashes: uiCommands.startStashManagement()
         case .solveMergeConflicts: uiCommands.startConflictResolution()
         case .cherryPick:
@@ -871,6 +885,10 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         BrowserCommandAvailability.shared.canCheckoutBranch = canManageBranches
             && (!state.references.branches.isEmpty || state.navigation.remotes.contains { !$0.branches.isEmpty })
         BrowserCommandAvailability.shared.canCheckoutRevision = false
+        BrowserCommandAvailability.shared.canCreateTag = repositoryModule is any RepositoryTagManagingDataSource
+            && state.identity.headID != nil
+        BrowserCommandAvailability.shared.canDeleteTag = repositoryModule is any RepositoryTagManagingDataSource
+            && !state.references.tags.isEmpty
         outlineController.apply(
             identity: state.identity,
             references: state.references,
@@ -1398,6 +1416,8 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         case ("repository.tag.rebase", .tag(let tag)):
             guard let commit = revisions.first(where: { $0.id == .object(tag.commitID) }) else { return }
             uiCommands.startRebase(on: commit, interactive: false)
+        case ("repository.tag.delete", .tag(let tag)):
+            uiCommands.startDeleteTag(initialName: tag.name)
         case ("repository.stash.apply", .stash(let stash)):
             performStashMutation(.apply, stash: stash)
         case ("repository.stash.pop", .stash(let stash)):
@@ -1551,6 +1571,17 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         if identifier == "revision.branch.create" {
             guard !focused.isArtificial else { return }
             uiCommands.createBranch(sourceRevision: focused)
+            return
+        }
+        if identifier == "revision.tag.create" {
+            uiCommands.startCreateTag(initialTarget: focused.objectID)
+            return
+        }
+        let deleteTagPrefix = "revision.tag.delete.ref."
+        if identifier.hasPrefix(deleteTagPrefix) {
+            let referenceID = String(identifier.dropFirst(deleteTagPrefix.count))
+            guard let reference = focused.references.first(where: { $0.id == referenceID && $0.kind == .tag }) else { return }
+            uiCommands.startDeleteTag(initialName: reference.name)
             return
         }
 

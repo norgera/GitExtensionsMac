@@ -14,6 +14,7 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
     private var graphRows: [RevisionGraphLayout.Row] = []
     private var textFilter = ""
     private var branchFilter = ""
+    private var showsTagReferences = AppSettingsStore.shared.tagPreferences.showTagsInRevisionGrid
     private var visibleRowsObserver: NSObjectProtocol?
     private var quickSearchString = ""
     private var lastQuickSearchString = ""
@@ -155,6 +156,12 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
         applyFilters(selectFirst: true)
     }
 
+    func setShowsTagReferences(_ value: Bool) {
+        guard value != showsTagReferences else { return }
+        showsTagReferences = value
+        tableView.reloadData()
+    }
+
     func selectCommit(id: RevisionID) {
         guard let index = commits.firstIndex(where: { $0.id == id }) else {
             if allCommits.contains(where: { $0.id == id }) { pendingSelectionID = id }
@@ -276,7 +283,7 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
         case "Message":
             let cell = (tableView.makeView(withIdentifier: identifier, owner: self) as? RevisionMessageCellView) ?? RevisionMessageCellView()
             cell.identifier = identifier
-            cell.configure(commit: commit)
+            cell.configure(commit: commit, showsTags: showsTagReferences)
             return cell
         case "Author Name":
             return textCell(identifier, value: commit.isArtificial ? "" : commit.authorName, font: .systemFont(ofSize: 11))
@@ -520,6 +527,7 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
                     || identifier.hasPrefix("revision.branch.checkout.ref.")
                     || identifier.hasPrefix("revision.branch.merge.")
                     || identifier.hasPrefix("revision.branch.rebase.")
+                    || identifier.hasPrefix("revision.tag.")
             },
             target: self,
             action: #selector(performMutationMenuCommand(_:))
@@ -925,13 +933,15 @@ final class RevisionMessageCellView: NSTableCellView {
     }
 
     private var commit: Commit?
+    private var showsTags = true
     private var badges: [Badge] = []
     private var hoveredBadge: Int?
     private var trackingAreaReference: NSTrackingArea?
     override var isFlipped: Bool { true }
 
-    func configure(commit: Commit) {
+    func configure(commit: Commit, showsTags: Bool) {
         self.commit = commit
+        self.showsTags = showsTags
         hoveredBadge = nil
         toolTip = nil
         needsDisplay = true
@@ -1048,7 +1058,9 @@ final class RevisionMessageCellView: NSTableCellView {
     }
 
     private func layoutBadges(for commit: Commit) -> [Badge] {
-        let references = commit.references.sorted { rank($0) == rank($1) ? $0.name < $1.name : rank($0) < rank($1) }
+        let references = commit.references
+            .filter { showsTags || $0.kind != .tag }
+            .sorted { rank($0) == rank($1) ? $0.name < $1.name : rank($0) < rank($1) }
         var consumed: Set<String> = []
         var result: [Badge] = []
         var offset: CGFloat = 6

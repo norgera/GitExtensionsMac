@@ -59,6 +59,13 @@ enum GitPushTests {
         try require(
             try GitPushCommandBuilder.arguments(for: RepositoryPushRequest(
                 destination: .remote("origin"),
+                operation: .deleteTag("release")
+            )) == ["push", "--progress", "origin", ":refs/tags/release"],
+            "command builder: remote tag deletion uses the upstream empty-source refspec"
+        )
+        try require(
+            try GitPushCommandBuilder.arguments(for: RepositoryPushRequest(
+                destination: .remote("origin"),
                 operation: .multiple([
                     RepositoryPushAction(localBranch: "one", remoteBranch: "review/one", mode: .push),
                     RepositoryPushAction(localBranch: "two", remoteBranch: "two", mode: .force),
@@ -241,6 +248,14 @@ enum GitPushTests {
         )
         try require(forcedTag.outcome == .completed, "tags: lease selection normalizes to ordinary force and replaces the tag")
         try require(try fixture.git(["rev-parse", "refs/tags/movable"], in: fixture.originURL).trimmedPush == fixture.git(["rev-parse", "refs/tags/movable"], in: repository).trimmedPush, "tags: forced destination points at the moved local tag")
+        let deletedTag = try await source.performPush(
+            RepositoryPushRequest(destination: .remote("origin"), operation: .deleteTag("movable")),
+            output: { _ in }
+        )
+        try require(
+            deletedTag.outcome == .completed && !(try fixture.refExists("refs/tags/movable", in: fixture.originURL)),
+            "tags: the shared Push backend deletes a selected remote tag"
+        )
     }
 
     private static func testRejectionForceAndForceWithLease() async throws {

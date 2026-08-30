@@ -12,6 +12,7 @@ enum AppSettingsTests {
         testCherryPickPreferencesRoundTrip()
         testPushPreferencesRoundTrip()
         testStashPreferencesRoundTrip()
+        testTagPreferencesRoundTrip()
         testMergePreferencesRoundTrip()
         testCheckoutBranchPreferencesRoundTrip()
         testCommitPreferencesRoundTrip()
@@ -30,6 +31,16 @@ enum AppSettingsTests {
             preferences.mergeCommonParentLanes = false
             store.save(preferences)
             precondition(AppSettingsStore(defaults: defaults).preferences == preferences)
+        }
+    }
+
+    private static func testTagPreferencesRoundTrip() {
+        withStore { store, defaults in
+            var preferences = store.tagPreferences
+            preferences.showTagsInRevisionGrid = false
+            preferences.showTagsInRepositoryTree = false
+            store.saveTagPreferences(preferences)
+            precondition(AppSettingsStore(defaults: defaults).tagPreferences == preferences)
         }
     }
 

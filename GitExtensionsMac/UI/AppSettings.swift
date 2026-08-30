@@ -76,6 +76,11 @@ struct StashPreferences: Codable, Equatable, Sendable {
     var dividerPosition = 280.0
 }
 
+struct TagPreferences: Codable, Equatable, Sendable {
+    var showTagsInRevisionGrid = true
+    var showTagsInRepositoryTree = true
+}
+
 struct MergePreferences: Codable, Equatable, Sendable {
     var noCommit = false
     var noFastForward = false
@@ -367,6 +372,7 @@ final class AppSettingsStore {
         static let rebasePreferences = "GitExtensionsMac.rebasePreferences.v1"
         static let cherryPickPreferences = "GitExtensionsMac.cherryPickPreferences.v1"
         static let stashPreferences = "GitExtensionsMac.stashPreferences.v1"
+        static let tagPreferences = "GitExtensionsMac.tagPreferences.v1"
         static let mergePreferences = "GitExtensionsMac.mergePreferences.v1"
         static let checkoutBranchPreferences = "GitExtensionsMac.checkoutBranchPreferences.v1"
     }
@@ -381,6 +387,7 @@ final class AppSettingsStore {
     private(set) var rebasePreferences: RebasePreferences
     private(set) var cherryPickPreferences: CherryPickPreferences
     private(set) var stashPreferences: StashPreferences
+    private(set) var tagPreferences: TagPreferences
     private(set) var mergePreferences: MergePreferences
     private(set) var checkoutBranchPreferences: CheckoutBranchPreferences
 
@@ -414,6 +421,9 @@ final class AppSettingsStore {
         stashPreferences = defaults.data(forKey: Key.stashPreferences)
             .flatMap { try? decoder.decode(StashPreferences.self, from: $0) }
             ?? StashPreferences()
+        tagPreferences = defaults.data(forKey: Key.tagPreferences)
+            .flatMap { try? decoder.decode(TagPreferences.self, from: $0) }
+            ?? TagPreferences()
         mergePreferences = defaults.data(forKey: Key.mergePreferences)
             .flatMap { try? decoder.decode(MergePreferences.self, from: $0) }
             ?? MergePreferences()
@@ -473,6 +483,11 @@ final class AppSettingsStore {
     func saveStashPreferences(_ preferences: StashPreferences) {
         stashPreferences = preferences
         defaults.set(try? JSONEncoder().encode(preferences), forKey: Key.stashPreferences)
+    }
+
+    func saveTagPreferences(_ preferences: TagPreferences) {
+        tagPreferences = preferences
+        defaults.set(try? JSONEncoder().encode(preferences), forKey: Key.tagPreferences)
     }
 
     func saveMergePreferences(_ preferences: MergePreferences) {

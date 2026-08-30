@@ -65,7 +65,11 @@ final class RepositoryOutlineViewController: NSViewController, NSOutlineViewData
         ].enumerated() {
             let button = AppKitFactory.resourceButton(item.0, tooltip: item.1, width: 29, target: self, action: #selector(toggleRootVisibility(_:)))
             button.tag = index
-            let isVisible = item.1 != "Stashes" || AppSettingsStore.shared.stashPreferences.showStashesInRepositoryTree
+            let isVisible: Bool = switch item.1 {
+            case "Stashes": AppSettingsStore.shared.stashPreferences.showStashesInRepositoryTree
+            case "Tags": AppSettingsStore.shared.tagPreferences.showTagsInRepositoryTree
+            default: true
+            }
             button.state = isVisible ? .on : .off
             if !isVisible { hiddenRootTitles.insert(item.1) }
             button.setButtonType(.toggle)
@@ -178,7 +182,7 @@ final class RepositoryOutlineViewController: NSViewController, NSOutlineViewData
             title: "Tags",
             kind: .group,
             symbolName: "TagHorizontal",
-            children: references.tags.map { RepositoryTreeNode(title: $0.name, kind: .tag($0), symbolName: "Tag") }
+            children: buildTagTree(references.tags)
         )
 
         let submoduleRoot = RepositoryTreeNode(
@@ -268,6 +272,31 @@ final class RepositoryOutlineViewController: NSViewController, NSOutlineViewData
         return roots
     }
 
+    private func buildTagTree(_ tags: [Tag]) -> [RepositoryTreeNode] {
+        var roots: [RepositoryTreeNode] = []
+        for tag in tags {
+            let parts = tag.name.split(separator: "/").map(String.init)
+            guard !parts.isEmpty else { continue }
+            var parent: RepositoryTreeNode?
+            for (index, part) in parts.enumerated() {
+                if index == parts.count - 1 {
+                    let leaf = RepositoryTreeNode(title: part, kind: .tag(tag), symbolName: "Tag")
+                    if let parent { parent.children.append(leaf) } else { roots.append(leaf) }
+                    continue
+                }
+                let siblings = parent?.children ?? roots
+                if let folder = siblings.first(where: { $0.title == part && $0.isTagFolder }) {
+                    parent = folder
+                } else {
+                    let folder = RepositoryTreeNode(title: part, kind: .group, symbolName: "FolderClosed")
+                    if let parent { parent.children.append(folder) } else { roots.append(folder) }
+                    parent = folder
+                }
+            }
+        }
+        return roots
+    }
+
     @objc private func collapseAll() {
         outlineView.collapseItem(nil, collapseChildren: true)
         BrowserCommandCenter.perform(.showStatus("Collapsed repository objects"))
@@ -286,6 +315,10 @@ final class RepositoryOutlineViewController: NSViewController, NSOutlineViewData
             var preferences = AppSettingsStore.shared.stashPreferences
             preferences.showStashesInRepositoryTree = sender.state == .on
             AppSettingsStore.shared.saveStashPreferences(preferences)
+        } else if title == "Tags" {
+            var preferences = AppSettingsStore.shared.tagPreferences
+            preferences.showTagsInRepositoryTree = sender.state == .on
+            AppSettingsStore.shared.saveTagPreferences(preferences)
         }
         applyTreeFilter()
     }
@@ -477,6 +510,7 @@ final class RepositoryOutlineViewController: NSViewController, NSOutlineViewData
             "repository.branch.rebase",
             "repository.remoteBranch.rebase",
             "repository.tag.rebase",
+            "repository.tag.delete",
             "repository.stash.apply",
             "repository.stash.pop",
             "repository.stash.drop",
@@ -514,6 +548,11 @@ final class RepositoryOutlineViewController: NSViewController, NSOutlineViewData
 }
 
 private extension RepositoryTreeNode {
+    var isTagFolder: Bool {
+        if case .group = kind { return true }
+        return false
+    }
+
     var isFolder: Bool {
         if case .folder = kind { return true }
         return false

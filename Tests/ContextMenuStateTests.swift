@@ -223,9 +223,15 @@ enum ContextMenuStateTests {
                 selectedHaveCollapsibleChildren: false
             )
             var menu = RepositoryContextMenuBuilder.build(context)
+            if kind == .tag {
+                expect(menu.entry(id: "repository.tag.delete")?.isEnabled == true, "tag tree: local deletion is available")
+            }
             expect(menu.entry(id: identifier)?.isEnabled == true, "tree: \(identifier) is available in a working repository")
             context.isBareRepository = true
             menu = RepositoryContextMenuBuilder.build(context)
+            if kind == .tag {
+                expect(menu.entry(id: "repository.tag.delete")?.isEnabled == true, "tag tree: local deletion remains available in bare repositories")
+            }
             expect(menu.entry(id: identifier)?.isEnabled == false, "tree: \(identifier) is disabled in a bare repository")
         }
     }

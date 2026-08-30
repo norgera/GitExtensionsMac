@@ -1482,7 +1482,7 @@ private final class RemoteBranchDeleteViewController: NSViewController, NSWindow
 }
 
 @MainActor
-private enum PushProcessDialog {
+enum PushProcessDialog {
     static func run(
         request: RepositoryPushRequest,
         source: any RepositoryPushingDataSource,

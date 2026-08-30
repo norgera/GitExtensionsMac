@@ -141,6 +141,194 @@ enum GitRepositoryMutationTests {
         print("GitRepositoryMutationTests.merge: passed")
     }
 
+    static func runTags() async throws {
+        try testTagCommandConstruction()
+        let fixture = try MutationGitFixture.make()
+        defer { fixture.remove() }
+
+        try await testTagCreationAndDeletion(fixture)
+        try await testTagValidationAndForce(fixture)
+        try await testTagDetachedAndArbitraryTargets(fixture)
+        try await testTagsInBareRepository(fixture)
+        print("GitRepositoryMutationTests.tags: passed")
+    }
+
+    private static func testTagCommandConstruction() throws {
+        let target = try ObjectID.parse("0123456789012345678901234567890123456789")
+        let path = "/tmp/TAGMESSAGE"
+        let lightweight = try GitTagCommandBuilder.create(RepositoryCreateTagRequest(
+            name: "release",
+            target: target,
+            force: true
+        ))
+        try require(
+            lightweight.arguments == ["tag", "-f", "release", "--", target.string],
+            "tags: lightweight arguments preserve upstream order"
+        )
+        let annotated = try GitTagCommandBuilder.create(RepositoryCreateTagRequest(
+            name: "release",
+            target: target,
+            operation: .annotated,
+            message: "Release"
+        ), messageFile: path)
+        try require(
+            annotated.arguments == ["tag", "-a", "-F", path, "release", "--", target.string],
+            "tags: annotated arguments preserve upstream order"
+        )
+        let defaultSigned = try GitTagCommandBuilder.create(RepositoryCreateTagRequest(
+            name: "release",
+            target: target,
+            operation: .signWithDefaultKey,
+            message: "Release",
+            force: true
+        ), messageFile: path)
+        try require(
+            defaultSigned.arguments == ["tag", "-f", "-s", "-F", path, "release", "--", target.string],
+            "tags: default signing arguments are constructed without requiring a private key"
+        )
+        let specificallySigned = try GitTagCommandBuilder.create(RepositoryCreateTagRequest(
+            name: "release",
+            target: target,
+            operation: .signWithSpecificKey,
+            message: "Release",
+            signingKey: "A9876F",
+            force: true
+        ), messageFile: path)
+        try require(
+            specificallySigned.arguments == ["tag", "-f", "-u", "A9876F", "-F", path, "release", "--", target.string],
+            "tags: specific-key signing arguments preserve upstream order"
+        )
+        do {
+            _ = try GitTagCommandBuilder.create(RepositoryCreateTagRequest(
+                name: "release",
+                target: target,
+                operation: .signWithSpecificKey,
+                message: "Release"
+            ), messageFile: path)
+            throw MutationFixtureError("tags: specific-key signing accepted an empty key")
+        } catch RepositoryTagError.missingSigningKey {
+            // Expected without invoking GPG or requiring a private key.
+        }
+        try require(
+            specificallySigned.accessesRemote == false && specificallySigned.changesRepositoryState,
+            "tags: creation is a structured local mutation"
+        )
+        let deletion = try GitTagCommandBuilder.delete(name: "release")
+        try require(
+            deletion.arguments == ["tag", "-d", "release"] && deletion.changesRepositoryState,
+            "tags: deletion is a structured local mutation"
+        )
+    }
+
+    private static func testTagCreationAndDeletion(_ fixture: MutationGitFixture) async throws {
+        let repository = try fixture.clone(named: "Tag create delete repo")
+        let source = GitRepositoryModule(repositoryURL: repository)
+        let state = try await source.loadRepositoryState()
+        let head = try required(state.identity.headID, "tags: repository has HEAD")
+
+        let lightweight = try await source.createTag(RepositoryCreateTagRequest(name: "lightweight", target: head))
+        try require(lightweight.selectedCommitID == .object(head), "tags: selection remains on tagged revision")
+        try require(
+            try fixture.git(["rev-parse", "refs/tags/lightweight"], in: repository).trimmed == head.string,
+            "tags: lightweight ref points directly at the selected object"
+        )
+
+        _ = try await source.createTag(RepositoryCreateTagRequest(
+            name: "annotated",
+            target: head,
+            operation: .annotated,
+            message: "Annotated release message\n\nDetails"
+        ))
+        try require(
+            try fixture.git(["cat-file", "-t", "refs/tags/annotated"], in: repository).trimmed == "tag",
+            "tags: annotated creation writes a tag object"
+        )
+        try require(
+            try fixture.git(["rev-parse", "refs/tags/annotated^{}"], in: repository).trimmed == head.string,
+            "tags: annotated tag peels to the selected commit"
+        )
+        let message = try fixture.git(["for-each-ref", "--format=%(contents)", "refs/tags/annotated"], in: repository)
+        try require(message.contains("Annotated release message") && message.contains("Details"), "tags: annotated message is preserved")
+
+        _ = try await source.deleteTag(named: "lightweight")
+        try require(
+            (try? fixture.git(["show-ref", "--verify", "refs/tags/lightweight"], in: repository)) == nil,
+            "tags: local deletion removes the tag ref"
+        )
+    }
+
+    private static func testTagValidationAndForce(_ fixture: MutationGitFixture) async throws {
+        let repository = try fixture.clone(named: "Tag validation repo")
+        let source = GitRepositoryModule(repositoryURL: repository)
+        let state = try await source.loadRepositoryState()
+        let original = try required(state.identity.headID, "tags: original HEAD exists")
+        _ = try await source.createTag(RepositoryCreateTagRequest(name: "movable", target: original))
+
+        do {
+            _ = try await source.createTag(RepositoryCreateTagRequest(name: "movable", target: original))
+            throw MutationFixtureError("tags: existing tag was overwritten without force")
+        } catch is GitError {
+            // Git preserves the existing tag unless Force is selected.
+        }
+        do {
+            _ = try await source.createTag(RepositoryCreateTagRequest(name: "bad tag", target: original))
+            throw MutationFixtureError("tags: invalid ref name was accepted")
+        } catch RepositoryTagError.invalidName {
+            // Expected.
+        }
+        do {
+            _ = try await source.createTag(RepositoryCreateTagRequest(name: "   ", target: original))
+            throw MutationFixtureError("tags: blank name was accepted")
+        } catch RepositoryTagError.missingName {
+            // Expected.
+        }
+
+        try fixture.write("new tag target\n", to: repository.appendingPathComponent("tag-target.txt"))
+        try fixture.git(["add", "--all", "--"], in: repository)
+        try fixture.git(["commit", "-m", "New tag target"], in: repository)
+        let updated = try ObjectID.parse(fixture.git(["rev-parse", "HEAD"], in: repository).trimmed)
+        _ = try await source.createTag(RepositoryCreateTagRequest(name: "movable", target: updated, force: true))
+        try require(
+            try fixture.git(["rev-parse", "refs/tags/movable"], in: repository).trimmed == updated.string,
+            "tags: Force updates an existing tag"
+        )
+    }
+
+    private static func testTagDetachedAndArbitraryTargets(_ fixture: MutationGitFixture) async throws {
+        let repository = try fixture.clone(named: "Detached tag repo")
+        let source = GitRepositoryModule(repositoryURL: repository)
+        _ = try await source.loadRepositoryState()
+        try fixture.write("detached head\n", to: repository.appendingPathComponent("detached-tag.txt"))
+        try fixture.git(["add", "--all", "--"], in: repository)
+        try fixture.git(["commit", "-m", "Detached tag head"], in: repository)
+        let parent = try await source.resolveTagTarget("HEAD~1")
+        try fixture.git(["checkout", "--detach", "HEAD"], in: repository)
+        _ = try await source.createTag(RepositoryCreateTagRequest(name: "arbitrary-target", target: parent))
+        try require(
+            try fixture.git(["rev-parse", "refs/tags/arbitrary-target"], in: repository).trimmed == parent.string,
+            "tags: detached HEAD permits an explicitly resolved arbitrary target"
+        )
+    }
+
+    private static func testTagsInBareRepository(_ fixture: MutationGitFixture) async throws {
+        let repository = fixture.rootURL.appendingPathComponent("Bare tags.git", isDirectory: true)
+        try fixture.git(["clone", "--bare", fixture.templateURL.path, repository.path], in: fixture.rootURL)
+        let source = GitRepositoryModule(repositoryURL: repository)
+        let state = try await source.loadRepositoryState()
+        try require(state.identity.currentRepository.isBare, "tags: fixture is bare")
+        let head = try required(state.identity.headID, "tags: bare repository has HEAD")
+        _ = try await source.createTag(RepositoryCreateTagRequest(name: "bare-tag", target: head))
+        try require(
+            try fixture.git(["rev-parse", "refs/tags/bare-tag"], in: repository).trimmed == head.string,
+            "tags: local tag creation remains eligible in a bare repository"
+        )
+        _ = try await source.deleteTag(named: "bare-tag")
+        try require(
+            (try? fixture.git(["show-ref", "--verify", "refs/tags/bare-tag"], in: repository)) == nil,
+            "tags: local tag deletion remains eligible in a bare repository"
+        )
+    }
+
     static func runRemoteManagement() async throws {
         let fixture = try MutationGitFixture.make()
         defer { fixture.remove() }

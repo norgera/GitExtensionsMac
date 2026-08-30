@@ -104,6 +104,11 @@ private struct GitExtensionsMenuCommands: Commands {
             Button("Repository settings…") { perform(.unavailable("Repository settings")) }
         }
 
+        CommandGroup(after: .sidebar) {
+            Button("Show/hide tags in revision grid") { perform(.toggleRevisionTags) }
+                .keyboardShortcut("t", modifiers: [.control, .option])
+        }
+
         CommandMenu("Commands") {
             Button("Commit…") { perform(.commit) }
                 .keyboardShortcut(.return, modifiers: [.command, .shift])
@@ -129,8 +134,10 @@ private struct GitExtensionsMenuCommands: Commands {
             Button("Rebase…") { perform(.rebase) }
             Button("Solve merge conflicts…") { perform(.solveMergeConflicts) }
             Divider()
-            Button("Create tag…") { perform(.unavailable("Create tag")) }
-            Button("Delete tag…") { perform(.unavailable("Delete tag")) }
+            Button("Create tag…") { perform(.createTag) }
+                .disabled(!availability.canCreateTag)
+            Button("Delete tag…") { perform(.deleteTag) }
+                .disabled(!availability.canDeleteTag)
             Divider()
             Button("Cherry pick…") { perform(.cherryPick) }
             Button("Archive revision…") { perform(.unavailable("Archive revision")) }

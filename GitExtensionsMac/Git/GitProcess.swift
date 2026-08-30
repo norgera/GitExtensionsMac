@@ -105,8 +105,6 @@ package protocol GitCommandRunning: Sendable {
 }
 
 package extension GitCommandRunning {
-    /// Structured entry point. The raw runner remains the sole executable seam;
-    /// remote classification is preserved in the result for process/UI policy.
     func run(
         _ command: GitCommand,
         in directory: URL,

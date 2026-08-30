@@ -136,6 +136,8 @@
 		EE500000000000000000000B /* HelpCommandMerge.png in Resources */ = {isa = PBXBuildFile; fileRef = FF500000000000000000000B /* HelpCommandMerge.png */; };
 		EE500000000000000000000C /* HelpCommandMergeFastForward.png in Resources */ = {isa = PBXBuildFile; fileRef = FF500000000000000000000C /* HelpCommandMergeFastForward.png */; };
 		F572B1D1BF84A33B971C0900 /* GitPushTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB6400000000000000000001 /* GitPushTests.swift */; };
+		F10000000000000000000001 /* GitTags.swift in Sources */ = {isa = PBXBuildFile; fileRef = F20000000000000000000001 /* GitTags.swift */; };
+		F10000000000000000000002 /* TagDialogs.swift in Sources */ = {isa = PBXBuildFile; fileRef = F20000000000000000000002 /* TagDialogs.swift */; };
 		F61BBCA2F5757FD45A64793C /* ReloadRevisions.png in Resources */ = {isa = PBXBuildFile; fileRef = 473D73E1AAEBDE4024DAA698 /* ReloadRevisions.png */; };
 		F6D81E980E599F4ED8A86CAD /* GitCommands.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 25F1AC1A346E24A95FC62E28 /* GitCommands.framework */; };
 		F9F1E650A0D471D7D70A1AB2 /* CommitDetailViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF33F0EB3F8DB1738220F2F0 /* CommitDetailViewController.swift */; };
@@ -324,6 +326,8 @@
 		F00000000000000000000014 /* Key.png */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = image.png; path = Key.png; sourceTree = "<group>"; };
 		F00000000000000000000015 /* File.png */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = image.png; path = File.png; sourceTree = "<group>"; };
 		F00000000000000000000016 /* ViewFile.png */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = image.png; path = ViewFile.png; sourceTree = "<group>"; };
+		F20000000000000000000001 /* GitTags.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GitTags.swift; sourceTree = "<group>"; };
+		F20000000000000000000002 /* TagDialogs.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TagDialogs.swift; sourceTree = "<group>"; };
 		F172862BB817536C04EE1460 /* FileStatusAdded.png */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = image.png; path = FileStatusAdded.png; sourceTree = "<group>"; };
 		F6DAC810E9BB838C2789A1B0 /* GitExtensionsMacApp.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GitExtensionsMacApp.swift; sourceTree = "<group>"; };
 		FF5000000000000000000001 /* HelpPullFetch.png */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = image.png; path = HelpPullFetch.png; sourceTree = "<group>"; };
@@ -478,6 +482,7 @@
 				4A3AF3EF4274C3EE47F5BFC2 /* RevisionDiffViewController.swift */,
 				CD98877CA9D0868A1851B8C6 /* RevisionGridViewController.swift */,
 				0294C9B5CC6C3650E63E15C5 /* GitExtensionsAppScene.swift */,
+				F20000000000000000000002 /* TagDialogs.swift */,
 			);
 			name = UI;
 			path = UI;
@@ -574,6 +579,7 @@
 				BB6000000000000000000001 /* GitPull.swift */,
 				BB6200000000000000000001 /* GitPush.swift */,
 				BB7200000000000000000001 /* GitMerge.swift */,
+				F20000000000000000000001 /* GitTags.swift */,
 			);
 			name = Git;
 			path = Git;
@@ -884,6 +890,7 @@
 				39C8C868849AA53E8CD857C9 /* GitRemoteManagement.swift in Sources */,
 				C269F50EB93EE67B6713C4C5 /* GitRepositoryModule.swift in Sources */,
 				D178A21E67374AA7F31457B6 /* GitRepositoryMutations.swift in Sources */,
+				F10000000000000000000001 /* GitTags.swift in Sources */,
 				233DB63159CEBA451F6A90CE /* RepositoryBrowsingDataSource.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -953,6 +960,7 @@
 				B709DDB27203A51E0E01ECE4 /* RevisionGraphLayout.swift in Sources */,
 				CF76A732AD3EBBE5AD4EB526 /* MockRepositoryDataSource.swift in Sources */,
 				3DDD7BB76954AABEFE2E6E92 /* GitExtensionsAppScene.swift in Sources */,
+				F10000000000000000000002 /* TagDialogs.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
