@@ -137,6 +137,8 @@
 		EE500000000000000000000C /* HelpCommandMergeFastForward.png in Resources */ = {isa = PBXBuildFile; fileRef = FF500000000000000000000C /* HelpCommandMergeFastForward.png */; };
 		F572B1D1BF84A33B971C0900 /* GitPushTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB6400000000000000000001 /* GitPushTests.swift */; };
 		F10000000000000000000001 /* GitTags.swift in Sources */ = {isa = PBXBuildFile; fileRef = F20000000000000000000001 /* GitTags.swift */; };
+		F30000000000000000000001 /* FileContentDecoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = F40000000000000000000001 /* FileContentDecoder.swift */; };
+		F50000000000000000000001 /* FileViewerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F60000000000000000000001 /* FileViewerTests.swift */; };
 		F10000000000000000000002 /* TagDialogs.swift in Sources */ = {isa = PBXBuildFile; fileRef = F20000000000000000000002 /* TagDialogs.swift */; };
 		F61BBCA2F5757FD45A64793C /* ReloadRevisions.png in Resources */ = {isa = PBXBuildFile; fileRef = 473D73E1AAEBDE4024DAA698 /* ReloadRevisions.png */; };
 		F6D81E980E599F4ED8A86CAD /* GitCommands.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 25F1AC1A346E24A95FC62E28 /* GitCommands.framework */; };
@@ -327,6 +329,8 @@
 		F00000000000000000000015 /* File.png */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = image.png; path = File.png; sourceTree = "<group>"; };
 		F00000000000000000000016 /* ViewFile.png */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = image.png; path = ViewFile.png; sourceTree = "<group>"; };
 		F20000000000000000000001 /* GitTags.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GitTags.swift; sourceTree = "<group>"; };
+		F40000000000000000000001 /* FileContentDecoder.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = FileContentDecoder.swift; sourceTree = "<group>"; };
+		F60000000000000000000001 /* FileViewerTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = FileViewerTests.swift; sourceTree = "<group>"; };
 		F20000000000000000000002 /* TagDialogs.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = TagDialogs.swift; sourceTree = "<group>"; };
 		F172862BB817536C04EE1460 /* FileStatusAdded.png */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = image.png; path = FileStatusAdded.png; sourceTree = "<group>"; };
 		F6DAC810E9BB838C2789A1B0 /* GitExtensionsMacApp.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GitExtensionsMacApp.swift; sourceTree = "<group>"; };
@@ -432,6 +436,7 @@
 				BB6400000000000000000001 /* GitPushTests.swift */,
 				620CB4F51F5EB568400FDC91 /* ContextMenuStateTests.swift */,
 				8A9900000000000000000005 /* RepositoryChangedNotifierTests.swift */,
+				F60000000000000000000001 /* FileViewerTests.swift */,
 			);
 			name = Tests;
 			path = Tests;
@@ -580,6 +585,7 @@
 				BB6200000000000000000001 /* GitPush.swift */,
 				BB7200000000000000000001 /* GitMerge.swift */,
 				F20000000000000000000001 /* GitTags.swift */,
+				F40000000000000000000001 /* FileContentDecoder.swift */,
 			);
 			name = Git;
 			path = Git;
@@ -891,6 +897,7 @@
 				C269F50EB93EE67B6713C4C5 /* GitRepositoryModule.swift in Sources */,
 				D178A21E67374AA7F31457B6 /* GitRepositoryMutations.swift in Sources */,
 				F10000000000000000000001 /* GitTags.swift in Sources */,
+				F30000000000000000000001 /* FileContentDecoder.swift in Sources */,
 				233DB63159CEBA451F6A90CE /* RepositoryBrowsingDataSource.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -914,6 +921,7 @@
 				59243ADB4A1C3E5C441FB9B3 /* GitRepositoryModuleTests.swift in Sources */,
 				4D2D01AB87362DB893747D31 /* GitRepositoryMutationTests.swift in Sources */,
 				511C03F69B68FB4280A48928 /* RepositoryChangedNotifierTests.swift in Sources */,
+				F50000000000000000000001 /* FileViewerTests.swift in Sources */,
 				210C0F1568AC2EB5B1268796 /* RevisionGraphLayoutTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

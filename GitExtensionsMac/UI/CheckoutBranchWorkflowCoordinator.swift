@@ -13,6 +13,8 @@ final class CheckoutBranchWorkflowCoordinator {
     private let onRepositoryChanged: (RevisionID?) -> Void
     private let onStatus: (String) -> Void
     private let onConflicts: () -> Void
+    private let onMerge: (String) -> Void
+    private let onRebase: (Commit) -> Void
     private var task: Task<Void, Never>?
 
     init(
@@ -24,7 +26,9 @@ final class CheckoutBranchWorkflowCoordinator {
         owner: NSWindow,
         onRepositoryChanged: @escaping (RevisionID?) -> Void,
         onStatus: @escaping (String) -> Void,
-        onConflicts: @escaping () -> Void
+        onConflicts: @escaping () -> Void,
+        onMerge: @escaping (String) -> Void,
+        onRebase: @escaping (Commit) -> Void
     ) {
         self.source = source
         self.stashSource = stashSource
@@ -35,6 +39,8 @@ final class CheckoutBranchWorkflowCoordinator {
         self.onRepositoryChanged = onRepositoryChanged
         self.onStatus = onStatus
         self.onConflicts = onConflicts
+        self.onMerge = onMerge
+        self.onRebase = onRebase
     }
 
     deinit { task?.cancel() }
@@ -318,6 +324,13 @@ final class CheckoutBranchWorkflowCoordinator {
                         sourceRevision: revisions.first { $0.id == .object(refreshed.commitID) }
                             ?? RevisionCommitBuilder.placeholderRevision(id: refreshed.commitID)
                     )
+                case .merge:
+                    onMerge("\(remote)/\(refreshed.name)")
+                case .rebase:
+                    onRebase(
+                        revisions.first { $0.id == .object(refreshed.commitID) }
+                            ?? RevisionCommitBuilder.placeholderRevision(id: refreshed.commitID)
+                    )
                 }
             } catch is CancellationError {
                 return
@@ -520,4 +533,6 @@ enum CheckoutBranchFetchFollowUp {
     case none
     case checkout
     case create
+    case merge
+    case rebase
 }

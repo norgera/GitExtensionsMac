@@ -26,6 +26,7 @@ extension ApplicationShellDialogs {
         executeImmediately: Bool,
         context: RepositoryNetworkContext,
         source: any RepositoryPullingDataSource,
+        onManageRemotes: @escaping (String?, String?) -> Void,
         onRepositoryChanged: @escaping (RevisionID?) -> Void,
         onClose: @escaping () -> Void
     ) -> NSWindowController {
@@ -34,6 +35,7 @@ extension ApplicationShellDialogs {
             executeImmediately: executeImmediately,
             context: context,
             source: source,
+            onManageRemotes: onManageRemotes,
             onRepositoryChanged: onRepositoryChanged
         )
         let window = NSWindow(contentViewController: controller)
@@ -62,13 +64,14 @@ private final class PullDialogViewController: NSViewController, NSWindowDelegate
     private let executeImmediately: Bool
     private var context: RepositoryNetworkContext
     private let source: any RepositoryPullingDataSource
+    private let onManageRemotes: (String?, String?) -> Void
     private let onRepositoryChanged: (RevisionID?) -> Void
     private let settings = AppSettingsStore.shared
     private var pullState: RepositoryPullState?
     private var remoteBranchTask: Task<Void, Never>?
     private var operationTask: Task<Void, Never>?
-    private var remoteWindowController: NSWindowController?
     private var didClose = false
+    private var didBecomeKeyOnce = false
     private var applyingState = false
     private var didAttemptImmediateExecution = false
 
@@ -107,12 +110,14 @@ private final class PullDialogViewController: NSViewController, NSWindowDelegate
         executeImmediately: Bool,
         context: RepositoryNetworkContext,
         source: any RepositoryPullingDataSource,
+        onManageRemotes: @escaping (String?, String?) -> Void,
         onRepositoryChanged: @escaping (RevisionID?) -> Void
     ) {
         self.initialAction = initialAction
         self.executeImmediately = executeImmediately
         self.context = context
         self.source = source
+        self.onManageRemotes = onManageRemotes
         self.onRepositoryChanged = onRepositoryChanged
         isHelpExpanded = AppSettingsStore.shared.pullPreferences.helpExpanded
         super.init(nibName: nil, bundle: nil)
@@ -375,8 +380,14 @@ private final class PullDialogViewController: NSViewController, NSWindowDelegate
         operationTask = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
-                let state = try await source.loadPullState()
+                async let loadedPullState = source.loadPullState()
+                async let repositoryState = source.loadRepositoryState()
+                let state = try await loadedPullState
+                let refreshedContext = try await repositoryState.networkContext
                 guard !Task.isCancelled else { operationTask = nil; return }
+                let selectedRemote = remoteCombo.stringValue
+                context = refreshedContext
+                populateRemotes(selecting: selectedRemote)
                 pullState = state
                 unshallow.isHidden = !state.isShallow
                 conflictsButton.isEnabled = !state.conflictedPaths.isEmpty || state.rebaseInProgress || state.mergeInProgress
@@ -885,18 +896,8 @@ private final class PullDialogViewController: NSViewController, NSWindowDelegate
     }
 
     @objc private func manageRemotes() {
-        if let remoteWindowController { remoteWindowController.window?.makeKeyAndOrderFront(nil); return }
         let selected = remoteCombo.stringValue == "[ All ]" ? nil : remoteCombo.stringValue
-        remoteWindowController = RemoteManagementDialog.present(
-            source: source,
-            selectedRemote: selected,
-            onRepositoryChanged: { [weak self] in
-                guard let self else { return }
-                self.onRepositoryChanged(nil)
-                self.populateRemotes(selecting: self.remoteCombo.stringValue)
-            },
-            onClose: { [weak self] in self?.remoteWindowController = nil }
-        )
+        onManageRemotes(selected, nil)
     }
 
     @objc private func solveConflicts() {
@@ -1048,10 +1049,19 @@ private final class PullDialogViewController: NSViewController, NSWindowDelegate
         }
     }
     func windowWillClose(_ notification: Notification) { finish() }
+
+    func windowDidBecomeKey(_ notification: Notification) {
+        if didBecomeKeyOnce {
+            guard operationTask == nil else { return }
+            reloadRepositoryState()
+        } else {
+            didBecomeKeyOnce = true
+        }
+    }
     private func finish() {
         guard !didClose else { return }
         didClose = true
-        remoteBranchTask?.cancel(); operationTask?.cancel(); remoteWindowController?.close(); onClose?()
+        remoteBranchTask?.cancel(); operationTask?.cancel(); onClose?()
     }
 }
 

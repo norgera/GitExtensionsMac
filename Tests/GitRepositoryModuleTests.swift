@@ -56,6 +56,38 @@ enum GitRepositoryModuleTests {
         require(finalHistoryQueryCount == 2, "revision reader: restarted reads execute independently without duplicate snapshot history")
     }
 
+    static func runFileViewer() async throws {
+        let fixture = try GitFixture.make()
+        defer { try? FileManager.default.removeItem(at: fixture.rootURL) }
+
+        let runner = RecordingGitRunner()
+        let source = GitRepositoryModule(repositoryURL: fixture.repositoryURL, git: runner)
+        _ = try await source.loadRepositoryState()
+        let revisions = try await readRevisions(from: source)
+        let working = try required(revisions.first(where: { $0.kind == .workingDirectory }), "file viewer: working row exists")
+        let details = try await source.loadRevisionDetails(for: working)
+        let file = try required(details.files.first(where: { $0.path == "working.txt" }), "file viewer: changed file exists")
+        let options = FileDiffOptions(whitespace: .changes, contextLines: 7, treatsAllFilesAsText: true)
+        let diff = try await source.loadDiff(for: working, file: file, options: options)
+        require(diff?.lines.isEmpty == false, "file viewer: option-bearing diff still parses")
+        let commands = await runner.commands
+        require(
+            commands.contains(where: {
+                $0.first == "diff"
+                    && $0.contains("--ignore-space-change")
+                    && $0.contains("--unified=7")
+                    && $0.contains("--text")
+            }),
+            "file viewer: typed options reach the real structured Git command"
+        )
+
+        let feature = try required(revisions.first(where: { $0.subject == "Feature changes" }), "file viewer: feature revision exists")
+        let tree = try await source.loadRepositoryFiles(for: feature)
+        let binaryEntry = try required(tree.first(where: { $0.path == "binary.dat" }), "file viewer: binary entry exists")
+        let binary = try await source.loadFilePresentation(for: feature, file: binaryEntry, encoding: .automatic)
+        require(binary.kind == .binary && binary.text.contains("00000000"), "file viewer: repository blobs use binary presentation")
+    }
+
     static func run() async throws {
         let fixture = try GitFixture.make()
         defer { try? FileManager.default.removeItem(at: fixture.rootURL) }
@@ -222,6 +254,7 @@ enum GitRepositoryModuleTests {
 private actor RecordingGitRunner: GitCommandRunning {
     private let process = GitProcess()
     private(set) var historyQueryCount = 0
+    private(set) var commands: [[String]] = []
 
     func run(
         arguments: [String],
@@ -229,6 +262,7 @@ private actor RecordingGitRunner: GitCommandRunning {
         standardInput: Data?,
         environment: [String: String]
     ) async throws -> GitCommandResult {
+        commands.append(arguments)
         if arguments.first == "log" { historyQueryCount += 1 }
         return try await process.run(
             arguments: arguments,
@@ -245,6 +279,7 @@ private actor RecordingGitRunner: GitCommandRunning {
         environment: [String: String],
         output: @escaping GitOutputHandler
     ) async throws -> GitCommandResult {
+        commands.append(arguments)
         if arguments.first == "log" { historyQueryCount += 1 }
         return try await process.runStreaming(
             arguments: arguments,

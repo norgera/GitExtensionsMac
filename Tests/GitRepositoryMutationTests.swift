@@ -141,6 +141,15 @@ enum GitRepositoryMutationTests {
         print("GitRepositoryMutationTests.merge: passed")
     }
 
+    static func runConflictResolver() async throws {
+        let fixture = try MutationGitFixture.make()
+        defer { fixture.remove() }
+
+        try await testConflictStageModelAndSideSelection(fixture)
+        try await testConflictDeleteAddBinaryAndMultiSelection(fixture)
+        print("GitRepositoryMutationTests.conflictResolver: passed")
+    }
+
     static func runTags() async throws {
         try testTagCommandConstruction()
         let fixture = try MutationGitFixture.make()
@@ -341,7 +350,7 @@ enum GitRepositoryMutationTests {
 
         let fetchURL = fixture.templateURL.path
         let pushURL = fixture.rootURL.appendingPathComponent("Push target.git").path
-        _ = try await source.saveRemote(RepositoryRemoteSaveRequest(
+        try await source.saveRemote(RepositoryRemoteSaveRequest(
             originalName: nil,
             name: "backup",
             fetchURL: fetchURL,
@@ -354,38 +363,88 @@ enum GitRepositoryMutationTests {
         let added = try required(remotes.first(where: { $0.name == "backup" }), "remotes: added remote loads")
         try require(added.fetchURL == fetchURL && added.pushURL == pushURL && added.puttyKeyFile == "/tmp/test key.ppk", "remotes: typed fields persist")
         try require(added.color == "#12AB34" && added.prefix == "John/", "remotes: color and prefix persist")
+        try require(
+            try fixture.git(["config", "--local", "--get", "remote.backup.fetch"], in: repository).trimmed == "+refs/heads/*:refs/remotes/backup/*",
+            "remotes: add preserves Git's default fetch refspec"
+        )
 
-        _ = try await source.saveRemote(RepositoryRemoteSaveRequest(
+        try fixture.git(["config", "--local", "--add", "remote.backup.push", "refs/heads/main:refs/heads/main"], in: repository)
+        try fixture.git(["config", "--local", "--add", "remote.backup.push", "+refs/heads/topic:refs/heads/topic"], in: repository)
+        try fixture.git(["config", "--local", "remote.backup.prune", "true"], in: repository)
+        try fixture.git(["config", "--local", "--add", "remote.backup.url", "/tmp/obsolete remote URL"], in: repository)
+        try await source.saveRemote(RepositoryRemoteSaveRequest(
+            originalName: "backup",
+            name: "backup",
+            fetchURL: fetchURL,
+            pushURL: pushURL,
+            puttyKeyFile: "/tmp/test key.ppk",
+            color: "#12AB34",
+            prefix: "John/"
+        ))
+        let storedURLs = try fixture.git(["config", "--local", "--get-all", "remote.backup.url"], in: repository)
+            .split(separator: "\n").map(String.init)
+        try require(storedURLs == [fetchURL], "remotes: scalar URL edit replaces multiple stored URL values like upstream")
+        remotes = try await source.loadRemoteConfigurations()
+        try require(
+            remotes.first(where: { $0.name == "backup" })?.pushRefSpecs == [
+                "refs/heads/main:refs/heads/main",
+                "+refs/heads/topic:refs/heads/topic"
+            ],
+            "remotes: multiple push refspecs load in config order"
+        )
+
+        try fixture.git(["fetch", "backup"], in: repository)
+        try await source.setBranchTracking(RepositoryBranchTrackingConfiguration(
+            branchName: "main",
+            remoteName: "backup",
+            mergeBranch: "topic"
+        ))
+
+        try await source.saveRemote(RepositoryRemoteSaveRequest(
             originalName: "backup",
             name: "upstream",
             fetchURL: fetchURL,
             pushURL: fetchURL,
-            puttyKeyFile: nil,
-            color: nil,
-            prefix: nil
+            puttyKeyFile: "/tmp/test key.ppk",
+            color: "#12AB34",
+            prefix: "John/"
         ))
         remotes = try await source.loadRemoteConfigurations()
         let renamed = try required(remotes.first(where: { $0.name == "upstream" }), "remotes: renamed remote loads")
         try require(renamed.pushURL == nil, "remotes: push URL equal to fetch URL is normalized away")
         try require(!remotes.contains(where: { $0.name == "backup" }), "remotes: old name is removed")
+        try require(renamed.pushRefSpecs.count == 2, "remotes: rename preserves multiple push refspecs")
+        try require(try fixture.git(["config", "--local", "--get", "remote.upstream.prune"], in: repository).trimmed == "true", "remotes: rename preserves remote-specific pruning config")
+        try require(try fixture.git(["config", "--local", "--get", "branch.main.remote"], in: repository).trimmed == "upstream", "remotes: Git rename migrates branch tracking remote")
+        try require(try fixture.git(["show-ref", "--verify", "refs/remotes/upstream/topic"], in: repository).contains("refs/remotes/upstream/topic"), "remotes: Git rename migrates remote-tracking refs")
+        try require((try? fixture.git(["show-ref", "--verify", "refs/remotes/backup/topic"], in: repository)) == nil, "remotes: old remote-tracking namespace is gone")
         let advertisedBranches = try await source.loadRemoteBranchNames(named: "upstream")
         try require(advertisedBranches.contains("main") && advertisedBranches.contains("topic"), "remotes: branch query is scoped to the selected remote")
 
-        _ = try await source.setRemote(named: "upstream", disabled: true)
+        try await source.setRemote(named: "upstream", disabled: true)
         remotes = try await source.loadRemoteConfigurations()
         let disabled = try required(remotes.first(where: { $0.name == "upstream" }), "remotes: disabled remote loads")
-        try require(disabled.isDisabled && disabled.fetchURL == fetchURL, "remotes: disabling retains configuration")
+        try require(disabled.isDisabled && disabled.fetchURL == fetchURL && disabled.pushRefSpecs.count == 2, "remotes: disabling retains scalar and repeated configuration")
         try require(try fixture.git(["config", "--local", "--get", "--", "-remote.upstream.url"], in: repository).trimmed == fetchURL, "remotes: disabled section matches Git Extensions")
+        try require(try fixture.git(["config", "--local", "--get", "--", "-remote.upstream.prune"], in: repository).trimmed == "true", "remotes: disabling preserves remote-specific options")
+        let disabledState = try await source.loadRepositoryState()
+        try require(disabledState.navigation.remotes.contains { $0.name == "upstream" && $0.isDisabled }, "remotes: inactive remote is represented in navigation state")
+        try require(!disabledState.networkContext.remotes.contains { $0.name == "upstream" }, "remotes: inactive remote is excluded from Pull and Push contexts")
 
-        _ = try await source.setRemote(named: "upstream", disabled: false)
+        try await source.setRemote(named: "upstream", disabled: false)
         remotes = try await source.loadRemoteConfigurations()
         try require(remotes.contains { $0.name == "upstream" && !$0.isDisabled && $0.fetchURL == fetchURL }, "remotes: activation round trip retains URL")
 
-        _ = try await source.setBranchTracking(RepositoryBranchTrackingConfiguration(branchName: "main", remoteName: "upstream", mergeBranch: "topic"))
+        try await source.setBranchTracking(RepositoryBranchTrackingConfiguration(branchName: "main", remoteName: "upstream", mergeBranch: nil))
         try require(try fixture.git(["config", "--local", "--get", "branch.main.remote"], in: repository).trimmed == "upstream", "remotes: tracking remote persists")
-        try require(try fixture.git(["config", "--local", "--get", "branch.main.merge"], in: repository).trimmed == "refs/heads/topic", "remotes: merge branch persists")
+        try require(try fixture.git(["config", "--local", "--get", "branch.main.merge"], in: repository).trimmed == "refs/heads/main", "remotes: selecting a remote defaults merge to the local branch name")
+        try await source.setBranchTracking(RepositoryBranchTrackingConfiguration(branchName: "main", remoteName: "upstream", mergeBranch: "refs/heads/topic"))
+        try require(try fixture.git(["config", "--local", "--get", "branch.main.merge"], in: repository).trimmed == "refs/heads/topic", "remotes: fully qualified merge refs are not prefixed twice")
+        try await source.setBranchTracking(RepositoryBranchTrackingConfiguration(branchName: "main", remoteName: nil, mergeBranch: nil))
+        try require((try? fixture.git(["config", "--local", "--get", "branch.main.remote"], in: repository)) == nil, "remotes: tracking removal unsets the remote")
+        try require((try? fixture.git(["config", "--local", "--get", "branch.main.merge"], in: repository)) == nil, "remotes: tracking removal unsets the merge ref")
 
-        _ = try await source.deleteRemote(named: "upstream", disabled: false)
+        try await source.deleteRemote(named: "upstream", disabled: false)
         remotes = try await source.loadRemoteConfigurations()
         try require(!remotes.contains(where: { $0.name == "upstream" }), "remotes: deletion removes configuration")
 
@@ -403,6 +462,75 @@ enum GitRepositoryMutationTests {
         } catch RepositoryRemoteManagementError.duplicateName(let name) {
             try require(name == "origin", "remotes: duplicate error retains its name")
         }
+        do {
+            try await source.saveRemote(RepositoryRemoteSaveRequest(
+                originalName: nil,
+                name: "   ",
+                fetchURL: fetchURL,
+                pushURL: nil,
+                puttyKeyFile: nil,
+                color: nil,
+                prefix: nil
+            ))
+            throw MutationFixtureError("remotes: blank name was accepted")
+        } catch RepositoryRemoteManagementError.invalidName {
+            // Expected.
+        }
+        let unavailableURL = fixture.rootURL.appendingPathComponent("Missing remote.git").path
+        try await source.saveRemote(RepositoryRemoteSaveRequest(
+            originalName: nil,
+            name: "unavailable",
+            fetchURL: unavailableURL,
+            pushURL: nil,
+            puttyKeyFile: nil,
+            color: nil,
+            prefix: nil
+        ))
+        try require(
+            try fixture.git(["config", "--local", "--get", "remote.unavailable.url"], in: repository).trimmed == unavailableURL,
+            "remotes: URLs are preserved for Git to validate during network operations"
+        )
+        do {
+            _ = try await source.loadRemoteBranchNames(named: "unavailable")
+            throw MutationFixtureError("remotes: unavailable URL unexpectedly passed remote inspection")
+        } catch GitError.commandFailed(let arguments, let status, _) {
+            try require(arguments.first == "ls-remote" && status != 0, "remotes: invalid URL preserves the failing Git inspection command")
+        }
+        try await source.deleteRemote(named: "unavailable", disabled: false)
+        do {
+            try await source.setRemote(named: "missing", disabled: true)
+            throw MutationFixtureError("remotes: missing remote was toggled")
+        } catch RepositoryRemoteManagementError.missingRemote(let name) {
+            try require(name == "missing", "remotes: stale remote error retains its name")
+        }
+        do {
+            try await source.setBranchTracking(RepositoryBranchTrackingConfiguration(branchName: "missing", remoteName: "origin", mergeBranch: "main"))
+            throw MutationFixtureError("remotes: missing branch tracking was saved")
+        } catch RepositoryRemoteManagementError.missingBranch(let name) {
+            try require(name == "missing", "remotes: stale branch error retains its name")
+        }
+
+        let bareRepository = fixture.rootURL.appendingPathComponent("Bare remote management.git", isDirectory: true)
+        try fixture.git(["clone", "--bare", fixture.templateURL.path, bareRepository.path], in: fixture.rootURL)
+        let bareSource = GitRepositoryModule(repositoryURL: bareRepository)
+        _ = try await bareSource.loadRepositoryState()
+        try await bareSource.saveRemote(RepositoryRemoteSaveRequest(
+            originalName: nil,
+            name: "bare-backup",
+            fetchURL: fetchURL,
+            pushURL: pushURL,
+            puttyKeyFile: nil,
+            color: nil,
+            prefix: nil
+        ))
+        var bareRemotes = try await bareSource.loadRemoteConfigurations()
+        try require(bareRemotes.contains { $0.name == "bare-backup" }, "remotes: add/edit management remains available in a bare repository")
+        try await bareSource.setRemote(named: "bare-backup", disabled: true)
+        bareRemotes = try await bareSource.loadRemoteConfigurations()
+        try require(bareRemotes.contains { $0.name == "bare-backup" && $0.isDisabled }, "remotes: enable/disable remains available in a bare repository")
+        try await bareSource.deleteRemote(named: "bare-backup", disabled: true)
+        bareRemotes = try await bareSource.loadRemoteConfigurations()
+        try require(!bareRemotes.contains { $0.name == "bare-backup" }, "remotes: inactive deletion remains available in a bare repository")
         print("GitRepositoryMutationTests.remotes: passed")
     }
 
@@ -2486,6 +2614,128 @@ enum GitRepositoryMutationTests {
         try require(!finalState.mergeInProgress && finalState.conflictedPaths.isEmpty && !finalState.hasStagedChanges, "merge conflict continue: merge files, index, and worktree finish cleanly")
     }
 
+    private static func testConflictStageModelAndSideSelection(_ fixture: MutationGitFixture) async throws {
+        for side in RepositoryConflictSide.allCases {
+            let setup = try makeMergeConflictRepository(fixture, name: "Conflict \(side) repo")
+            let source = GitRepositoryModule(repositoryURL: setup.repository)
+            _ = try await source.loadRepositoryState()
+            let result = try await source.performMerge(RepositoryMergeRequest(targets: [setup.target]), output: { _ in })
+            guard case .conflicts = result.outcome else { throw MutationFixtureError("conflict sides: merge did not conflict") }
+
+            let conflicts = try await source.loadConflicts()
+            try require(conflicts.count == 1, "conflict sides: exactly one index conflict is parsed")
+            let conflict = conflicts[0]
+            try require(
+                conflict.path == "shared.txt" && conflict.kind == .bothModified
+                    && conflict.base != nil && conflict.local != nil && conflict.remote != nil,
+                "conflict sides: base/local/remote index stages are preserved"
+            )
+            let base = try await source.loadConflictContent(path: conflict.path, side: .base, encoding: .automatic)
+            let local = try await source.loadConflictContent(path: conflict.path, side: .local, encoding: .automatic)
+            let remote = try await source.loadConflictContent(path: conflict.path, side: .remote, encoding: .automatic)
+            try require(base?.text == "base\n", "conflict sides: base content comes from stage 1")
+            try require(local?.text == "current merge conflict\n", "conflict sides: local content comes from stage 2")
+            try require(remote?.text == "incoming merge conflict\n", "conflict sides: remote content comes from stage 3")
+
+            _ = try await source.chooseConflictSide(paths: [conflict.path], side: side)
+            let expected = switch side {
+            case .base: "base\n"
+            case .local: "current merge conflict\n"
+            case .remote: "incoming merge conflict\n"
+            }
+            try require(
+                try String(contentsOf: setup.repository.appendingPathComponent(conflict.path), encoding: .utf8) == expected,
+                "conflict sides: choosing \(side) writes the selected index stage"
+            )
+            let remaining = try await source.loadConflicts()
+            try require(remaining.isEmpty, "conflict sides: choosing a side stages and clears the unmerged index")
+            let indexEntry = try fixture.git(["ls-files", "--stage", "--", conflict.path], in: setup.repository).trimmed
+            try require(
+                indexEntry.contains(" 0\t\(conflict.path)"),
+                "conflict sides: resulting file has one resolved stage-0 index entry"
+            )
+        }
+    }
+
+    private static func testConflictDeleteAddBinaryAndMultiSelection(_ fixture: MutationGitFixture) async throws {
+        let deleteRepository = try fixture.clone(named: "Conflict delete modify repo")
+        try fixture.git(["checkout", "-b", "delete-modify-topic"], in: deleteRepository)
+        try fixture.write("incoming modification\n", to: deleteRepository.appendingPathComponent("shared.txt"))
+        try fixture.git(["add", "--", "shared.txt"], in: deleteRepository)
+        try fixture.git(["commit", "-m", "Modify shared"], in: deleteRepository)
+        try fixture.git(["checkout", "main"], in: deleteRepository)
+        try fixture.git(["rm", "--", "shared.txt"], in: deleteRepository)
+        try fixture.git(["commit", "-m", "Delete shared"], in: deleteRepository)
+        let deleteSource = GitRepositoryModule(repositoryURL: deleteRepository)
+        _ = try await deleteSource.loadRepositoryState()
+        _ = try await deleteSource.performMerge(RepositoryMergeRequest(targets: ["delete-modify-topic"]), output: { _ in })
+        let deleted = try await deleteSource.loadConflicts()
+        try require(deleted.count == 1 && deleted[0].kind == .deletedLocally && deleted[0].local == nil, "delete/modify: missing local stage is classified")
+        _ = try await deleteSource.chooseConflictSide(paths: ["shared.txt"], side: .local)
+        try require(!FileManager.default.fileExists(atPath: deleteRepository.appendingPathComponent("shared.txt").path), "delete/modify: choosing the missing local side removes the worktree file")
+        try require(try fixture.git(["ls-files", "--stage", "--", "shared.txt"], in: deleteRepository).trimmed.isEmpty, "delete/modify: resolved deletion removes all unmerged index stages")
+
+        let addRepository = try fixture.clone(named: "Conflict add add repo")
+        try fixture.git(["checkout", "-b", "add-add-topic"], in: addRepository)
+        try fixture.write("incoming add\n", to: addRepository.appendingPathComponent("collision.txt"))
+        try fixture.git(["add", "--", "collision.txt"], in: addRepository)
+        try fixture.git(["commit", "-m", "Incoming add"], in: addRepository)
+        try fixture.git(["checkout", "main"], in: addRepository)
+        try fixture.write("local add\n", to: addRepository.appendingPathComponent("collision.txt"))
+        try fixture.git(["add", "--", "collision.txt"], in: addRepository)
+        try fixture.git(["commit", "-m", "Local add"], in: addRepository)
+        let addSource = GitRepositoryModule(repositoryURL: addRepository)
+        _ = try await addSource.loadRepositoryState()
+        _ = try await addSource.performMerge(RepositoryMergeRequest(targets: ["add-add-topic"]), output: { _ in })
+        let added = try await addSource.loadConflicts()
+        try require(added.count == 1 && added[0].kind == .bothAdded && added[0].base == nil, "add/add: absent base stage is classified")
+        _ = try await addSource.chooseConflictSide(paths: ["collision.txt"], side: .remote)
+        try require(try String(contentsOf: addRepository.appendingPathComponent("collision.txt"), encoding: .utf8) == "incoming add\n", "add/add: remote side selection is exact")
+
+        let binaryRepository = try fixture.clone(named: "Conflict binary repo")
+        let binaryURL = binaryRepository.appendingPathComponent("binary.dat")
+        try Data([0, 1, 2]).write(to: binaryURL)
+        try fixture.git(["add", "--", "binary.dat"], in: binaryRepository)
+        try fixture.git(["commit", "-m", "Binary base"], in: binaryRepository)
+        try fixture.git(["checkout", "-b", "binary-topic"], in: binaryRepository)
+        try Data([0, 3, 4]).write(to: binaryURL)
+        try fixture.git(["add", "--", "binary.dat"], in: binaryRepository)
+        try fixture.git(["commit", "-m", "Binary incoming"], in: binaryRepository)
+        try fixture.git(["checkout", "main"], in: binaryRepository)
+        try Data([0, 5, 6]).write(to: binaryURL)
+        try fixture.git(["add", "--", "binary.dat"], in: binaryRepository)
+        try fixture.git(["commit", "-m", "Binary local"], in: binaryRepository)
+        let binarySource = GitRepositoryModule(repositoryURL: binaryRepository)
+        _ = try await binarySource.loadRepositoryState()
+        _ = try await binarySource.performMerge(RepositoryMergeRequest(targets: ["binary-topic"]), output: { _ in })
+        let binary = try await binarySource.loadConflictContent(path: "binary.dat", side: .remote, encoding: .automatic)
+        try require(binary?.kind == .binary && binary?.data == Data([0, 3, 4]), "binary conflict: side data remains byte-exact and uses binary presentation")
+
+        let multiRepository = try fixture.clone(named: "Conflict multi repo")
+        try fixture.git(["checkout", "-b", "multi-topic"], in: multiRepository)
+        try fixture.write("incoming one\n", to: multiRepository.appendingPathComponent("shared.txt"))
+        try fixture.write("incoming two\n", to: multiRepository.appendingPathComponent("main.txt"))
+        try fixture.git(["add", "--all", "--"], in: multiRepository)
+        try fixture.git(["commit", "-m", "Incoming multiple"], in: multiRepository)
+        try fixture.git(["checkout", "main"], in: multiRepository)
+        try fixture.write("local one\n", to: multiRepository.appendingPathComponent("shared.txt"))
+        try fixture.write("local two\n", to: multiRepository.appendingPathComponent("main.txt"))
+        try fixture.git(["add", "--all", "--"], in: multiRepository)
+        try fixture.git(["commit", "-m", "Local multiple"], in: multiRepository)
+        let multiSource = GitRepositoryModule(repositoryURL: multiRepository)
+        _ = try await multiSource.loadRepositoryState()
+        _ = try await multiSource.performMerge(RepositoryMergeRequest(targets: ["multi-topic"]), output: { _ in })
+        let multiple = try await multiSource.loadConflicts()
+        try require(multiple.map(\.path) == ["main.txt", "shared.txt"], "multi conflict: paths are stable and sorted")
+        _ = try await multiSource.chooseConflictSide(paths: multiple.map(\.path), side: .remote)
+        let remaining = try await multiSource.loadConflicts()
+        try require(remaining.isEmpty, "multi conflict: one operation resolves every selected path")
+        try require(
+            try fixture.git(["diff", "--cached", "--name-only"], in: multiRepository).split(separator: "\n").map(String.init).sorted() == ["main.txt", "shared.txt"],
+            "multi conflict: every resolved path is staged"
+        )
+    }
+
     private static func testMergeConflictAbort(_ fixture: MutationGitFixture) async throws {
         let setup = try makeMergeConflictRepository(fixture, name: "Merge conflict abort repo")
         let originalContent = try String(contentsOf: setup.repository.appendingPathComponent("shared.txt"), encoding: .utf8)
@@ -2709,7 +2959,13 @@ enum GitRepositoryMutationTests {
         _ = try await source.loadRepositoryState()
 
         let configuration = try await source.loadMergeToolConfiguration()
-        try require(configuration == RepositoryMergeToolConfiguration(name: "fixture", usesGUISetting: false), "rebase mergetool: effective merge.tool is discovered")
+        try require(
+            configuration?.name == "fixture"
+                && configuration?.usesGUISetting == false
+                && configuration?.availableTools.contains("fixture") == true
+                && configuration?.trustExitCode == true,
+            "rebase mergetool: effective tool, configured choices, and trust-exit policy are discovered"
+        )
         let conflicted = try await source.rebase(RepositoryRebaseRequest(upstream: setup.target, autoStash: false))
         guard case .conflicts(let paths) = conflicted.outcome else { throw MutationFixtureError("rebase mergetool: conflict was not reported") }
 

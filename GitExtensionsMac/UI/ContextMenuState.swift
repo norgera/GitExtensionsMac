@@ -406,6 +406,7 @@ enum RepositoryMenuNodeKind: Hashable, Sendable {
     case submodule
     case branchFolder
     case remoteBranchFolder
+    case tagFolder
 
     var isRef: Bool {
         switch self {
@@ -416,7 +417,7 @@ enum RepositoryMenuNodeKind: Hashable, Sendable {
 
     var supportsCopy: Bool {
         switch self {
-        case .localBranch, .remoteBranch, .stash: true
+        case .localBranch, .remoteBranch, .tag, .stash: true
         default: false
         }
     }
@@ -429,6 +430,8 @@ struct RepositoryContextMenuContext: Sendable {
     let selectedHaveExpandableChildren: Bool
     let selectedHaveCollapsibleChildren: Bool
     var isBareRepository = false
+    var focusedRootCanMoveUp = false
+    var focusedRootCanMoveDown = false
 }
 
 enum RepositoryContextMenuBuilder {
@@ -449,6 +452,14 @@ enum RepositoryContextMenuBuilder {
             entries += commands(for: context.focused, isBareRepository: context.isBareRepository)
         }
 
+        if isSingle, case .group = context.focused {
+            entries += [
+                .separator,
+                command("repository.root.moveUp", "Move up", enabled: context.focusedRootCanMoveUp),
+                command("repository.root.moveDown", "Move down", enabled: context.focusedRootCanMoveDown)
+            ]
+        }
+
         if context.selectedHaveChildren {
             entries += [
                 .separator,
@@ -461,9 +472,15 @@ enum RepositoryContextMenuBuilder {
             entries += [
                 .separator,
                 submenu("repository.sortBy", "Sort by", children: [
-                    command("repository.sortBy.name", "Name"),
-                    command("repository.sortBy.date", "Commit date"),
-                    command("repository.sortBy.author", "Author")
+                    command("repository.sortBy.gitDefault", "Git default"),
+                    command("repository.sortBy.authorDate", "Author date"),
+                    command("repository.sortBy.committerDate", "Committer date"),
+                    command("repository.sortBy.creatorDate", "Creator date"),
+                    command("repository.sortBy.taggerDate", "Tagger date"),
+                    command("repository.sortBy.alphaNumeric", "Alpha-numeric"),
+                    command("repository.sortBy.version", "Version"),
+                    command("repository.sortBy.objectSize", "Object size"),
+                    command("repository.sortBy.originatingRemote", "Originating remote")
                 ]),
                 submenu("repository.sortOrder", "Sort order", children: [
                     command("repository.sortOrder.ascending", "Ascending"),
@@ -498,7 +515,7 @@ enum RepositoryContextMenuBuilder {
                 command("repository.branch.merge", "Merge into current branch…", enabled: canMoveHEAD),
                 command("repository.branch.rebase", "Rebase current branch on this branch…", enabled: canMoveHEAD),
                 command("repository.branch.create", "Create branch…", enabled: !isBareRepository),
-                command("repository.branch.reset", "Reset current branch to here…", enabled: canMoveHEAD),
+                command("repository.branch.reset", "Reset current branch to here…", enabled: false),
                 .separator,
                 command("repository.branch.rename", "Rename branch…"),
                 command("repository.branch.delete", "Delete branch…", enabled: canMoveHEAD)
@@ -521,7 +538,7 @@ enum RepositoryContextMenuBuilder {
                 command("repository.remoteBranch.merge", "Merge into current branch…", enabled: !isBareRepository),
                 command("repository.remoteBranch.rebase", "Rebase current branch on this remote branch…", enabled: !isBareRepository),
                 command("repository.remoteBranch.create", "Create branch…", enabled: !isBareRepository),
-                command("repository.remoteBranch.reset", "Reset current branch to here…", enabled: !isBareRepository),
+                command("repository.remoteBranch.reset", "Reset current branch to here…", enabled: false),
                 .separator,
                 command("repository.remoteBranch.fetch", "Fetch branch"),
                 command("repository.remoteBranch.pull", "Pull from remote branch", enabled: !isBareRepository),
@@ -538,7 +555,7 @@ enum RepositoryContextMenuBuilder {
                 command("repository.tag.merge", "Merge into current branch…", enabled: !isBareRepository),
                 command("repository.tag.rebase", "Rebase current branch on this tag revision…", enabled: !isBareRepository),
                 command("repository.tag.createBranch", "Create branch…", enabled: !isBareRepository),
-                command("repository.tag.reset", "Reset current branch to here…", enabled: !isBareRepository),
+                command("repository.tag.reset", "Reset current branch to here…", enabled: false),
                 .separator,
                 command("repository.tag.delete", "Delete tag…")
             ]
@@ -551,23 +568,23 @@ enum RepositoryContextMenuBuilder {
                 command("repository.stash.drop", "Drop stash…", enabled: !isBareRepository)
             ]
 
-        case .worktree(let isCurrent, let pathExists):
+        case .worktree(_, let pathExists):
             return [
-                command("repository.worktree.open", "Open worktree", enabled: !isCurrent),
-                command("repository.worktree.delete", "Delete worktree…", enabled: !isCurrent),
+                command("repository.worktree.open", "Open worktree", enabled: false),
+                command("repository.worktree.delete", "Delete worktree…", enabled: false),
                 command("repository.worktree.copyPath", "Copy worktree path"),
                 command("repository.worktree.show", "Show worktree in Finder", enabled: pathExists)
             ]
 
         case .submodule:
             return [
-                command("repository.submodule.open", "Open submodule"),
-                command("repository.submodule.openGE", "Open in Git Extensions"),
-                command("repository.submodule.update", "Update submodule"),
-                command("repository.submodule.synchronize", "Synchronize submodule", enabled: !isBareRepository),
-                command("repository.submodule.reset", "Reset submodule", enabled: !isBareRepository),
-                command("repository.submodule.stash", "Stash submodule", enabled: !isBareRepository),
-                command("repository.submodule.commit", "Commit submodule", enabled: !isBareRepository)
+                command("repository.submodule.open", "Open submodule", enabled: false),
+                command("repository.submodule.openGE", "Open in Git Extensions", enabled: false),
+                command("repository.submodule.update", "Update submodule", enabled: false),
+                command("repository.submodule.synchronize", "Synchronize submodule", enabled: false),
+                command("repository.submodule.reset", "Reset submodule", enabled: false),
+                command("repository.submodule.stash", "Stash submodule", enabled: false),
+                command("repository.submodule.commit", "Commit submodule", enabled: false)
             ]
 
         case .branchFolder:
@@ -577,6 +594,9 @@ enum RepositoryContextMenuBuilder {
             ]
 
         case .remoteBranchFolder:
+            return []
+
+        case .tagFolder:
             return []
 
         case .group(let group):
@@ -595,9 +615,9 @@ enum RepositoryContextMenuBuilder {
                 ]
             case .worktrees:
                 return [
-                    command("repository.worktrees.create", "Create worktree…"),
-                    command("repository.worktrees.prune", "Prune worktrees"),
-                    command("repository.worktrees.manage", "Manage worktrees…")
+                    command("repository.worktrees.create", "Create worktree…", enabled: false),
+                    command("repository.worktrees.prune", "Prune worktrees", enabled: false),
+                    command("repository.worktrees.manage", "Manage worktrees…", enabled: false)
                 ]
             default:
                 return []

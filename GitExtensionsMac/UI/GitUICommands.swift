@@ -36,6 +36,24 @@ final class GitUICommands {
         repositoryChangedNotifier.notify()
     }
 
+    func startDifftool(commit: Commit, file: ChangedFile) {
+        guard let browser else { return }
+        browser.statusLabel.stringValue = "Opening \(file.path) with the configured difftool…"
+        Task { @MainActor [weak browser, repositoryModule] in
+            do {
+                let customTool = AppSettingsStore.shared.preferences.externalDiffToolPath
+                try await repositoryModule.openWithDifftool(
+                    for: commit,
+                    file: file,
+                    customToolPath: customTool.isEmpty ? nil : customTool
+                )
+                browser?.statusLabel.stringValue = "Opened \(file.path) with difftool."
+            } catch {
+                browser?.statusLabel.stringValue = "Difftool failed: \(error.localizedDescription)"
+            }
+        }
+    }
+
     func startCommit(
         initialMode: RepositoryCommitMode = .normal,
         specialKind: CommitWorkflowSpecialKind? = nil
@@ -91,6 +109,9 @@ final class GitUICommands {
             executeImmediately: immediately,
             context: context,
             source: source,
+            onManageRemotes: { [weak self] remote, localBranch in
+                self?.startRemoteManagement(selectedRemote: remote, selectedLocalBranch: localBranch)
+            },
             onRepositoryChanged: { [weak self, weak browser] selected in
                 self?.notifyRepositoryChanged(preferredCommitID: selected ?? browser?.selectedCommitID)
             },
@@ -110,9 +131,64 @@ final class GitUICommands {
         startPull(action: prune ? .fetchPruneAll : .fetchAll, immediately: true)
     }
 
-    func startRemoteManagement(selectedRemote: String? = nil) {
+    func fetchRemote(named remote: String, prune: Bool) {
+        guard let browser,
+              let window = browser.view.window,
+              let source = repositoryModule as? any RepositoryPullingDataSource else { return }
+        Task { @MainActor [weak self, weak browser, weak window] in
+            guard let self, let browser, let window else { return }
+            let processResult = await PullProcessDialog.run(
+                request: RepositoryPullRequest(source: .remote(remote), mode: .fetch, prune: prune),
+                source: source,
+                parent: window
+            )
+            switch processResult {
+            case .success(let result):
+                notifyRepositoryChanged(preferredCommitID: result.selectedCommitID ?? browser.selectedCommitID)
+                browser.statusLabel.stringValue = result.message
+            case .failure(let error):
+                browser.statusLabel.stringValue = error.localizedDescription
+            case nil:
+                break
+            }
+        }
+    }
+
+    func setRemote(named remote: String, disabled: Bool, fetchAfterEnabling: Bool) {
+        guard let browser,
+              let window = browser.view.window,
+              let source = repositoryModule as? any RepositoryRemoteManagingDataSource else { return }
+        Task { @MainActor [weak self, weak browser, weak window] in
+            guard let self, let browser, let window else { return }
+            do {
+                try await source.setRemote(named: remote, disabled: disabled)
+                if fetchAfterEnabling,
+                   let pullSource = repositoryModule as? any RepositoryPullingDataSource {
+                    let result = await PullProcessDialog.run(
+                        request: RepositoryPullRequest(source: .remote(remote), mode: .fetch),
+                        source: pullSource,
+                        parent: window
+                    )
+                    if case .success(let fetched) = result {
+                        browser.statusLabel.stringValue = fetched.message
+                    } else if case .failure(let error) = result {
+                        browser.statusLabel.stringValue = error.localizedDescription
+                    }
+                }
+                notifyRepositoryChanged(preferredCommitID: browser.selectedCommitID)
+            } catch {
+                browser.statusLabel.stringValue = error.localizedDescription
+            }
+        }
+    }
+
+    func startRemoteManagement(selectedRemote: String? = nil, selectedLocalBranch: String? = nil) {
         if let remoteWindowController {
-            remoteWindowController.window?.makeKeyAndOrderFront(nil)
+            RemoteManagementDialog.focus(
+                remoteWindowController,
+                selectedRemote: selectedRemote,
+                selectedLocalBranch: selectedLocalBranch
+            )
             return
         }
         guard let browser,
@@ -124,6 +200,10 @@ final class GitUICommands {
         remoteWindowController = RemoteManagementDialog.present(
             source: source,
             selectedRemote: selectedRemote,
+            selectedLocalBranch: selectedLocalBranch,
+            onFetchRemote: { [weak self] remote, window in
+                await self?.fetchAfterSavingRemote(named: remote, parent: window)
+            },
             onRepositoryChanged: { [weak self, weak browser] in
                 self?.notifyRepositoryChanged(preferredCommitID: browser?.selectedCommitID)
             },
@@ -131,6 +211,22 @@ final class GitUICommands {
                 self?.remoteWindowController = nil
             }
         )
+    }
+
+    private func fetchAfterSavingRemote(named remote: String, parent: NSWindow) async {
+        guard let source = repositoryModule as? any RepositoryPullingDataSource else { return }
+        let request = RepositoryPullRequest(source: .remote(remote), mode: .fetch)
+        guard let processResult = await PullProcessDialog.run(
+            request: request,
+            source: source,
+            parent: parent
+        ) else { return }
+        switch processResult {
+        case .success(let result):
+            browser?.statusLabel.stringValue = result.message
+        case .failure(let error):
+            browser?.statusLabel.stringValue = error.localizedDescription
+        }
     }
 
     func startPush(
@@ -154,6 +250,9 @@ final class GitUICommands {
             initialBranch: initialBranch,
             executeImmediately: immediately,
             initialForceWithLease: forceWithLease,
+            onManageRemotes: { [weak self] remote, localBranch in
+                self?.startRemoteManagement(selectedRemote: remote, selectedLocalBranch: localBranch)
+            },
             onRepositoryChanged: { [weak self, weak browser] preferredCommitID in
                 self?.notifyRepositoryChanged(preferredCommitID: preferredCommitID ?? browser?.selectedCommitID)
             },
@@ -356,7 +455,8 @@ final class GitUICommands {
             browser.showPlaceholderStatus("There are no tags to delete")
             return
         }
-        let preferredRemote = preferredTagRemote(browser: browser) ?? navigation.remotes.first?.name ?? ""
+        let activeRemotes = navigation.remotes.filter { !$0.isDisabled }
+        let preferredRemote = preferredTagRemote(browser: browser) ?? activeRemotes.first?.name ?? ""
         var initial = DeleteTagDialogValue(
             name: initialName ?? references.tags.first?.name ?? "",
             remote: preferredRemote
@@ -366,7 +466,7 @@ final class GitUICommands {
             while let value = await TagDialogs.deleteTag(
                 initial: initial,
                 tags: references.tags,
-                remotes: navigation.remotes,
+                remotes: activeRemotes,
                 window: window
             ) {
                 initial = value
@@ -408,13 +508,14 @@ final class GitUICommands {
     private func preferredTagRemote(browser: RepositoryBrowserViewController) -> String? {
         guard let references = browser.repositoryReferences,
               let navigation = browser.repositoryNavigation else { return nil }
+        let activeRemotes = navigation.remotes.filter { !$0.isDisabled }
         if let current = references.branches.first(where: \.isCurrent),
            let remote = current.remoteName,
-           navigation.remotes.contains(where: { $0.name == remote }) {
+           activeRemotes.contains(where: { $0.name == remote }) {
             return remote
         }
-        if navigation.remotes.contains(where: { $0.name == "origin" }) { return "origin" }
-        return navigation.remotes.first?.name
+        if activeRemotes.contains(where: { $0.name == "origin" }) { return "origin" }
+        return activeRemotes.first?.name
     }
 
     private func makeCheckoutWorkflowCoordinator() -> CheckoutBranchWorkflowCoordinator? {
@@ -439,6 +540,12 @@ final class GitUICommands {
             },
             onConflicts: { [weak self] in
                 self?.startConflictResolution()
+            },
+            onMerge: { [weak self] target in
+                self?.startMergeBranches(initialTarget: target)
+            },
+            onRebase: { [weak self] commit in
+                self?.startRebase(on: commit, interactive: false)
             }
         )
         browser.checkoutBranchWorkflowCoordinator = coordinator
@@ -457,7 +564,8 @@ final class GitUICommands {
             guard let browser else { return }
             let refreshed = await WorkflowManagementDialogs.resolveConflicts(
                 source: source,
-                window: window
+                window: window,
+                offerCommit: offerCommit
             )
             if refreshed {
                 self.notifyRepositoryChanged(preferredCommitID: browser.selectedCommitID)
@@ -481,7 +589,10 @@ final class GitUICommands {
                 context: context,
                 window: window,
                 manageStashes: manageStashes,
-                initialStash: initialStash
+                initialStash: initialStash,
+                openWithDifftool: { [weak self] commit, file in
+                    self?.startDifftool(commit: commit, file: file)
+                }
             )
             if result.repositoryChanged {
                 self.notifyRepositoryChanged(

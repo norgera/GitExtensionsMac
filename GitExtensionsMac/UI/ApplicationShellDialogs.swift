@@ -255,10 +255,18 @@ enum ApplicationShellDialogs {
         initialAction: NetworkDialogInitialAction,
         context: RepositoryNetworkContext,
         source: (any RepositoryRemoteManagingDataSource)?,
+        onManageRemotes: @escaping (String?) -> Void,
         onRepositoryChanged: @escaping () -> Void,
         onClose: @escaping () -> Void
     ) -> NSWindowController {
-        let controller = NetworkDialogViewController(kind: kind, initialAction: initialAction, context: context, source: source, onRepositoryChanged: onRepositoryChanged)
+        let controller = NetworkDialogViewController(
+            kind: kind,
+            initialAction: initialAction,
+            context: context,
+            source: source,
+            onManageRemotes: onManageRemotes,
+            onRepositoryChanged: onRepositoryChanged
+        )
         let window = NSWindow(contentViewController: controller)
         window.title = "\(kind.rawValue) (\(context.repository.path))"
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
@@ -328,9 +336,9 @@ private final class NetworkDialogViewController: NSViewController, NSWindowDeleg
     private let initialAction: NetworkDialogInitialAction
     private var context: RepositoryNetworkContext
     private let source: (any RepositoryRemoteManagingDataSource)?
+    private let onManageRemotes: (String?) -> Void
     private let onRepositoryChanged: () -> Void
     private var didClose = false
-    private var remoteWindowController: NSWindowController?
     private var remoteBranchTask: Task<Void, Never>?
     private var remotePopUp: NSPopUpButton?
     private var remoteURLField: NSTextField?
@@ -355,12 +363,14 @@ private final class NetworkDialogViewController: NSViewController, NSWindowDeleg
         initialAction: NetworkDialogInitialAction,
         context: RepositoryNetworkContext,
         source: (any RepositoryRemoteManagingDataSource)?,
+        onManageRemotes: @escaping (String?) -> Void,
         onRepositoryChanged: @escaping () -> Void
     ) {
         self.kind = kind
         self.initialAction = initialAction
         self.context = context
         self.source = source
+        self.onManageRemotes = onManageRemotes
         self.onRepositoryChanged = onRepositoryChanged
         super.init(nibName: nil, bundle: nil)
     }
@@ -763,22 +773,8 @@ private final class NetworkDialogViewController: NSViewController, NSWindowDeleg
     }
 
     @objc private func manageRemotes() {
-        guard remoteWindowController == nil, let source else {
-            remoteWindowController?.window?.makeKeyAndOrderFront(nil)
-            return
-        }
         let selectedName = remotePopUp?.titleOfSelectedItem
-        remoteWindowController = RemoteManagementDialog.present(
-            source: source,
-            selectedRemote: selectedName == "[ All ]" ? nil : selectedName,
-            onRepositoryChanged: { [weak self] in
-                guard let self else { return }
-                self.onRepositoryChanged()
-                self.populateRemotes(selecting: self.remotePopUp?.titleOfSelectedItem)
-                self.loadAdvertisedRemoteBranches()
-            },
-            onClose: { [weak self] in self?.remoteWindowController = nil }
-        )
+        onManageRemotes(selectedName == "[ All ]" ? nil : selectedName)
     }
 
     private func group(_ title: String, _ content: NSView) -> NSBox {

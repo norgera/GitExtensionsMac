@@ -20,6 +20,21 @@ func testRevisionID(_ label: String) -> RevisionID { .object(testObjectID(label)
 @main
 private enum RevisionGraphLayoutTests {
     static func main() async {
+        if CommandLine.arguments.contains("--file-viewer-only") {
+            FileViewerTests.run()
+            do {
+                try await GitRepositoryModuleTests.runFileViewer()
+            } catch {
+                fatalError("FileViewerRepositoryTests failed: \(error.localizedDescription)")
+            }
+            return
+        }
+        if CommandLine.arguments.contains("--left-panel-only") {
+            ContextMenuStateTests.run()
+            AppSettingsTests.run()
+            print("LeftPanelTests: passed")
+            return
+        }
         if CommandLine.arguments.contains("--architecture-h-only") {
             ContextMenuStateTests.run()
             RepositoryChangedNotifierTests.run()
@@ -63,6 +78,30 @@ private enum RevisionGraphLayoutTests {
             print("TagTests: passed")
             return
         }
+        if CommandLine.arguments.contains("--remotes-only") {
+            ContextMenuStateTests.run()
+            AppSettingsTests.run()
+            RepositoryChangedNotifierTests.run()
+            do {
+                try await GitRepositoryMutationTests.runRemoteManagement()
+            } catch {
+                fatalError("RemoteManagementTests failed: \(error.localizedDescription)")
+            }
+            print("RemoteManagementTests: passed")
+            return
+        }
+        if CommandLine.arguments.contains("--conflict-resolver-only") {
+            do {
+                try await GitRepositoryMutationTests.runConflictResolver()
+                try await GitRepositoryMutationTests.runMerge()
+                try await GitRepositoryMutationTests.runCherryPick()
+                try await GitRepositoryMutationTests.runRebase()
+            } catch {
+                fatalError("ConflictResolverTests failed: \(error.localizedDescription)")
+            }
+            print("ConflictResolverTests: passed")
+            return
+        }
         testObjectIdentity()
         testLinearHistory()
         testRelativeGraphState()
@@ -83,6 +122,7 @@ private enum RevisionGraphLayoutTests {
         RepositoryDetailModelTests.run()
         AppSettingsTests.run()
         RepositoryChangedNotifierTests.run()
+        FileViewerTests.run()
         do {
             try await GitRepositoryModuleTests.run()
             try await GitRepositoryMutationTests.runCheckout()
@@ -91,6 +131,7 @@ private enum RevisionGraphLayoutTests {
             try await GitRepositoryMutationTests.runStash()
             try await GitRepositoryMutationTests.runCherryPick()
             try await GitRepositoryMutationTests.runMerge()
+            try await GitRepositoryMutationTests.runConflictResolver()
             try await GitRepositoryMutationTests.runRebase()
             try await GitRepositoryMutationTests.runRemoteManagement()
             try await GitRepositoryMutationTests.runTags()

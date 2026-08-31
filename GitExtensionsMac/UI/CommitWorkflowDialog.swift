@@ -93,6 +93,7 @@ enum CommitWorkflowDialog {
         head: Commit?,
         draft: CommitDialogDraft?,
         owner: NSWindow,
+        onManageRemotes: ((String?, String?) -> Void)? = nil,
         onRepositoryChanged: @escaping (RevisionID?) -> Void,
         onClose: @escaping () -> Void
     ) -> NSWindowController {
@@ -103,6 +104,7 @@ enum CommitWorkflowDialog {
             specialKind: specialKind,
             head: head,
             draft: draft,
+            onManageRemotes: onManageRemotes,
             onRepositoryChanged: onRepositoryChanged
         )
         let commitWindow = NSWindow(contentViewController: controller)
@@ -149,6 +151,7 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
     private var activeSpecialKind: CommitWorkflowSpecialKind?
     private let head: Commit?
     private let draft: CommitDialogDraft?
+    private let onManageRemotes: ((String?, String?) -> Void)?
     private let onRepositoryChanged: (RevisionID?) -> Void
     private let settings = AppSettingsStore.shared
     private let unstagedTable = NSOutlineView()
@@ -180,6 +183,7 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
     private let resetUnstagedButton = NSButton(title: "Reset unstaged changes", target: nil, action: nil)
     private let resetSoftButton = NSButton(title: "Reset soft", target: nil, action: nil)
     private let createBranchButton = NSButton(title: "Create branch", target: nil, action: nil)
+    private let manageTrackingButton = NSButton(title: "Manage tracking…", target: nil, action: nil)
     private let modifyCommitMessageButton = NSButton(title: "Modify commit message", target: nil, action: nil)
     private let mainSplit = NSSplitView()
     private let fileSplit = NSSplitView()
@@ -232,6 +236,7 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
         specialKind: CommitWorkflowSpecialKind?,
         head: Commit?,
         draft: CommitDialogDraft?,
+        onManageRemotes: ((String?, String?) -> Void)?,
         onRepositoryChanged: @escaping (RevisionID?) -> Void
     ) {
         self.source = source
@@ -240,6 +245,7 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
         self.activeSpecialKind = specialKind
         self.head = head
         self.draft = draft
+        self.onManageRemotes = onManageRemotes
         self.onRepositoryChanged = onRepositoryChanged
         self.showOnlyMyMessages = AppSettingsStore.shared.commitPreferences.showOnlyMyMessages
         let filePreferences = AppSettingsStore.shared.fileStatusListPreferences
@@ -265,6 +271,11 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
         }
         commitDiffView.onAddSelectedText = { [weak self] text in
             self?.addSelectedDiffTextToMessage(text)
+        }
+        commitDiffView.onOptionsChanged = { [weak self] in
+            guard let self else { return }
+            let table = !unstagedTable.selectedRowIndexes.isEmpty ? unstagedTable : stagedTable
+            loadSelectedDiff(from: table)
         }
         let left = makeFilePane()
         let right = makeMessagePane()
@@ -399,6 +410,9 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
         messageMenu.addItem(withTitle: "Commit message")
         createBranchButton.target = self
         createBranchButton.action = #selector(createBranch)
+        manageTrackingButton.target = self
+        manageTrackingButton.action = #selector(manageTracking)
+        manageTrackingButton.isHidden = onManageRemotes == nil
         templatesMenu.removeAllItems()
         templatesMenu.pullsDown = true
         templatesMenu.addItem(withTitle: "Commit templates")
@@ -410,13 +424,13 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
         templatesMenu.widthAnchor.constraint(equalToConstant: 125).isActive = true
         createBranchButton.widthAnchor.constraint(equalToConstant: 100).isActive = true
         optionsMenu.widthAnchor.constraint(equalToConstant: 90).isActive = true
-        [messageMenu, templatesMenu, createBranchButton, optionsMenu].forEach {
+        [messageMenu, templatesMenu, createBranchButton, manageTrackingButton, optionsMenu].forEach {
             $0.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
             $0.setContentHuggingPriority(.defaultLow, for: .horizontal)
         }
         let spacer = NSView()
         spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let messageToolbar = NSStackView(views: [messageMenu, templatesMenu, createBranchButton, spacer, optionsMenu])
+        let messageToolbar = NSStackView(views: [messageMenu, templatesMenu, createBranchButton, manageTrackingButton, spacer, optionsMenu])
         messageToolbar.orientation = .horizontal
         messageToolbar.alignment = .centerY
         messageToolbar.spacing = 6
@@ -1398,6 +1412,10 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
                 configureOptionsMenu()
                 let branch = context.branches.first(where: \.isCurrent)?.name ?? "detached HEAD"
                 commitWindow?.title = "Commit to \(branch) (\(context.repository.path))"
+                manageTrackingButton.isHidden = onManageRemotes == nil || context.branches.first(where: \.isCurrent) == nil
+                manageTrackingButton.toolTip = context.branches.first(where: \.isCurrent).map {
+                    "Change the remote and merge branch tracked by ‘\($0.name)’"
+                }
                 unstaged = worktreeValue.files
                 staged = indexValue.files
                 reloadFileTrees(preserveSelection: false)
@@ -1424,6 +1442,11 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
         }
     }
 
+    @objc private func manageTracking() {
+        guard let branch = repositoryContext?.branches.first(where: \.isCurrent)?.name else { return }
+        onManageRemotes?(nil, branch)
+    }
+
     private func loadSelectedDiff(from table: NSOutlineView) {
         guard let file = selectedLeafFile(in: table), let context = repositoryContext else { return }
         let kind: Commit.Kind = table === unstagedTable ? .workingDirectory : .index
@@ -1433,7 +1456,11 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
         diffLoadTask = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
-                let diff = try await source.loadDiff(for: commit, file: file)
+                let diff = try await source.loadDiff(
+                    for: commit,
+                    file: file,
+                    options: commitDiffView.diffOptions
+                )
                 guard !Task.isCancelled else { return }
                 commitDiffView.apply(
                     file: file,
@@ -1838,6 +1865,7 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
             initialBranch: context.branches.first(where: \.isCurrent)?.name,
             executeImmediately: true,
             initialForceWithLease: forceWithLease,
+            onManageRemotes: onManageRemotes ?? { _, _ in },
             onRepositoryChanged: { [weak self] selected in
                 self?.onRepositoryChanged(selected)
                 self?.reloadChanges(preserveMessage: true)
@@ -2320,12 +2348,11 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
 private final class CommitDiffView: NSView, NSTableViewDataSource, NSTableViewDelegate {
     private let tableView = NSTableView()
     private let trackingView = DiffTrackingView()
-    private let hoverToolbar = DiffViewerToolbar(showsNonPrintingCharacters: false, showsSyntaxHighlighting: true)
+    private let hoverToolbar = DiffViewerToolbar(preferences: AppSettingsStore.shared.fileViewerPreferences)
     private var presentations: [DiffLinePresentation] = []
     private var gutterMetrics = DiffGutterMetrics.empty
     private var caretRow = -1
-    private var showsNonPrintingCharacters = false
-    private var showsSyntaxHighlighting = true
+    private var preferences = AppSettingsStore.shared.fileViewerPreferences
     private var file: ChangedFile?
     private var diff: FileDiff?
     private var direction: RepositoryHunkDirection = .stage
@@ -2333,7 +2360,9 @@ private final class CommitDiffView: NSView, NSTableViewDataSource, NSTableViewDe
     var onApplyHunk: ((String, RepositoryHunkDirection) -> Void)?
     var onApplyLines: ((Set<String>, RepositoryHunkDirection) -> Void)?
     var onAddSelectedText: ((String) -> Void)?
+    var onOptionsChanged: (() -> Void)?
     var focusView: NSView { tableView }
+    var diffOptions: FileDiffOptions { preferences.diffOptions }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -2480,8 +2509,9 @@ private final class CommitDiffView: NSView, NSTableViewDataSource, NSTableViewDe
         cell.apply(
             presentation: presentations[row],
             gutterMetrics: gutterMetrics,
-            showsNonPrintingCharacters: showsNonPrintingCharacters,
-            showsSyntaxHighlighting: showsSyntaxHighlighting
+            showsNonPrintingCharacters: preferences.showsNonPrintingCharacters,
+            showsSyntaxHighlighting: preferences.showsSyntaxHighlighting,
+            filePath: file?.path
         )
         return cell
     }
@@ -2491,14 +2521,43 @@ private final class CommitDiffView: NSView, NSTableViewDataSource, NSTableViewDe
         case "Next change": navigateToChange(forward: true)
         case "Previous change": navigateToChange(forward: false)
         case "Show nonprinting characters":
-            showsNonPrintingCharacters = state == .on
+            preferences.showsNonPrintingCharacters = state == .on
+            persistPreferences(reloadDiff: false)
             reloadRenderedLines()
         case "Show syntax highlighting":
-            showsSyntaxHighlighting = state == .on
+            preferences.showsSyntaxHighlighting = state == .on
+            persistPreferences(reloadDiff: false)
             reloadRenderedLines()
+        case "Increase the number of lines of context":
+            preferences.contextLines += 1
+            persistPreferences(reloadDiff: true)
+        case "Decrease the number of lines of context":
+            preferences.contextLines = max(0, preferences.contextLines - 1)
+            persistPreferences(reloadDiff: true)
+        case "Show entire file":
+            preferences.showsEntireFile.toggle()
+            persistPreferences(reloadDiff: true)
+        case "Ignore whitespace changes at end of line":
+            preferences.whitespace = preferences.whitespace == .endOfLine ? .none : .endOfLine
+            persistPreferences(reloadDiff: true)
+        case "Ignore changes in amount of whitespace":
+            preferences.whitespace = preferences.whitespace == .changes ? .none : .changes
+            persistPreferences(reloadDiff: true)
+        case "Ignore all whitespace changes":
+            preferences.whitespace = preferences.whitespace == .all ? .none : .all
+            persistPreferences(reloadDiff: true)
+        case "Treat all files as text":
+            preferences.treatsAllFilesAsText.toggle()
+            persistPreferences(reloadDiff: true)
         default:
-            BrowserCommandCenter.perform(.unavailable(action))
+            break
         }
+    }
+
+    private func persistPreferences(reloadDiff: Bool) {
+        AppSettingsStore.shared.saveFileViewerPreferences(preferences)
+        hoverToolbar.apply(preferences: preferences)
+        if reloadDiff { onOptionsChanged?() }
     }
 
     private func navigateToChange(forward: Bool) {

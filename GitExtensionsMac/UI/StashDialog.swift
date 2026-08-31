@@ -15,6 +15,7 @@ enum StashDialog {
         manageStashes: Bool,
         initialStash: String?,
         owner: NSWindow,
+        openWithDifftool: (@MainActor (Commit, ChangedFile) -> Void)?,
         resolveConflicts: @escaping @MainActor (NSWindow) async -> Bool
     ) async -> StashDialogResult {
         let controller = StashViewController(
@@ -22,6 +23,7 @@ enum StashDialog {
             context: context,
             manageStashes: manageStashes,
             initialStash: initialStash,
+            openWithDifftool: openWithDifftool,
             resolveConflicts: resolveConflicts
         )
         let panel = NSWindow(
@@ -82,6 +84,7 @@ private final class StashViewController: RetainingSplitViewController, NSWindowD
     private let manageStashes: Bool
     private let initialStash: String?
     private let resolveConflicts: @MainActor (NSWindow) async -> Bool
+    private let openWithDifftool: (@MainActor (Commit, ChangedFile) -> Void)?
 
     private let leadingController = NSViewController()
     private let filesController = ChangedFilesViewController()
@@ -116,12 +119,14 @@ private final class StashViewController: RetainingSplitViewController, NSWindowD
         context: RepositoryStashContext,
         manageStashes: Bool,
         initialStash: String?,
+        openWithDifftool: (@MainActor (Commit, ChangedFile) -> Void)?,
         resolveConflicts: @escaping @MainActor (NSWindow) async -> Bool
     ) {
         self.source = source
         self.context = context
         self.manageStashes = manageStashes
         self.initialStash = initialStash
+        self.openWithDifftool = openWithDifftool
         self.resolveConflicts = resolveConflicts
         super.init(resizeBehavior: .fixedLeadingPane)
     }
@@ -151,6 +156,16 @@ private final class StashViewController: RetainingSplitViewController, NSWindowD
         diffItem.holdingPriority = .defaultLow
         addSplitViewItem(diffItem)
         diffController.selectionScope = .revision
+        diffController.supportedFileCommands = openWithDifftool == nil ? [] : ["file.difftool"]
+        diffController.onFileCommand = { [weak self] identifier, displayFile in
+            guard identifier == "file.difftool",
+                  let context = self?.displayFiles[displayFile.id] else { return }
+            self?.openWithDifftool?(context.commit, context.sourceFile)
+        }
+        diffController.onOptionsChanged = { [weak self] _ in
+            guard let file = self?.filesController.currentlySelectedFiles().first else { return }
+            self?.showDiff(for: file)
+        }
 
         filesController.onSelection = { [weak self] file in
             self?.showDiff(for: file)
@@ -421,13 +436,18 @@ private final class StashViewController: RetainingSplitViewController, NSWindowD
         diffTask = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
-                let diff = try await source.loadDiff(for: context.commit, file: context.sourceFile)
+                let diff = try await source.loadDiff(
+                    for: context.commit,
+                    file: context.sourceFile,
+                    options: diffController.diffOptions
+                )
                 guard !Task.isCancelled else { return }
                 diffController.apply(file: displayFile, diff: diff)
             } catch is CancellationError {
                 return
             } catch {
                 guard !Task.isCancelled else { return }
+                diffController.apply(error: error, file: displayFile)
                 status.stringValue = error.localizedDescription
             }
         }

@@ -59,6 +59,7 @@ package enum RepositoryRemoteManagementError: LocalizedError, Sendable {
     case duplicateName(String)
     case disabledRemoteIsReadOnly
     case missingRemote(String)
+    case missingBranch(String)
 
     package var errorDescription: String? {
         switch self {
@@ -70,6 +71,8 @@ package enum RepositoryRemoteManagementError: LocalizedError, Sendable {
             "Activate this remote before editing its details."
         case .missingRemote(let name):
             "The remote ‘\(name)’ no longer exists."
+        case .missingBranch(let name):
+            "The local branch ‘\(name)’ no longer exists."
         }
     }
 }
@@ -116,9 +119,10 @@ extension GitRepositoryModule: RepositoryRemoteManagingDataSource {
         guard configured.contains(where: { $0.name == remoteName && !$0.isDisabled }) else {
             throw RepositoryRemoteManagementError.missingRemote(remoteName)
         }
-        let result = try await checkedRemoteMutation(
+        let result = try await checkedRemoteRead(
             ["ls-remote", "--heads", "--refs", remoteName],
-            in: repository
+            in: repository,
+            accessesRemote: true
         )
         let names = result.standardOutputString.split(separator: "\n").compactMap { line -> String? in
             guard let separator = line.firstIndex(of: "\t") else { return nil }
@@ -222,9 +226,18 @@ extension GitRepositoryModule: RepositoryRemoteManagingDataSource {
 
     package func setBranchTracking(_ configuration: RepositoryBranchTrackingConfiguration) async throws {
         let repository = try remoteRepository()
+        let available = try await loadBranchTrackingConfigurations()
+        guard available.contains(where: { $0.branchName == configuration.branchName }) else {
+            throw RepositoryRemoteManagementError.missingBranch(configuration.branchName)
+        }
+        let remoteName = normalizedOptional(configuration.remoteName)
+        let requestedMerge = normalizedOptional(configuration.mergeBranch)
+        let mergeBranch = requestedMerge ?? (remoteName == nil ? nil : configuration.branchName)
         let prefix = "branch.\(configuration.branchName)."
-        try await setOptionalConfig(prefix + "remote", value: configuration.remoteName, in: repository)
-        let mergeValue = configuration.mergeBranch.flatMap { $0.isEmpty ? nil : "refs/heads/\($0)" }
+        try await setOptionalConfig(prefix + "remote", value: remoteName, in: repository)
+        let mergeValue = mergeBranch.map { value in
+            value.hasPrefix("refs/heads/") ? value : "refs/heads/\(value)"
+        }
         try await setOptionalConfig(prefix + "merge", value: mergeValue, in: repository)
     }
 
@@ -239,7 +252,11 @@ extension GitRepositoryModule: RepositoryRemoteManagingDataSource {
     }
 
     private func localConfigEntries(in repository: ResolvedGitRepository) async throws -> [(String, String)] {
-        let result = try await checkedRemoteMutation(["config", "--local", "--null", "--list"], in: repository)
+        let result = try await checkedRemoteRead(
+            ["config", "--local", "--null", "--list"],
+            in: repository,
+            accessesRemote: false
+        )
         return result.standardOutput.split(separator: 0, omittingEmptySubsequences: true).compactMap { record in
             guard let newline = record.firstIndex(of: 10) else { return nil }
             return (String(decoding: record[..<newline], as: UTF8.self), String(decoding: record[record.index(after: newline)...], as: UTF8.self))
@@ -276,7 +293,7 @@ extension GitRepositoryModule: RepositoryRemoteManagingDataSource {
     }
 
     private func setConfig(_ key: String, value: String, in repository: ResolvedGitRepository) async throws {
-        _ = try await checkedRemoteMutation(["config", "--local", key, value], in: repository)
+        _ = try await checkedRemoteMutation(["config", "--local", "--replace-all", key, value], in: repository)
     }
 
     private func setOptionalConfig(_ key: String, value: String?, in repository: ResolvedGitRepository) async throws {
@@ -289,12 +306,52 @@ extension GitRepositoryModule: RepositoryRemoteManagingDataSource {
     }
 
     private func checkedRemoteMutation(_ arguments: [String], in repository: ResolvedGitRepository) async throws -> GitCommandResult {
-        try await rawRemoteMutation(arguments, in: repository, acceptedStatuses: [0])
+        try await runRemoteCommand(
+            arguments,
+            in: repository,
+            accessesRemote: false,
+            changesRepositoryState: true,
+            acceptedStatuses: [0]
+        )
     }
 
     private func rawRemoteMutation(_ arguments: [String], in repository: ResolvedGitRepository, acceptedStatuses: Set<Int32>) async throws -> GitCommandResult {
+        try await runRemoteCommand(
+            arguments,
+            in: repository,
+            accessesRemote: false,
+            changesRepositoryState: true,
+            acceptedStatuses: acceptedStatuses
+        )
+    }
+
+    private func checkedRemoteRead(
+        _ arguments: [String],
+        in repository: ResolvedGitRepository,
+        accessesRemote: Bool
+    ) async throws -> GitCommandResult {
+        try await runRemoteCommand(
+            arguments,
+            in: repository,
+            accessesRemote: accessesRemote,
+            changesRepositoryState: false,
+            acceptedStatuses: [0]
+        )
+    }
+
+    private func runRemoteCommand(
+        _ arguments: [String],
+        in repository: ResolvedGitRepository,
+        accessesRemote: Bool,
+        changesRepositoryState: Bool,
+        acceptedStatuses: Set<Int32>
+    ) async throws -> GitCommandResult {
         let result = try await git.run(
-            GitCommand(arguments: arguments, accessesRemote: false, changesRepositoryState: true),
+            GitCommand(
+                arguments: arguments,
+                accessesRemote: accessesRemote,
+                changesRepositoryState: changesRepositoryState
+            ),
             in: repository.rootURL
         )
         guard acceptedStatuses.contains(result.exitStatus) else {
@@ -305,5 +362,12 @@ extension GitRepositoryModule: RepositoryRemoteManagingDataSource {
             )
         }
         return result
+    }
+
+    private func normalizedOptional(_ value: String?) -> String? {
+        guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else {
+            return nil
+        }
+        return value
     }
 }

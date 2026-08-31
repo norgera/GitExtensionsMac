@@ -50,7 +50,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             repository: repositoryIdentity.currentRepository,
             headID: repositoryIdentity.headID,
             branches: repositoryReferences.branches,
-            remotes: repositoryNavigation.remotes,
+            remotes: repositoryNavigation.remotes.filter { !$0.isDisabled },
             references: repositoryReferences.references,
             submodules: repositoryNavigation.submodules
         )
@@ -61,7 +61,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             repository: repositoryIdentity.currentRepository,
             headID: repositoryIdentity.headID,
             branches: repositoryReferences.branches,
-            remotes: repositoryNavigation.remotes,
+            remotes: repositoryNavigation.remotes.filter { !$0.isDisabled },
             referencesByCommit: repositoryReferences.referencesByCommit,
             submodules: repositoryNavigation.submodules
         )
@@ -640,7 +640,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
     private func rebuildPullMenu() {
         guard isViewLoaded else { return }
         let preferences = AppSettingsStore.shared.pullPreferences
-        let hasMultipleRemotes = (repositoryNavigation?.remotes.count ?? 0) > 1
+        let hasMultipleRemotes = (repositoryNavigation?.remotes.filter { !$0.isDisabled }.count ?? 0) > 1
         let menu = NSMenu(title: "Pull")
 
         let primary = NSMenuItem(title: "Pull", action: #selector(pullMenuCommand(_:)), keyEquivalent: "")
@@ -727,6 +727,13 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         outlineController.onCommand = { [weak self] identifier, node in
             self?.performRepositoryCommand(identifier, node: node)
         }
+        outlineController.onFilterReferences = { [weak self] references in
+            guard let self else { return }
+            let filter = references.joined(separator: " ")
+            branchFilterField.stringValue = filter
+            revisionGridController.setBranchFilter(filter)
+            restartRevisionReadForFilterChange()
+        }
         revisionGridController.onCommand = { [weak self] identifier, selected, focused in
             self?.performRevisionCommand(identifier, selected: selected, focused: focused)
         }
@@ -740,11 +747,17 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             self?.loadActiveDetailTab()
         }
         let source = repositoryModule
-        revisionDiffController.diffProvider = { commit, file in
-            try await source.loadDiff(for: commit, file: file)
+        revisionDiffController.diffProvider = { commit, file, options in
+            try await source.loadDiff(for: commit, file: file, options: options)
         }
-        fileTreeController.contentProvider = { commit, file in
-            try await source.loadFileContent(for: commit, file: file)
+        revisionDiffController.onFileCommand = { [weak self] identifier, commit, file in
+            self?.performFileViewerCommand(identifier, commit: commit, file: file)
+        }
+        fileTreeController.contentProvider = { commit, file, encoding in
+            try await source.loadFilePresentation(for: commit, file: file, encoding: encoding)
+        }
+        fileTreeController.onFileCommand = { [weak self] identifier, commit, file in
+            self?.performFileTreeCommand(identifier, commit: commit, file: file)
         }
     }
 
@@ -960,6 +973,10 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
                     guard !Task.isCancelled, activeRevisionReader === request.reader else { return }
                     revisions.append(contentsOf: batch)
                     revisionGridController.appendIncrementalBatch(batch)
+                    outlineController.updateRevisionState(
+                        revisions: revisions,
+                        selectedRevisionID: selectedCommitID
+                    )
                     updateRevisionCount()
                 }
                 guard !Task.isCancelled, activeRevisionReader === request.reader else { return }
@@ -991,6 +1008,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
     private func select(commit: Commit) {
         guard let repositoryIdentity else { return }
         selectedCommitID = commit.id
+        outlineController.updateRevisionState(revisions: revisions, selectedRevisionID: commit.id)
         BrowserCommandAvailability.shared.canMerge = !commit.isArtificial
             && !repositoryIdentity.currentRepository.isBare
             && revisionGridController.selectedCommitCount == 1
@@ -1084,7 +1102,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             statusLabel.stringValue = "Remote \(remote.name): \(remote.fetchURL)"
         case .submodule(let submodule):
             statusLabel.stringValue = "Submodule \(submodule.path): \(submodule.state.rawValue)"
-        case .group, .folder:
+        case .group, .folder, .tagFolder:
             statusLabel.stringValue = node.title
         }
     }
@@ -1397,6 +1415,32 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             uiCommands.fetchRemoteBranch(branch, then: .checkout)
         case ("repository.remoteBranch.fetchCreate", .remoteBranch(let branch)):
             uiCommands.fetchRemoteBranch(branch, then: .create)
+        case ("repository.remoteBranch.pull", .remoteBranch(let branch)):
+            uiCommands.fetchRemoteBranch(branch, then: .merge)
+        case ("repository.remoteBranch.fetchRebase", .remoteBranch(let branch)):
+            uiCommands.fetchRemoteBranch(branch, then: .rebase)
+        case ("repository.remote.manage", .remote(let remote)):
+            uiCommands.startRemoteManagement(selectedRemote: remote.name)
+        case ("repository.remote.fetch", .remote(let remote)):
+            uiCommands.fetchRemote(named: remote.name, prune: false)
+        case ("repository.remote.prune", .remote(let remote)):
+            uiCommands.fetchRemote(named: remote.name, prune: true)
+        case ("repository.remote.openURL", .remote(let remote)):
+            guard let url = URL(string: remote.fetchURL),
+                  ["http", "https"].contains(url.scheme?.lowercased() ?? "") else { return }
+            NSWorkspace.shared.open(url)
+        case ("repository.remote.disable", .remote(let remote)):
+            uiCommands.setRemote(named: remote.name, disabled: true, fetchAfterEnabling: false)
+        case ("repository.remote.enable", .remote(let remote)):
+            uiCommands.setRemote(named: remote.name, disabled: false, fetchAfterEnabling: false)
+        case ("repository.remote.enableFetch", .remote(let remote)):
+            uiCommands.setRemote(named: remote.name, disabled: false, fetchAfterEnabling: true)
+        case ("repository.remotes.manage", _):
+            uiCommands.startRemoteManagement()
+        case ("repository.remotes.fetch", _):
+            uiCommands.startFetchAll(prune: false)
+        case ("repository.remotes.prune", _):
+            uiCommands.startFetchAll(prune: true)
         case ("repository.tag.checkout", .tag(let tag)):
             guard let commit = revisions.first(where: { $0.id == .object(tag.commitID) }) else { return }
             uiCommands.checkout(.revision(commit))
@@ -1471,6 +1515,13 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
     }
 
     private func performRevisionCommand(_ identifier: String, selected: [Commit], focused: Commit) {
+        let selectPrefix = "revision.selectInLeftPanel.ref."
+        if identifier.hasPrefix(selectPrefix) {
+            let referenceID = String(identifier.dropFirst(selectPrefix.count))
+            guard let reference = focused.references.first(where: { $0.id == referenceID }) else { return }
+            outlineController.select(reference: reference)
+            return
+        }
         if identifier == "revision.rebase.continue" {
             beginMutation(errorTitle: "Continue rebase failed") { source in
                 try await source.continueRebase()
@@ -1667,6 +1718,53 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         }
     }
 
+    private func performFileViewerCommand(_ identifier: String, commit: Commit, file: ChangedFile) {
+        guard let repository = repositoryIdentity?.currentRepository else { return }
+        let fileURL = URL(fileURLWithPath: repository.path, isDirectory: true).appendingPathComponent(file.path)
+        switch identifier {
+        case "file.difftool":
+            uiCommands.startDifftool(commit: commit, file: file)
+        case "file.open.local":
+            guard file.changeType != .deleted else { return }
+            NSWorkspace.shared.open(fileURL)
+        case "file.showFinder":
+            NSWorkspace.shared.activateFileViewerSelecting([fileURL])
+        default:
+            break
+        }
+    }
+
+    private func performFileTreeCommand(_ identifier: String, commit: Commit, file: RepositoryFileEntry) {
+        guard let repository = repositoryIdentity?.currentRepository else { return }
+        let workingURL = URL(fileURLWithPath: repository.path, isDirectory: true).appendingPathComponent(file.path)
+        switch identifier {
+        case "tree.open" where commit.kind == .workingDirectory:
+            NSWorkspace.shared.open(workingURL)
+        case "tree.reveal" where commit.kind == .workingDirectory:
+            NSWorkspace.shared.activateFileViewerSelecting([workingURL])
+        case "tree.copyPath":
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(workingURL.path, forType: .string)
+        case "tree.open":
+            let source = repositoryModule
+            Task { @MainActor in
+                do {
+                    let content = try await source.loadFilePresentation(for: commit, file: file, encoding: .automatic)
+                    let folder = FileManager.default.temporaryDirectory
+                        .appendingPathComponent("GitExtensionsMac-FileViewer", isDirectory: true)
+                    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                    let target = folder.appendingPathComponent(URL(fileURLWithPath: file.path).lastPathComponent)
+                    try content.data.write(to: target, options: .atomic)
+                    NSWorkspace.shared.open(target)
+                } catch {
+                    statusLabel.stringValue = "Open file failed: \(error.localizedDescription)"
+                }
+            }
+        default:
+            break
+        }
+    }
+
     private func performHunkMutation(_ selection: RepositoryHunkSelection) {
         let title = selection.direction == .stage ? "Stage hunk failed" : "Unstage hunk failed"
         beginMutation(errorTitle: title) { source in
@@ -1721,6 +1819,12 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             head: head,
             draft: draft,
             owner: owner,
+            onManageRemotes: { [weak self] remote, localBranch in
+                self?.uiCommands.startRemoteManagement(
+                    selectedRemote: remote,
+                    selectedLocalBranch: localBranch
+                )
+            },
             onRepositoryChanged: { [weak self] selected in
                 guard let self else { return }
                 commitDraft = nil

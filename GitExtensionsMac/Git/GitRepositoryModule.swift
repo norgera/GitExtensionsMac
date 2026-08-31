@@ -439,7 +439,7 @@ package actor GitRepositoryModule: RepositoryOpeningDataSource {
             GitCommand(
                 arguments: [
                     "--no-optional-locks", "for-each-ref",
-                    "--format=%(objectname)%00%(refname)%00%(*objectname)%00%(upstream:remotename)%00%(upstream:remoteref)%00%(upstream:track,nobracket)%00"
+                    "--format=%(objectname)%00%(refname)%00%(*objectname)%00%(upstream:remotename)%00%(upstream:remoteref)%00%(upstream:track,nobracket)%00%(authordate:unix)%00%(committerdate:unix)%00%(creatordate:unix)%00%(taggerdate:unix)%00%(objectsize)%00"
                 ],
                 accessesRemote: false,
                 changesRepositoryState: false
@@ -450,6 +450,7 @@ package actor GitRepositoryModule: RepositoryOpeningDataSource {
             GitCommand(arguments: ["remote", "-v"], accessesRemote: false, changesRepositoryState: false),
             directory: repository.rootURL
         )
+        async let remoteConfigurations = loadRemoteConfigurations()
         async let worktreesOutput = checked(
             GitCommand(arguments: ["worktree", "list", "--porcelain", "-z"], accessesRemote: false, changesRepositoryState: false),
             directory: repository.rootURL
@@ -459,6 +460,7 @@ package actor GitRepositoryModule: RepositoryOpeningDataSource {
         let headResult = try await headOutput
         let refsResult = try await refsOutput
         let remotesResult = try await remotesOutput
+        let configuredRemotes = try await remoteConfigurations
         let worktreesResult = try await worktreesOutput
 
         let currentBranch = currentBranchResult.standardOutputString.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -481,7 +483,11 @@ package actor GitRepositoryModule: RepositoryOpeningDataSource {
         let branches = refModels.localBranches
         let remoteBranches = refModels.remoteBranches
         let tags = refModels.tags
-        let remotes = makeRemotes(output: remotesResult.standardOutputString, branches: remoteBranches)
+        let remotes = makeRemotes(
+            output: remotesResult.standardOutputString,
+            branches: remoteBranches,
+            configurations: configuredRemotes
+        )
         let stashes = makeStashes(stashRecords)
         let worktrees = try makeWorktrees(output: worktreesResult.standardOutput, repository: repository)
         let submodules = repository.isBare ? [] : try await loadSubmodules(repository: repository)
@@ -622,8 +628,8 @@ package actor GitRepositoryModule: RepositoryOpeningDataSource {
         return tree
     }
 
-    package func loadDiff(for commit: Commit, file: ChangedFile) async throws -> FileDiff? {
-        let cacheKey = "\(commit.id.description)\u{0}\(file.id)"
+    package func loadDiff(for commit: Commit, file: ChangedFile, options: FileDiffOptions) async throws -> FileDiff? {
+        let cacheKey = "\(commit.id.description)\u{0}\(file.id)\u{0}\(options.hashValue)"
         if let cached = diffCache[cacheKey] { return cached }
         guard let repository = resolvedRepository else {
             throw RepositoryDataSourceError.unavailable
@@ -643,37 +649,37 @@ package actor GitRepositoryModule: RepositoryOpeningDataSource {
                 )
                 if untrackedObject.succeeded {
                     output = try await checked(
-                        GitCommand(arguments: ["show", "--format=", "--patch", "--no-color", "\(objectID.string)^3", "--"] + paths, accessesRemote: false, changesRepositoryState: false),
+                        GitCommand(arguments: ["show", "--format=", "--patch", "--no-color"] + options.gitArguments + ["\(objectID.string)^3", "--"] + paths, accessesRemote: false, changesRepositoryState: false),
                         directory: repository.rootURL
                     )
                 } else {
                     output = try await checked(
-                        GitCommand(arguments: ["diff", "--no-ext-diff", "--patch", "--no-color", "\(objectID.string)^1", objectID.string, "--"] + paths, accessesRemote: false, changesRepositoryState: false),
+                        GitCommand(arguments: ["diff", "--no-ext-diff", "--patch", "--no-color"] + options.gitArguments + ["\(objectID.string)^1", objectID.string, "--"] + paths, accessesRemote: false, changesRepositoryState: false),
                         directory: repository.rootURL
                     )
                 }
             } else {
                 let commands = revisionDiffArguments(commit: commit)
                 output = try await checked(
-                    GitCommand(arguments: commands.patch + ["--"] + paths, accessesRemote: false, changesRepositoryState: false),
+                    GitCommand(arguments: commands.patch + options.gitArguments + ["--"] + paths, accessesRemote: false, changesRepositoryState: false),
                     directory: repository.rootURL
                 )
             }
         case .index:
             output = try await checked(
-                GitCommand(arguments: diffBaseArguments() + ["--cached", "--patch", "--no-color", "--"] + paths, accessesRemote: false, changesRepositoryState: false),
+                GitCommand(arguments: diffBaseArguments() + ["--cached", "--patch", "--no-color"] + options.gitArguments + ["--"] + paths, accessesRemote: false, changesRepositoryState: false),
                 directory: repository.rootURL
             )
         case .workingDirectory:
             if statusRecords.contains(where: { $0.path == file.path && $0.isUntracked }) {
                 output = try await checked(
-                    GitCommand(arguments: ["diff", "--no-ext-diff", "--no-index", "--patch", "--no-color", "--", "/dev/null", file.path], accessesRemote: false, changesRepositoryState: false),
+                    GitCommand(arguments: ["diff", "--no-ext-diff", "--no-index", "--patch", "--no-color"] + options.gitArguments + ["--", "/dev/null", file.path], accessesRemote: false, changesRepositoryState: false),
                     directory: repository.rootURL,
                     acceptedStatuses: [0, 1]
                 )
             } else {
                 output = try await checked(
-                    GitCommand(arguments: diffBaseArguments() + ["--patch", "--no-color", "--"] + paths, accessesRemote: false, changesRepositoryState: false),
+                    GitCommand(arguments: diffBaseArguments() + ["--patch", "--no-color"] + options.gitArguments + ["--"] + paths, accessesRemote: false, changesRepositoryState: false),
                     directory: repository.rootURL
                 )
             }
@@ -686,6 +692,40 @@ package actor GitRepositoryModule: RepositoryOpeningDataSource {
     }
 
     package func loadFileContent(for commit: Commit, file: RepositoryFileEntry) async throws -> RepositoryFileEntry {
+        let data = try await loadFileData(for: commit, file: file)
+        let content = FileContentDecoder.decode(data, path: file.path, requestedEncoding: .automatic).text
+        return RepositoryFileEntry(
+            id: file.id,
+            path: file.path,
+            content: content,
+            byteCount: data.count,
+            isExecutable: file.isExecutable,
+            gitObjectID: file.gitObjectID,
+            gitObjectType: file.gitObjectType
+        )
+    }
+
+    package func loadFilePresentation(
+        for commit: Commit,
+        file: RepositoryFileEntry,
+        encoding: RepositoryTextEncoding
+    ) async throws -> RepositoryFileContent {
+        let data = try await loadFileData(for: commit, file: file)
+        return FileContentDecoder.decode(data, path: file.path, requestedEncoding: encoding)
+    }
+
+    package func openWithDifftool(for commit: Commit, file: ChangedFile, customToolPath: String?) async throws {
+        guard let repository = resolvedRepository else {
+            throw RepositoryDataSourceError.unavailable
+        }
+
+        _ = try await checked(
+            FileViewerCommandBuilder.difftool(commit: commit, file: file, customToolPath: customToolPath),
+            directory: repository.rootURL
+        )
+    }
+
+    private func loadFileData(for commit: Commit, file: RepositoryFileEntry) async throws -> Data {
         guard let repository = resolvedRepository else {
             throw RepositoryDataSourceError.unavailable
         }
@@ -711,21 +751,7 @@ package actor GitRepositoryModule: RepositoryOpeningDataSource {
             throw GitError.fileUnavailable(file.path)
         }
 
-        let content: String
-        if data.contains(0) {
-            content = "Binary file (\(data.count) bytes)"
-        } else {
-            content = String(decoding: data, as: UTF8.self)
-        }
-        return RepositoryFileEntry(
-            id: file.id,
-            path: file.path,
-            content: content,
-            byteCount: data.count,
-            isExecutable: file.isExecutable,
-            gitObjectID: file.gitObjectID,
-            gitObjectType: file.gitObjectType
-        )
+        return data
     }
 
     private func resolveRepository(at url: URL) async throws -> ResolvedGitRepository {
@@ -890,7 +916,8 @@ package actor GitRepositoryModule: RepositoryOpeningDataSource {
                 let branch = Branch(
                     id: record.fullName, name: name, commitID: record.objectID,
                     isCurrent: name == currentBranch, isRemote: false,
-                    remoteName: record.upstreamRemote, ahead: counts.ahead, behind: counts.behind
+                    remoteName: record.upstreamRemote, ahead: counts.ahead, behind: counts.behind,
+                    sortMetadata: record.sortMetadata
                 )
                 locals.append(branch)
                 references[record.objectID, default: []].append(RevisionReference(
@@ -906,14 +933,15 @@ package actor GitRepositoryModule: RepositoryOpeningDataSource {
                 guard pieces.count == 2 else { continue }
                 let branch = Branch(
                     id: record.fullName, name: pieces[1], commitID: record.objectID,
-                    isCurrent: false, isRemote: true, remoteName: pieces[0], ahead: 0, behind: 0
+                    isCurrent: false, isRemote: true, remoteName: pieces[0], ahead: 0, behind: 0,
+                    sortMetadata: record.sortMetadata
                 )
                 remotes.append(branch)
                 references[record.objectID, default: []].append(RevisionReference(id: record.fullName, name: combined, kind: .remoteBranch))
             } else if record.fullName.hasPrefix("refs/tags/") {
                 let name = String(record.fullName.dropFirst("refs/tags/".count))
                 let target = record.peeledObjectID ?? record.objectID
-                tags.append(Tag(id: record.fullName, name: name, commitID: target))
+                tags.append(Tag(id: record.fullName, name: name, commitID: target, sortMetadata: record.sortMetadata))
                 references[target, default: []].append(RevisionReference(id: record.fullName, name: name, kind: .tag))
             }
         }
@@ -944,7 +972,8 @@ package actor GitRepositoryModule: RepositoryOpeningDataSource {
                 isRemote: true,
                 remoteName: remoteName,
                 ahead: trackingLocal.behind,
-                behind: trackingLocal.ahead
+                behind: trackingLocal.ahead,
+                sortMetadata: remoteBranch.sortMetadata
             )
         }
 
@@ -956,7 +985,11 @@ package actor GitRepositoryModule: RepositoryOpeningDataSource {
         )
     }
 
-    private func makeRemotes(output: String, branches: [Branch]) -> [Remote] {
+    private func makeRemotes(
+        output: String,
+        branches: [Branch],
+        configurations: [RepositoryRemoteConfiguration]
+    ) -> [Remote] {
         var fetchURLs: [String: String] = [:]
         for rawLine in output.split(separator: "\n") {
             let line = String(rawLine)
@@ -970,15 +1003,30 @@ package actor GitRepositoryModule: RepositoryOpeningDataSource {
             guard !name.isEmpty else { continue }
             fetchURLs[name] = url
         }
-        let names = Set(fetchURLs.keys).union(branches.compactMap(\.remoteName))
-        return names.sorted().map { name in
+        let activeConfigurations = configurations.filter { !$0.isDisabled }
+        let names = Set(fetchURLs.keys)
+            .union(branches.compactMap(\.remoteName))
+            .union(activeConfigurations.map(\.name))
+        let active = names.sorted().map { name in
             Remote(
                 id: name,
                 name: name,
-                fetchURL: fetchURLs[name] ?? "",
+                fetchURL: fetchURLs[name]
+                    ?? activeConfigurations.first(where: { $0.name == name })?.fetchURL
+                    ?? "",
                 branches: branches.filter { $0.remoteName == name }
             )
         }
+        let inactive = configurations.filter(\.isDisabled).map { remote in
+            Remote(
+                id: "inactive:\(remote.name)",
+                name: remote.name,
+                fetchURL: remote.fetchURL,
+                branches: [],
+                isDisabled: true
+            )
+        }.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        return active + inactive
     }
 
     private func makeStashes(_ records: [GitStashRecord]) -> [Stash] {

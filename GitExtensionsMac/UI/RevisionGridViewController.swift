@@ -186,15 +186,21 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
     }
 
     private func applyFilters(selectFirst: Bool) {
+        let branchTerms = branchFilter
+            .split(whereSeparator: \.isWhitespace)
+            .map(String.init)
         let filteredCommits = allCommits.filter { commit in
             let matchesText = textFilter.isEmpty
                 || commit.subject.localizedCaseInsensitiveContains(textFilter)
                 || commit.body.localizedCaseInsensitiveContains(textFilter)
                 || commit.authorName.localizedCaseInsensitiveContains(textFilter)
                 || commit.id.description.localizedCaseInsensitiveContains(textFilter)
-            let matchesBranch = branchFilter.isEmpty
-                || commit.references.contains { $0.name.localizedCaseInsensitiveContains(branchFilter) }
-                || commit.subject.localizedCaseInsensitiveContains(branchFilter)
+            let matchesBranch = branchTerms.isEmpty
+                || branchTerms.contains { term in
+                    commit.references.contains { $0.name.localizedCaseInsensitiveContains(term) }
+                }
+                || (branchTerms.count == 1
+                    && commit.subject.localizedCaseInsensitiveContains(branchTerms[0]))
             return matchesText && matchesBranch
         }
 

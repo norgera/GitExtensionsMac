@@ -76,6 +76,28 @@ package struct Repository: Identifiable, Hashable, Sendable {
     }
 }
 
+package struct RepositoryReferenceSortMetadata: Hashable, Sendable {
+    package let authorDate: Int64?
+    package let committerDate: Int64?
+    package let creatorDate: Int64?
+    package let taggerDate: Int64?
+    package let objectSize: Int64?
+
+    package init(
+        authorDate: Int64? = nil,
+        committerDate: Int64? = nil,
+        creatorDate: Int64? = nil,
+        taggerDate: Int64? = nil,
+        objectSize: Int64? = nil
+    ) {
+        self.authorDate = authorDate
+        self.committerDate = committerDate
+        self.creatorDate = creatorDate
+        self.taggerDate = taggerDate
+        self.objectSize = objectSize
+    }
+}
+
 package struct Branch: Identifiable, Hashable, Sendable {
     package let id: String
     package let name: String
@@ -85,8 +107,9 @@ package struct Branch: Identifiable, Hashable, Sendable {
     package let remoteName: String?
     package let ahead: Int
     package let behind: Int
+    package let sortMetadata: RepositoryReferenceSortMetadata
 
-    package init(id: String, name: String, commitID: ObjectID, isCurrent: Bool, isRemote: Bool, remoteName: String?, ahead: Int, behind: Int) {
+    package init(id: String, name: String, commitID: ObjectID, isCurrent: Bool, isRemote: Bool, remoteName: String?, ahead: Int, behind: Int, sortMetadata: RepositoryReferenceSortMetadata = .init()) {
         self.id = id
         self.name = name
         self.commitID = commitID
@@ -95,6 +118,7 @@ package struct Branch: Identifiable, Hashable, Sendable {
         self.remoteName = remoteName
         self.ahead = ahead
         self.behind = behind
+        self.sortMetadata = sortMetadata
     }
 }
 
@@ -102,11 +126,13 @@ package struct Tag: Identifiable, Hashable, Sendable {
     package let id: String
     package let name: String
     package let commitID: ObjectID
+    package let sortMetadata: RepositoryReferenceSortMetadata
 
-    package init(id: String, name: String, commitID: ObjectID) {
+    package init(id: String, name: String, commitID: ObjectID, sortMetadata: RepositoryReferenceSortMetadata = .init()) {
         self.id = id
         self.name = name
         self.commitID = commitID
+        self.sortMetadata = sortMetadata
     }
 }
 
@@ -115,12 +141,14 @@ package struct Remote: Identifiable, Hashable, Sendable {
     package let name: String
     package let fetchURL: String
     package let branches: [Branch]
+    package let isDisabled: Bool
 
-    package init(id: String, name: String, fetchURL: String, branches: [Branch]) {
+    package init(id: String, name: String, fetchURL: String, branches: [Branch], isDisabled: Bool = false) {
         self.id = id
         self.name = name
         self.fetchURL = fetchURL
         self.branches = branches
+        self.isDisabled = isDisabled
     }
 }
 
@@ -458,6 +486,100 @@ package struct FileDiff: Identifiable, Hashable, Sendable {
         self.fileID = fileID
         self.lines = lines
     }
+}
+
+package enum DiffWhitespaceMode: String, CaseIterable, Hashable, Sendable, Codable {
+    case none
+    case endOfLine
+    case changes
+    case all
+}
+
+package struct FileDiffOptions: Hashable, Sendable {
+    package var whitespace: DiffWhitespaceMode
+    package var contextLines: Int
+    package var showsEntireFile: Bool
+    package var treatsAllFilesAsText: Bool
+
+    package init(
+        whitespace: DiffWhitespaceMode = .none,
+        contextLines: Int = 3,
+        showsEntireFile: Bool = false,
+        treatsAllFilesAsText: Bool = false
+    ) {
+        self.whitespace = whitespace
+        self.contextLines = max(0, contextLines)
+        self.showsEntireFile = showsEntireFile
+        self.treatsAllFilesAsText = treatsAllFilesAsText
+    }
+
+    package var gitArguments: [String] {
+        var arguments: [String] = []
+        switch whitespace {
+        case .none: break
+        case .endOfLine: arguments.append("--ignore-space-at-eol")
+        case .changes: arguments.append("--ignore-space-change")
+        case .all: arguments.append("--ignore-all-space")
+        }
+        if showsEntireFile {
+            arguments += ["--inter-hunk-context=9000", "--unified=9000"]
+        } else if contextLines != 3 {
+            arguments.append("--unified=\(contextLines)")
+        }
+        if treatsAllFilesAsText { arguments.append("--text") }
+        return arguments
+    }
+}
+
+package enum RepositoryTextEncoding: String, CaseIterable, Hashable, Sendable, Codable {
+    case automatic
+    case utf8
+    case utf16LittleEndian
+    case utf16BigEndian
+    case westernISO88591
+    case windows1252
+
+    package var title: String {
+        switch self {
+        case .automatic: "Automatic"
+        case .utf8: "Unicode (UTF-8)"
+        case .utf16LittleEndian: "Unicode (UTF-16 LE)"
+        case .utf16BigEndian: "Unicode (UTF-16 BE)"
+        case .westernISO88591: "Western (ISO Latin 1)"
+        case .windows1252: "Western (Windows Latin 1)"
+        }
+    }
+}
+
+package struct RepositoryFileContent: Hashable, Sendable {
+    package enum Kind: Hashable, Sendable {
+        case text
+        case image
+        case binary
+        case missing
+    }
+
+    package let path: String
+    package let kind: Kind
+    package let text: String
+    package let data: Data
+    package let encoding: RepositoryTextEncoding?
+
+    package init(
+        path: String,
+        kind: Kind,
+        text: String = "",
+        data: Data = Data(),
+        encoding: RepositoryTextEncoding? = nil
+    ) {
+        self.path = path
+        self.kind = kind
+        self.text = text
+        self.data = data
+        self.encoding = encoding
+    }
+
+    package var byteCount: Int { data.count }
 }
 
 package struct RepositoryFileEntry: Identifiable, Hashable, Sendable {

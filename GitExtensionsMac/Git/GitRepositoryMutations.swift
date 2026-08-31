@@ -382,6 +382,60 @@ package struct RepositoryRebaseConfiguration: Hashable, Sendable {
 package struct RepositoryMergeToolConfiguration: Hashable, Sendable {
     package let name: String
     package let usesGUISetting: Bool
+    package let availableTools: [String]
+    package let trustExitCode: Bool
+
+    package init(
+        name: String,
+        usesGUISetting: Bool,
+        availableTools: [String] = [],
+        trustExitCode: Bool = false
+    ) {
+        self.name = name
+        self.usesGUISetting = usesGUISetting
+        self.availableTools = availableTools
+        self.trustExitCode = trustExitCode
+    }
+}
+
+package enum RepositoryConflictSide: Int, CaseIterable, Hashable, Sendable {
+    case base = 1
+    case local = 2
+    case remote = 3
+}
+
+package struct RepositoryConflictVersion: Hashable, Sendable {
+    package let objectID: ObjectID
+    package let mode: String
+    package let path: String
+}
+
+package enum RepositoryConflictKind: String, Hashable, Sendable {
+    case bothModified
+    case bothAdded
+    case deletedLocally
+    case deletedRemotely
+    case unmerged
+}
+
+package struct RepositoryConflict: Hashable, Sendable {
+    package let path: String
+    package let base: RepositoryConflictVersion?
+    package let local: RepositoryConflictVersion?
+    package let remote: RepositoryConflictVersion?
+    package let kind: RepositoryConflictKind
+
+    package var isSubmodule: Bool {
+        [base, local, remote].compactMap { $0 }.contains { $0.mode == "160000" }
+    }
+
+    package func version(for side: RepositoryConflictSide) -> RepositoryConflictVersion? {
+        switch side {
+        case .base: base
+        case .local: local
+        case .remote: remote
+        }
+    }
 }
 
 package struct RepositoryMutationState: Equatable, Sendable {
@@ -538,8 +592,22 @@ package protocol RepositoryStashDataSource: RepositoryMutationStateDataSource {
 
 package protocol RepositoryConflictDataSource: RepositoryMutationStateDataSource {
     func abortMerge() async throws -> RepositoryMutationResult
+    func loadConflicts() async throws -> [RepositoryConflict]
+    func loadConflictContent(
+        path: String,
+        side: RepositoryConflictSide,
+        encoding: RepositoryTextEncoding
+    ) async throws -> RepositoryFileContent?
+    func conflictWorkingTreeURL(path: String) async throws -> URL
+    func chooseConflictSide(paths: [String], side: RepositoryConflictSide) async throws -> RepositoryMutationResult
     func loadMergeToolConfiguration() async throws -> RepositoryMergeToolConfiguration?
-    func runMergeTool(paths: [String]) async throws -> RepositoryMutationResult
+    func runMergeTool(paths: [String], tool: String?) async throws -> RepositoryMutationResult
+}
+
+package extension RepositoryConflictDataSource {
+    func runMergeTool(paths: [String]) async throws -> RepositoryMutationResult {
+        try await runMergeTool(paths: paths, tool: nil)
+    }
 }
 
 package protocol RepositoryConflictResolutionDataSource: RepositoryCommitDataSource, RepositoryConflictDataSource {}
@@ -1155,23 +1223,167 @@ extension GitRepositoryModule: RepositoryBrowserMutationDataSource, RepositorySt
         )
     }
 
-    package func loadMergeToolConfiguration() async throws -> RepositoryMergeToolConfiguration? {
+    package func loadConflicts() async throws -> [RepositoryConflict] {
         let repository = try mutationRepository()
-        let gui = try await rawMutation(["config", "--get", "merge.guitool"], in: repository)
-        let guiName = gui.standardOutputString.trimmingCharacters(in: .whitespacesAndNewlines)
-        if gui.succeeded, !guiName.isEmpty {
-            return RepositoryMergeToolConfiguration(name: guiName, usesGUISetting: true)
+        let result = try await git.run(
+            GitCommand(
+                arguments: ["ls-files", "-z", "--unmerged"],
+                accessesRemote: false,
+                changesRepositoryState: false
+            ),
+            in: repository.rootURL
+        )
+        guard result.succeeded else { throw commandError(from: result) }
+
+        struct Stages {
+            var base: RepositoryConflictVersion?
+            var local: RepositoryConflictVersion?
+            var remote: RepositoryConflictVersion?
         }
-        let standard = try await rawMutation(["config", "--get", "merge.tool"], in: repository)
-        let standardName = standard.standardOutputString.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard standard.succeeded, !standardName.isEmpty else { return nil }
-        return RepositoryMergeToolConfiguration(name: standardName, usesGUISetting: false)
+        var values: [String: Stages] = [:]
+        for rawRecord in result.standardOutput.split(separator: 0, omittingEmptySubsequences: true) {
+            guard let tab = rawRecord.firstIndex(of: 0x09) else { continue }
+            let header = String(decoding: rawRecord[..<tab], as: UTF8.self)
+                .split(separator: " ", omittingEmptySubsequences: true)
+            let path = String(decoding: rawRecord[rawRecord.index(after: tab)...], as: UTF8.self)
+            guard header.count == 3,
+                  let objectID = try? ObjectID.parse(String(header[1])),
+                  let stageValue = Int(header[2]),
+                  let side = RepositoryConflictSide(rawValue: stageValue)
+            else { continue }
+            let version = RepositoryConflictVersion(
+                objectID: objectID,
+                mode: String(header[0]),
+                path: path
+            )
+            var stages = values[path] ?? Stages()
+            switch side {
+            case .base: stages.base = version
+            case .local: stages.local = version
+            case .remote: stages.remote = version
+            }
+            values[path] = stages
+        }
+
+        return values.keys.sorted().map { path in
+            let stages = values[path] ?? Stages()
+            let kind: RepositoryConflictKind = switch (stages.base != nil, stages.local != nil, stages.remote != nil) {
+            case (true, true, true): .bothModified
+            case (false, true, true): .bothAdded
+            case (true, false, true): .deletedLocally
+            case (true, true, false): .deletedRemotely
+            default: .unmerged
+            }
+            return RepositoryConflict(
+                path: path,
+                base: stages.base,
+                local: stages.local,
+                remote: stages.remote,
+                kind: kind
+            )
+        }
     }
 
-    package func runMergeTool(paths: [String]) async throws -> RepositoryMutationResult {
+    package func loadConflictContent(
+        path: String,
+        side: RepositoryConflictSide,
+        encoding: RepositoryTextEncoding
+    ) async throws -> RepositoryFileContent? {
+        let repository = try mutationRepository()
+        guard let conflict = try await loadConflicts().first(where: { $0.path == path }),
+              let version = conflict.version(for: side) else { return nil }
+        if version.mode == "160000" {
+            let text = "Submodule commit \(version.objectID.string)\n"
+            return RepositoryFileContent(
+                path: path,
+                kind: .text,
+                text: text,
+                data: Data(text.utf8),
+                encoding: .utf8
+            )
+        }
+        let result = try await git.run(
+            GitCommand(
+                arguments: ["show", ":\(side.rawValue):\(path)"],
+                accessesRemote: false,
+                changesRepositoryState: false
+            ),
+            in: repository.rootURL
+        )
+        guard result.succeeded else { throw commandError(from: result) }
+        return FileContentDecoder.decode(result.standardOutput, path: path, requestedEncoding: encoding)
+    }
+
+    package func conflictWorkingTreeURL(path: String) async throws -> URL {
+        let repository = try mutationRepository()
+        return repository.rootURL.appendingPathComponent(path)
+    }
+
+    package func chooseConflictSide(
+        paths: [String],
+        side: RepositoryConflictSide
+    ) async throws -> RepositoryMutationResult {
+        let repository = try mutationRepository()
+        let selectedPaths = normalizedPaths(paths)
+        guard !selectedPaths.isEmpty else { throw RepositoryMutationError.noPaths }
+        let conflicts = Dictionary(uniqueKeysWithValues: try await loadConflicts().map { ($0.path, $0) })
+        guard selectedPaths.allSatisfy({ conflicts[$0] != nil }) else {
+            throw RepositoryMutationError.unresolvedConflicts(conflicts.keys.sorted())
+        }
+
+        for path in selectedPaths {
+            guard let conflict = conflicts[path] else { continue }
+            if conflict.version(for: side) == nil {
+                _ = try await checkedMutation(["rm", "--", path], in: repository)
+            } else {
+                _ = try await checkedMutation(
+                    ["checkout-index", "-f", "--stage=\(side.rawValue)", "--", path],
+                    in: repository
+                )
+                _ = try await checkedMutation(["add", "--", path], in: repository)
+            }
+        }
+        return try await refreshedMutationResult(
+            message: "Resolved \(selectedPaths.count) conflict(s).",
+            selectedCommitID: .workingDirectory
+        )
+    }
+
+    package func loadMergeToolConfiguration() async throws -> RepositoryMergeToolConfiguration? {
+        let repository = try mutationRepository()
+        let gui = try await conflictRead(["config", "--get", "merge.guitool"], in: repository)
+        let guiName = gui.standardOutputString.trimmingCharacters(in: .whitespacesAndNewlines)
+        let standard = try await conflictRead(["config", "--get", "merge.tool"], in: repository)
+        let standardName = standard.standardOutputString.trimmingCharacters(in: .whitespacesAndNewlines)
+        let usesGUISetting = gui.succeeded && !guiName.isEmpty
+        let selectedName = usesGUISetting ? guiName : standardName
+        guard !selectedName.isEmpty else { return nil }
+
+        let configured = try await conflictRead(
+            ["config", "--name-only", "--get-regexp", #"^mergetool\..*\.(cmd|path)$"#],
+            in: repository
+        )
+        var names = Set(configured.standardOutputString.split(whereSeparator: \Character.isNewline).compactMap { line -> String? in
+            let components = line.split(separator: ".", omittingEmptySubsequences: false)
+            guard components.count >= 3, components[0] == "mergetool" else { return nil }
+            return String(components[1])
+        })
+        names.insert(selectedName)
+        let trust = try await conflictRead(
+            ["config", "--bool", "--get", "mergetool.\(selectedName).trustExitCode"],
+            in: repository
+        )
+        return RepositoryMergeToolConfiguration(
+            name: selectedName,
+            usesGUISetting: usesGUISetting,
+            availableTools: names.sorted(),
+            trustExitCode: trust.succeeded && trust.standardOutputString.trimmingCharacters(in: .whitespacesAndNewlines) == "true"
+        )
+    }
+
+    package func runMergeTool(paths: [String], tool: String? = nil) async throws -> RepositoryMutationResult {
         let repository = try mutationRepository()
         let paths = normalizedPaths(paths)
-        guard !paths.isEmpty else { throw RepositoryMutationError.noPaths }
         let state = try await mutationState(in: repository)
         let conflicts = Set(state.conflictedPaths)
         guard paths.allSatisfy(conflicts.contains) else {
@@ -1182,10 +1394,14 @@ extension GitRepositoryModule: RepositoryBrowserMutationDataSource, RepositorySt
         }
         var arguments = ["mergetool"]
         if configuration.usesGUISetting { arguments.append("--gui") }
-        arguments += ["--no-prompt", "--"] + paths
+        if let tool, !tool.isEmpty { arguments.append("--tool=\(tool)") }
+        arguments.append("--no-prompt")
+        if !paths.isEmpty { arguments += ["--"] + paths }
         _ = try await checkedMutation(arguments, in: repository)
         return try await refreshedMutationResult(
-            message: "Merge tool completed for \(paths.count) path(s).",
+            message: paths.isEmpty
+                ? "Merge tool completed."
+                : "Merge tool completed for \(paths.count) path(s).",
             selectedCommitID: .workingDirectory
         )
     }
@@ -2207,6 +2423,13 @@ extension GitRepositoryModule: RepositoryBrowserMutationDataSource, RepositorySt
     package func rawMutation(_ arguments: [String], in repository: ResolvedGitRepository) async throws -> GitCommandResult {
         try await git.run(
             GitCommand(arguments: arguments, accessesRemote: false, changesRepositoryState: true),
+            in: repository.rootURL
+        )
+    }
+
+    private func conflictRead(_ arguments: [String], in repository: ResolvedGitRepository) async throws -> GitCommandResult {
+        try await git.run(
+            GitCommand(arguments: arguments, accessesRemote: false, changesRepositoryState: false),
             in: repository.rootURL
         )
     }

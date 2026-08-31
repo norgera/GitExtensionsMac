@@ -81,6 +81,102 @@ struct TagPreferences: Codable, Equatable, Sendable {
     var showTagsInRepositoryTree = true
 }
 
+enum RepositoryTreeRoot: String, Codable, CaseIterable, Sendable {
+    case branches
+    case remotes
+    case worktrees
+    case tags
+    case submodules
+    case stashes
+
+    var title: String {
+        switch self {
+        case .branches: "Branches"
+        case .remotes: "Remotes"
+        case .worktrees: "Worktrees"
+        case .tags: "Tags"
+        case .submodules: "Submodules"
+        case .stashes: "Stashes"
+        }
+    }
+}
+
+enum RepositoryTreeSortOrder: String, Codable, CaseIterable, Sendable {
+    case ascending
+    case descending
+}
+
+enum RepositoryTreeSortBy: String, Codable, CaseIterable, Sendable {
+    case gitDefault
+    case authorDate
+    case committerDate
+    case creatorDate
+    case taggerDate
+    case alphaNumeric
+    case version
+    case objectSize
+    case originatingRemote
+
+    var title: String {
+        switch self {
+        case .gitDefault: "Git default"
+        case .authorDate: "Author date"
+        case .committerDate: "Committer date"
+        case .creatorDate: "Creator date"
+        case .taggerDate: "Tagger date"
+        case .alphaNumeric: "Alpha-numeric"
+        case .version: "Version"
+        case .objectSize: "Object size"
+        case .originatingRemote: "Originating remote"
+        }
+    }
+}
+
+struct RepositoryTreePreferences: Codable, Equatable, Sendable {
+    var visibleRoots = Set(RepositoryTreeRoot.allCases)
+    var rootOrder = RepositoryTreeRoot.allCases
+    var sortBy: RepositoryTreeSortBy = .gitDefault
+    var sortOrder: RepositoryTreeSortOrder = .ascending
+
+    init() {}
+
+    private enum CodingKeys: String, CodingKey {
+        case visibleRoots, rootOrder, sortBy, sortOrder
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        visibleRoots = try container.decodeIfPresent(Set<RepositoryTreeRoot>.self, forKey: .visibleRoots)
+            ?? Set(RepositoryTreeRoot.allCases)
+        rootOrder = try container.decodeIfPresent([RepositoryTreeRoot].self, forKey: .rootOrder)
+            ?? RepositoryTreeRoot.allCases
+        sortBy = try container.decodeIfPresent(RepositoryTreeSortBy.self, forKey: .sortBy) ?? .gitDefault
+        sortOrder = try container.decodeIfPresent(RepositoryTreeSortOrder.self, forKey: .sortOrder) ?? .ascending
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(visibleRoots, forKey: .visibleRoots)
+        try container.encode(rootOrder, forKey: .rootOrder)
+        try container.encode(sortBy, forKey: .sortBy)
+        try container.encode(sortOrder, forKey: .sortOrder)
+    }
+
+    mutating func normalize() {
+        var seen = Set<RepositoryTreeRoot>()
+        rootOrder = rootOrder.filter { seen.insert($0).inserted }
+        rootOrder.append(contentsOf: RepositoryTreeRoot.allCases.filter { seen.insert($0).inserted })
+        visibleRoots.formIntersection(RepositoryTreeRoot.allCases)
+    }
+}
+
+struct RemoteManagementPreferences: Codable, Equatable, Sendable {
+    var recentURLs: [String] = []
+    var showAdvancedOptions = false
+    var windowWidth = 950.0
+    var windowHeight = 470.0
+}
+
 struct MergePreferences: Codable, Equatable, Sendable {
     var noCommit = false
     var noFastForward = false
@@ -213,6 +309,25 @@ struct FileStatusListPreferences: Codable, Equatable, Sendable {
         usesDenseTree = try values.decodeIfPresent(Bool.self, forKey: .usesDenseTree) ?? true
         showsGroupNodesInFlatList = try values.decodeIfPresent(Bool.self, forKey: .showsGroupNodesInFlatList) ?? false
         showsUntrackedFiles = try values.decodeIfPresent(Bool.self, forKey: .showsUntrackedFiles) ?? true
+    }
+}
+
+struct FileViewerPreferences: Codable, Equatable, Sendable {
+    var whitespace: DiffWhitespaceMode = .none
+    var contextLines = 3
+    var showsEntireFile = false
+    var treatsAllFilesAsText = false
+    var showsNonPrintingCharacters = false
+    var showsSyntaxHighlighting = true
+    var textEncoding: RepositoryTextEncoding = .automatic
+
+    var diffOptions: FileDiffOptions {
+        FileDiffOptions(
+            whitespace: whitespace,
+            contextLines: contextLines,
+            showsEntireFile: showsEntireFile,
+            treatsAllFilesAsText: treatsAllFilesAsText
+        )
     }
 }
 
@@ -369,10 +484,13 @@ final class AppSettingsStore {
         static let pushPreferences = "GitExtensionsMac.pushPreferences.v1"
         static let commitPreferences = "GitExtensionsMac.commitPreferences.v1"
         static let fileStatusListPreferences = "GitExtensionsMac.fileStatusListPreferences.v1"
+        static let fileViewerPreferences = "GitExtensionsMac.fileViewerPreferences.v1"
         static let rebasePreferences = "GitExtensionsMac.rebasePreferences.v1"
         static let cherryPickPreferences = "GitExtensionsMac.cherryPickPreferences.v1"
         static let stashPreferences = "GitExtensionsMac.stashPreferences.v1"
         static let tagPreferences = "GitExtensionsMac.tagPreferences.v1"
+        static let repositoryTreePreferences = "GitExtensionsMac.repositoryTreePreferences.v1"
+        static let remoteManagementPreferences = "GitExtensionsMac.remoteManagementPreferences.v1"
         static let mergePreferences = "GitExtensionsMac.mergePreferences.v1"
         static let checkoutBranchPreferences = "GitExtensionsMac.checkoutBranchPreferences.v1"
     }
@@ -384,19 +502,23 @@ final class AppSettingsStore {
     private(set) var pushPreferences: PushPreferences
     private(set) var commitPreferences: CommitPreferences
     private(set) var fileStatusListPreferences: FileStatusListPreferences
+    private(set) var fileViewerPreferences: FileViewerPreferences
     private(set) var rebasePreferences: RebasePreferences
     private(set) var cherryPickPreferences: CherryPickPreferences
     private(set) var stashPreferences: StashPreferences
     private(set) var tagPreferences: TagPreferences
+    private(set) var repositoryTreePreferences: RepositoryTreePreferences
+    private(set) var remoteManagementPreferences: RemoteManagementPreferences
     private(set) var mergePreferences: MergePreferences
     private(set) var checkoutBranchPreferences: CheckoutBranchPreferences
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         let decoder = JSONDecoder()
-        preferences = defaults.data(forKey: Key.preferences)
+        let loadedPreferences = defaults.data(forKey: Key.preferences)
             .flatMap { try? decoder.decode(AppPreferences.self, from: $0) }
             ?? AppPreferences()
+        preferences = loadedPreferences
         recentRepositories = defaults.data(forKey: Key.recentRepositories)
             .flatMap { try? decoder.decode([RecentRepository].self, from: $0) }
             ?? []
@@ -412,6 +534,14 @@ final class AppSettingsStore {
         fileStatusListPreferences = defaults.data(forKey: Key.fileStatusListPreferences)
             .flatMap { try? decoder.decode(FileStatusListPreferences.self, from: $0) }
             ?? FileStatusListPreferences()
+        fileViewerPreferences = defaults.data(forKey: Key.fileViewerPreferences)
+            .flatMap { try? decoder.decode(FileViewerPreferences.self, from: $0) }
+            ?? {
+                var value = FileViewerPreferences()
+                value.contextLines = loadedPreferences.diffContextLines
+                value.whitespace = loadedPreferences.ignoreWhitespace ? .all : .none
+                return value
+            }()
         rebasePreferences = defaults.data(forKey: Key.rebasePreferences)
             .flatMap { try? decoder.decode(RebasePreferences.self, from: $0) }
             ?? RebasePreferences()
@@ -424,6 +554,17 @@ final class AppSettingsStore {
         tagPreferences = defaults.data(forKey: Key.tagPreferences)
             .flatMap { try? decoder.decode(TagPreferences.self, from: $0) }
             ?? TagPreferences()
+        repositoryTreePreferences = defaults.data(forKey: Key.repositoryTreePreferences)
+            .flatMap { try? decoder.decode(RepositoryTreePreferences.self, from: $0) }
+            ?? RepositoryTreePreferences()
+        repositoryTreePreferences.normalize()
+        if defaults.data(forKey: Key.repositoryTreePreferences) == nil {
+            if !tagPreferences.showTagsInRepositoryTree { repositoryTreePreferences.visibleRoots.remove(.tags) }
+            if !stashPreferences.showStashesInRepositoryTree { repositoryTreePreferences.visibleRoots.remove(.stashes) }
+        }
+        remoteManagementPreferences = defaults.data(forKey: Key.remoteManagementPreferences)
+            .flatMap { try? decoder.decode(RemoteManagementPreferences.self, from: $0) }
+            ?? RemoteManagementPreferences()
         mergePreferences = defaults.data(forKey: Key.mergePreferences)
             .flatMap { try? decoder.decode(MergePreferences.self, from: $0) }
             ?? MergePreferences()
@@ -441,6 +582,14 @@ final class AppSettingsStore {
     func save(_ preferences: AppPreferences) {
         self.preferences = preferences
         defaults.set(try? JSONEncoder().encode(preferences), forKey: Key.preferences)
+        var viewer = fileViewerPreferences
+        viewer.contextLines = preferences.diffContextLines
+        viewer.whitespace = preferences.ignoreWhitespace ? .all : .none
+        if viewer != fileViewerPreferences {
+            fileViewerPreferences = viewer
+            defaults.set(try? JSONEncoder().encode(viewer), forKey: Key.fileViewerPreferences)
+            NotificationCenter.default.post(name: .fileViewerPreferencesDidChange, object: self)
+        }
         trimRecentRepositories()
         applyAppearance()
         NotificationCenter.default.post(name: .appPreferencesDidChange, object: self)
@@ -470,6 +619,15 @@ final class AppSettingsStore {
         NotificationCenter.default.post(name: .fileStatusListPreferencesDidChange, object: self)
     }
 
+    func saveFileViewerPreferences(_ preferences: FileViewerPreferences) {
+        fileViewerPreferences = preferences
+        defaults.set(try? JSONEncoder().encode(preferences), forKey: Key.fileViewerPreferences)
+        self.preferences.diffContextLines = preferences.contextLines
+        self.preferences.ignoreWhitespace = preferences.whitespace != .none
+        defaults.set(try? JSONEncoder().encode(self.preferences), forKey: Key.preferences)
+        NotificationCenter.default.post(name: .fileViewerPreferencesDidChange, object: self)
+    }
+
     func saveRebasePreferences(_ preferences: RebasePreferences) {
         rebasePreferences = preferences
         defaults.set(try? JSONEncoder().encode(preferences), forKey: Key.rebasePreferences)
@@ -488,6 +646,43 @@ final class AppSettingsStore {
     func saveTagPreferences(_ preferences: TagPreferences) {
         tagPreferences = preferences
         defaults.set(try? JSONEncoder().encode(preferences), forKey: Key.tagPreferences)
+    }
+
+    func saveRepositoryTreePreferences(_ preferences: RepositoryTreePreferences) {
+        var preferences = preferences
+        preferences.normalize()
+        repositoryTreePreferences = preferences
+        defaults.set(try? JSONEncoder().encode(preferences), forKey: Key.repositoryTreePreferences)
+    }
+
+    func saveRemoteManagementPreferences(_ preferences: RemoteManagementPreferences) {
+        remoteManagementPreferences = preferences
+        defaults.set(try? JSONEncoder().encode(preferences), forKey: Key.remoteManagementPreferences)
+    }
+
+    func recordRemoteURL(_ value: String) {
+        let value = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return }
+        var preferences = remoteManagementPreferences
+        preferences.recentURLs.removeAll { $0 == value }
+        preferences.recentURLs.insert(value, at: 0)
+        preferences.recentURLs = Array(preferences.recentURLs.prefix(20))
+        saveRemoteManagementPreferences(preferences)
+    }
+
+    func replaceRemoteURLHistory(_ oldValue: String?, with newValue: String) {
+        let oldValue = oldValue?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let newValue = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        var preferences = remoteManagementPreferences
+        if let oldValue, !oldValue.isEmpty, oldValue != newValue {
+            preferences.recentURLs.removeAll { $0 == oldValue }
+        }
+        if !newValue.isEmpty {
+            preferences.recentURLs.removeAll { $0 == newValue }
+            preferences.recentURLs.insert(newValue, at: 0)
+        }
+        preferences.recentURLs = Array(preferences.recentURLs.prefix(20))
+        saveRemoteManagementPreferences(preferences)
     }
 
     func saveMergePreferences(_ preferences: MergePreferences) {
@@ -563,4 +758,5 @@ extension Notification.Name {
     static let pushPreferencesDidChange = Notification.Name("GitExtensionsMac.pushPreferencesDidChange")
     static let commitPreferencesDidChange = Notification.Name("GitExtensionsMac.commitPreferencesDidChange")
     static let fileStatusListPreferencesDidChange = Notification.Name("GitExtensionsMac.fileStatusListPreferencesDidChange")
+    static let fileViewerPreferencesDidChange = Notification.Name("GitExtensionsMac.fileViewerPreferencesDidChange")
 }

@@ -29,7 +29,7 @@ package extension RepositoryLoadState {
             repository: identity.currentRepository,
             headID: identity.headID,
             branches: references.branches,
-            remotes: navigation.remotes,
+            remotes: navigation.remotes.filter { !$0.isDisabled },
             references: references.references,
             submodules: navigation.submodules
         )
@@ -40,7 +40,7 @@ package extension RepositoryLoadState {
             repository: identity.currentRepository,
             headID: identity.headID,
             branches: references.branches,
-            remotes: navigation.remotes,
+            remotes: navigation.remotes.filter { !$0.isDisabled },
             referencesByCommit: references.referencesByCommit,
             submodules: navigation.submodules
         )
@@ -79,8 +79,24 @@ package protocol RepositoryBrowsingDataSource: Sendable {
     func revisionReadRequest() async throws -> RevisionReadRequest
     func loadRevisionDetails(for commit: Commit) async throws -> RepositoryRevisionDetails
     func loadRepositoryFiles(for commit: Commit) async throws -> [RepositoryFileEntry]
-    func loadDiff(for commit: Commit, file: ChangedFile) async throws -> FileDiff?
+    func loadDiff(for commit: Commit, file: ChangedFile, options: FileDiffOptions) async throws -> FileDiff?
     func loadFileContent(for commit: Commit, file: RepositoryFileEntry) async throws -> RepositoryFileEntry
+    func loadFilePresentation(
+        for commit: Commit,
+        file: RepositoryFileEntry,
+        encoding: RepositoryTextEncoding
+    ) async throws -> RepositoryFileContent
+    func openWithDifftool(for commit: Commit, file: ChangedFile, customToolPath: String?) async throws
+}
+
+package extension RepositoryBrowsingDataSource {
+    func loadDiff(for commit: Commit, file: ChangedFile) async throws -> FileDiff? {
+        try await loadDiff(for: commit, file: file, options: FileDiffOptions())
+    }
+
+    func openWithDifftool(for commit: Commit, file: ChangedFile) async throws {
+        try await openWithDifftool(for: commit, file: file, customToolPath: nil)
+    }
 }
 
 package protocol RepositoryOpeningDataSource: RepositoryBrowsingDataSource {

@@ -10,6 +10,7 @@ enum PushDialog {
         initialBranch: String? = nil,
         executeImmediately: Bool = false,
         initialForceWithLease: Bool = false,
+        onManageRemotes: @escaping (String?, String?) -> Void,
         onRepositoryChanged: @escaping (RevisionID?) -> Void,
         onCompletion: ((Bool) -> Void)? = nil,
         onClose: @escaping () -> Void
@@ -20,6 +21,7 @@ enum PushDialog {
             initialBranch: initialBranch,
             executeImmediately: executeImmediately,
             initialForceWithLease: initialForceWithLease,
+            onManageRemotes: onManageRemotes,
             onRepositoryChanged: onRepositoryChanged
         )
         let window = NSWindow(contentViewController: controller)
@@ -54,14 +56,15 @@ private final class PushDialogViewController: NSViewController,
     private let initialBranch: String?
     private let executeImmediately: Bool
     private let initialForceWithLease: Bool
+    private let onManageRemotes: (String?, String?) -> Void
     private let onRepositoryChanged: (RevisionID?) -> Void
     private let settings = AppSettingsStore.shared
     private var pushState: RepositoryPushState?
     private var didClose = false
+    private var didBecomeKeyOnce = false
     private var didAttemptImmediateExecution = false
     private var lastPushCompleted = false
     private var operationTask: Task<Void, Never>?
-    private var remoteWindowController: NSWindowController?
     private var pullWindowController: NSWindowController?
     private var multipleBranchTask: Task<Void, Never>?
 
@@ -95,6 +98,7 @@ private final class PushDialogViewController: NSViewController,
         initialBranch: String?,
         executeImmediately: Bool,
         initialForceWithLease: Bool,
+        onManageRemotes: @escaping (String?, String?) -> Void,
         onRepositoryChanged: @escaping (RevisionID?) -> Void
     ) {
         self.source = source
@@ -102,6 +106,7 @@ private final class PushDialogViewController: NSViewController,
         self.initialBranch = initialBranch
         self.executeImmediately = executeImmediately
         self.initialForceWithLease = initialForceWithLease
+        self.onManageRemotes = onManageRemotes
         self.onRepositoryChanged = onRepositoryChanged
         super.init(nibName: nil, bundle: nil)
     }
@@ -378,8 +383,12 @@ private final class PushDialogViewController: NSViewController,
         operationTask = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
-                let state = try await source.loadPushState()
+                async let loadedPushState = source.loadPushState()
+                async let repositoryState = source.loadRepositoryState()
+                let state = try await loadedPushState
+                let refreshedContext = try await repositoryState.networkContext
                 guard !Task.isCancelled else { return }
+                context = refreshedContext
                 pushState = state
                 populateRemotes(selecting: selectRemote ?? remoteCombo.stringValue)
                 populateLocalBranches()
@@ -694,17 +703,7 @@ private final class PushDialogViewController: NSViewController,
     }
 
     @objc private func manageRemotes() {
-        if let remoteWindowController { remoteWindowController.window?.makeKeyAndOrderFront(nil); return }
-        remoteWindowController = RemoteManagementDialog.present(
-            source: source,
-            selectedRemote: remoteCombo.stringValue.isEmpty ? nil : remoteCombo.stringValue,
-            onRepositoryChanged: { [weak self] in
-                guard let self else { return }
-                self.onRepositoryChanged(nil)
-                self.reloadRepositoryState(selectRemote: self.remoteCombo.stringValue)
-            },
-            onClose: { [weak self] in self?.remoteWindowController = nil }
-        )
+        onManageRemotes(remoteCombo.stringValue.isEmpty ? nil : remoteCombo.stringValue, nil)
     }
 
     @objc private func openPull() {
@@ -714,6 +713,7 @@ private final class PushDialogViewController: NSViewController,
             executeImmediately: false,
             context: context,
             source: source,
+            onManageRemotes: onManageRemotes,
             onRepositoryChanged: { [weak self] selected in
                 guard let self else { return }
                 self.onRepositoryChanged(selected)
@@ -1077,12 +1077,20 @@ private final class PushDialogViewController: NSViewController,
 
     func windowWillClose(_ notification: Notification) { finish() }
 
+    func windowDidBecomeKey(_ notification: Notification) {
+        if didBecomeKeyOnce {
+            guard operationTask == nil else { return }
+            reloadRepositoryState(selectRemote: remoteCombo.stringValue)
+        } else {
+            didBecomeKeyOnce = true
+        }
+    }
+
     private func finish() {
         guard !didClose else { return }
         didClose = true
         operationTask?.cancel()
         multipleBranchTask?.cancel()
-        remoteWindowController?.close()
         pullWindowController?.close()
         onCompletion?(lastPushCompleted)
         onClose?()

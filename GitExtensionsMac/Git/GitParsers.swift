@@ -20,6 +20,7 @@ package struct GitRefRecord: Sendable {
     package let upstreamRemote: String?
     package let upstreamRef: String?
     package let upstreamTrack: String?
+    package let sortMetadata: RepositoryReferenceSortMetadata
 }
 
 package struct GitStatusRecord: Sendable {
@@ -103,11 +104,11 @@ package enum GitOutputParser {
     package static func parseRefs(_ data: Data) throws -> [GitRefRecord] {
         var fields = nulFields(data, trimRecordNewlines: true)
         if fields.last?.isEmpty == true { fields.removeLast() }
-        guard fields.count % 6 == 0 else {
-            throw GitError.malformedOutput(command: "for-each-ref", detail: "expected groups of 6 fields, got \(fields.count)")
+        guard fields.count % 11 == 0 else {
+            throw GitError.malformedOutput(command: "for-each-ref", detail: "expected groups of 11 fields, got \(fields.count)")
         }
 
-        return try stride(from: 0, to: fields.count, by: 6).map { index in
+        return try stride(from: 0, to: fields.count, by: 11).map { index in
             guard let objectID = try? ObjectID.parse(fields[index]) else {
                 throw GitError.malformedOutput(command: "for-each-ref", detail: "invalid object ID \(fields[index])")
             }
@@ -117,7 +118,14 @@ package enum GitOutputParser {
                 peeledObjectID: try ObjectID.parseIfPresent(nilIfEmpty(fields[index + 2])),
                 upstreamRemote: nilIfEmpty(fields[index + 3]),
                 upstreamRef: nilIfEmpty(fields[index + 4]),
-                upstreamTrack: nilIfEmpty(fields[index + 5])
+                upstreamTrack: nilIfEmpty(fields[index + 5]),
+                sortMetadata: RepositoryReferenceSortMetadata(
+                    authorDate: Int64(fields[index + 6]),
+                    committerDate: Int64(fields[index + 7]),
+                    creatorDate: Int64(fields[index + 8]),
+                    taggerDate: Int64(fields[index + 9]),
+                    objectSize: Int64(fields[index + 10])
+                )
             )
         }
     }

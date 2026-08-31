@@ -16,12 +16,61 @@ enum ContextMenuStateTests {
         testCurrentBranchTreeCommands()
         testMergeTreeCommands()
         testCheckoutBranchTreeCommands()
+        testRemoteManagementTreeCommands()
         testTreeMultiSelection()
         testCurrentWorktreeCommands()
+        testUnavailableFutureTreeCommands()
+        testRepositoryTreeStructure()
+        testRepositoryTreeVisibilityAndOrdering()
+        testRepositoryTreeRefSorting()
         testStashTreeCommands()
         testHistoricalFileCommands()
         testMultipleHistoricalFiles()
         testWorktreeFileCommands()
+        testConflictResolverActions()
+    }
+
+    private static func testConflictResolverActions() {
+        let version = RepositoryConflictVersion(
+            objectID: testObjectID("conflict-version"),
+            mode: "100644",
+            path: "conflict.txt"
+        )
+        let conflict = RepositoryConflict(
+            path: "conflict.txt",
+            base: version,
+            local: nil,
+            remote: version,
+            kind: .deletedLocally
+        )
+
+        var actions = ConflictResolverActionState(
+            selectedConflicts: [],
+            conflictCount: 1,
+            mergeToolConfiguration: RepositoryMergeToolConfiguration(name: "opendiff", usesGUISetting: true)
+        )
+        expect(!actions.canResolveSelection, "conflicts: actions require a selection")
+        expect(actions.canRunAllMergeTool, "conflicts: configured mergetool can run over all conflicts")
+
+        actions = ConflictResolverActionState(
+            selectedConflicts: [conflict],
+            conflictCount: 1,
+            mergeToolConfiguration: RepositoryMergeToolConfiguration(name: "opendiff", usesGUISetting: true)
+        )
+        expect(actions.canResolveSelection, "conflicts: selected conflict can be resolved")
+        expect(actions.canRunSelectedMergeTool, "conflicts: configured mergetool accepts the selection")
+        expect(actions.hasBaseVersion && actions.hasRemoteVersion, "conflicts: available index stages enable inspection")
+        expect(!actions.hasLocalVersion, "conflicts: a deleted side disables unavailable content actions")
+        expect(actions.canInspectWorkingFile, "conflicts: one selection enables working-file actions")
+
+        actions = ConflictResolverActionState(
+            selectedConflicts: [conflict, conflict],
+            conflictCount: 2,
+            mergeToolConfiguration: nil
+        )
+        expect(!actions.canRunSelectedMergeTool, "conflicts: absent mergetool disables launch")
+        expect(!actions.canInspectWorkingFile, "conflicts: version and working-file actions require one selection")
+        expect(!actions.hasBaseVersion && !actions.hasRemoteVersion, "conflicts: multi-selection hides single-file stage actions")
     }
 
     private static func testSeparatorNormalization() {
@@ -279,6 +328,45 @@ enum ContextMenuStateTests {
         expect(menu.entry(id: "repository.folder.create") == nil, "tree: remote path folders do not expose local-folder commands")
     }
 
+    private static func testRemoteManagementTreeCommands() {
+        var menu = RepositoryContextMenuBuilder.build(.init(
+            focused: .remote(enabled: true, hasHTTPURL: true),
+            selected: [.remote(enabled: true, hasHTTPURL: true)],
+            selectedHaveChildren: true,
+            selectedHaveExpandableChildren: true,
+            selectedHaveCollapsibleChildren: false
+        ))
+        expect(menu.entry(id: "repository.remote.manage")?.isEnabled == true, "remotes: management is available for active remotes")
+        expect(menu.entry(id: "repository.remote.fetch")?.isEnabled == true, "remotes: active remotes can fetch")
+        expect(menu.entry(id: "repository.remote.prune")?.isEnabled == true, "remotes: active remotes can prune")
+        expect(menu.entry(id: "repository.remote.openURL")?.isEnabled == true, "remotes: HTTP remotes can open in a browser")
+        expect(menu.entry(id: "repository.remote.disable")?.isEnabled == true, "remotes: active remotes can be disabled")
+        expect(menu.entry(id: "repository.remote.enable")?.isEnabled == false, "remotes: active remotes are not offered Enable")
+
+        menu = RepositoryContextMenuBuilder.build(.init(
+            focused: .remote(enabled: false, hasHTTPURL: false),
+            selected: [.remote(enabled: false, hasHTTPURL: false)],
+            selectedHaveChildren: false,
+            selectedHaveExpandableChildren: false,
+            selectedHaveCollapsibleChildren: false
+        ))
+        expect(menu.entry(id: "repository.remote.fetch")?.isEnabled == false, "remotes: inactive remotes cannot fetch")
+        expect(menu.entry(id: "repository.remote.openURL")?.isEnabled == false, "remotes: non-HTTP URLs do not open in a browser")
+        expect(menu.entry(id: "repository.remote.enable")?.isEnabled == true, "remotes: inactive remotes can be enabled")
+        expect(menu.entry(id: "repository.remote.enableFetch")?.isEnabled == true, "remotes: inactive remotes can enable and fetch")
+
+        menu = RepositoryContextMenuBuilder.build(.init(
+            focused: .group(.remotes),
+            selected: [.group(.remotes)],
+            selectedHaveChildren: true,
+            selectedHaveExpandableChildren: true,
+            selectedHaveCollapsibleChildren: false
+        ))
+        expect(menu.entry(id: "repository.remotes.manage")?.isEnabled == true, "remotes: root opens management")
+        expect(menu.entry(id: "repository.remotes.fetch")?.isEnabled == true, "remotes: root can fetch all")
+        expect(menu.entry(id: "repository.remotes.prune")?.isEnabled == true, "remotes: root can prune all")
+    }
+
     private static func testTreeMultiSelection() {
         let local = RepositoryMenuNodeKind.localBranch(isCurrent: false)
         let remote = RepositoryMenuNodeKind.remoteBranch
@@ -310,6 +398,135 @@ enum ContextMenuStateTests {
         expect(menu.entry(id: "repository.worktree.delete")?.isEnabled == false, "tree: current worktree cannot be deleted")
         expect(menu.entry(id: "repository.worktree.copyPath")?.isEnabled == true, "tree: current worktree path can be copied")
         expect(menu.entry(id: "repository.worktree.show")?.isEnabled == true, "tree: existing worktree can be shown")
+    }
+
+    private static func testUnavailableFutureTreeCommands() {
+        var menu = RepositoryContextMenuBuilder.build(.init(
+            focused: .worktree(isCurrent: false, pathExists: true),
+            selected: [.worktree(isCurrent: false, pathExists: true)],
+            selectedHaveChildren: false,
+            selectedHaveExpandableChildren: false,
+            selectedHaveCollapsibleChildren: false
+        ))
+        expect(menu.entry(id: "repository.worktree.open")?.isEnabled == false, "tree: unfinished worktree opening is not an enabled placeholder")
+        expect(menu.entry(id: "repository.worktree.delete")?.isEnabled == false, "tree: unfinished worktree deletion is not an enabled placeholder")
+
+        menu = RepositoryContextMenuBuilder.build(.init(
+            focused: .submodule,
+            selected: [.submodule],
+            selectedHaveChildren: false,
+            selectedHaveExpandableChildren: false,
+            selectedHaveCollapsibleChildren: false
+        ))
+        expect(menu.entry(id: "repository.submodule.open")?.isEnabled == false, "tree: unfinished submodule actions remain visible but disabled")
+
+        menu = RepositoryContextMenuBuilder.build(.init(
+            focused: .group(.branches),
+            selected: [.group(.branches)],
+            selectedHaveChildren: true,
+            selectedHaveExpandableChildren: true,
+            selectedHaveCollapsibleChildren: false,
+            focusedRootCanMoveUp: false,
+            focusedRootCanMoveDown: true
+        ))
+        expect(menu.entry(id: "repository.root.moveUp")?.isEnabled == false, "tree: first root cannot move up")
+        expect(menu.entry(id: "repository.root.moveDown")?.isEnabled == true, "tree: roots can be reordered")
+        expect(menu.entry(id: "repository.sortBy.creatorDate") == nil, "tree: sort choices are scoped to ref nodes")
+    }
+
+    private static func testRepositoryTreeStructure() {
+        let mainID = testObjectID("main")
+        let topicID = testObjectID("topic")
+        let branches = [
+            Branch(id: "topic", name: "feature/ui/topic", commitID: topicID, isCurrent: false, isRemote: false, remoteName: nil, ahead: 1, behind: 2),
+            Branch(id: "main", name: "main", commitID: mainID, isCurrent: true, isRemote: false, remoteName: "origin", ahead: 0, behind: 0)
+        ]
+        let remoteBranch = Branch(id: "remote-topic", name: "feature/ui/topic", commitID: topicID, isCurrent: false, isRemote: true, remoteName: "origin", ahead: 0, behind: 0)
+        let references = RepositoryReferenceState(
+            branches: branches,
+            tags: [Tag(id: "tag", name: "release/v1", commitID: mainID)],
+            referencesByCommit: [:]
+        )
+        let navigation = RepositoryNavigationState(
+            remotes: [
+                Remote(id: "disabled", name: "archive", fetchURL: "https://example.invalid/archive", branches: [], isDisabled: true),
+                Remote(id: "origin", name: "origin", fetchURL: "https://github.com/example/repo", branches: [remoteBranch])
+            ],
+            stashes: [Stash(id: "stash", selector: "stash@{0}", subject: "WIP", branchName: "main", commitID: topicID)],
+            worktrees: [],
+            submodules: []
+        )
+        let roots = RepositoryTreeBuilder.build(
+            references: references,
+            navigation: navigation,
+            preferences: RepositoryTreePreferences()
+        )
+        expect(roots.map(\.title) == ["Branches", "Remotes", "Worktrees", "Tags", "Submodules", "Stashes"], "tree: default root order matches upstream")
+        let all = roots.flatMap(flatten)
+        expect(all.contains(where: { $0.id == "branch:main" }), "tree: current local branch has stable identity")
+        expect(all.contains(where: { $0.id == "branch-folder:local:feature/ui" }), "tree: slash-separated branches form nested path nodes")
+        expect(all.contains(where: { $0.id == "tag-folder:release" }), "tree: slash-separated tags form path nodes")
+        expect(all.contains(where: { $0.id == "remote-folder:inactive" }), "tree: inactive remotes are grouped separately")
+        expect(roots[0].children.first?.id == "branch:main", "tree: main/master priority precedes ordinary branches")
+        let restored = RepositoryTreeStateResolver.survivingIDs(
+            ["branch:main", "branch:deleted", "tag:release/v1"],
+            in: roots
+        )
+        expect(restored == ["branch:main", "tag:release/v1"], "tree: refresh restores surviving selections and drops stale refs")
+    }
+
+    private static func testRepositoryTreeVisibilityAndOrdering() {
+        let state = RepositoryReferenceState(branches: [], tags: [], referencesByCommit: [:])
+        let navigation = RepositoryNavigationState(remotes: [], stashes: [], worktrees: [], submodules: [])
+        var preferences = RepositoryTreePreferences()
+        preferences.visibleRoots.remove(.worktrees)
+        preferences.rootOrder = [.tags, .branches, .remotes, .worktrees, .submodules, .stashes]
+        let roots = RepositoryTreeBuilder.build(references: state, navigation: navigation, preferences: preferences)
+        expect(roots.map(\.title) == ["Tags", "Branches", "Remotes", "Submodules", "Stashes"], "tree: visibility and persisted root order are honored")
+    }
+
+    private static func testRepositoryTreeRefSorting() {
+        let oldID = testObjectID("old-tag")
+        let newID = testObjectID("new-tag")
+        let references = RepositoryReferenceState(
+            branches: [],
+            tags: [
+                Tag(id: "v10", name: "v10", commitID: newID, sortMetadata: .init(creatorDate: 20, objectSize: 200)),
+                Tag(id: "v2", name: "v2", commitID: oldID, sortMetadata: .init(creatorDate: 10, objectSize: 100))
+            ],
+            referencesByCommit: [:]
+        )
+        let navigation = RepositoryNavigationState(remotes: [], stashes: [], worktrees: [], submodules: [])
+        var preferences = RepositoryTreePreferences()
+        preferences.sortBy = .creatorDate
+        var tags = RepositoryTreeBuilder.build(references: references, navigation: navigation, preferences: preferences)
+            .first(where: { $0.id == "root:tags" })?.children ?? []
+        expect(tags.map(\.title) == ["v2", "v10"], "tree: upstream creator-date metadata sorts refs")
+
+        preferences.sortBy = .version
+        preferences.sortOrder = .descending
+        tags = RepositoryTreeBuilder.build(references: references, navigation: navigation, preferences: preferences)
+            .first(where: { $0.id == "root:tags" })?.children ?? []
+        expect(tags.map(\.title) == ["v10", "v2"], "tree: version-aware descending sort matches ref-name semantics")
+
+        preferences.sortBy = .gitDefault
+        tags = RepositoryTreeBuilder.build(references: references, navigation: navigation, preferences: preferences)
+            .first(where: { $0.id == "root:tags" })?.children ?? []
+        expect(tags.map(\.title) == ["v10", "v2"], "tree: Git-default ordering ignores the stored explicit direction")
+
+        let menu = RepositoryContextMenuBuilder.build(.init(
+            focused: .tag,
+            selected: [.tag],
+            selectedHaveChildren: false,
+            selectedHaveExpandableChildren: false,
+            selectedHaveCollapsibleChildren: false
+        ))
+        expect(menu.entry(id: "repository.sortBy.creatorDate")?.isEnabled == true, "tree: real metadata sort modes are exposed on refs")
+        expect(menu.entry(id: "repository.sortBy.originatingRemote")?.isEnabled == true, "tree: originating-remote sorting is exposed on refs")
+    }
+
+    private static func flatten(_ node: RepositoryTreeNode) -> [RepositoryTreeNode] {
+        [node] + node.children.flatMap(flatten)
     }
 
     private static func testStashTreeCommands() {

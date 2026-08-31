@@ -30,13 +30,29 @@ struct MockRepositoryDataSource: RepositoryBrowsingDataSource {
         Self.fixture.repositoryFilesByCommit[commit.id] ?? []
     }
 
-    func loadDiff(for commit: Commit, file: ChangedFile) async throws -> FileDiff? {
+    func loadDiff(for commit: Commit, file: ChangedFile, options: FileDiffOptions) async throws -> FileDiff? {
         Self.fixture.diffsByFile[file.id]
     }
 
     func loadFileContent(for commit: Commit, file: RepositoryFileEntry) async throws -> RepositoryFileEntry {
         file
     }
+
+    func loadFilePresentation(
+        for commit: Commit,
+        file: RepositoryFileEntry,
+        encoding: RepositoryTextEncoding
+    ) async throws -> RepositoryFileContent {
+        RepositoryFileContent(
+            path: file.path,
+            kind: .text,
+            text: file.content,
+            data: Data(file.content.utf8),
+            encoding: encoding == .automatic ? .utf8 : encoding
+        )
+    }
+
+    func openWithDifftool(for commit: Commit, file: ChangedFile, customToolPath: String?) async throws {}
 }
 
 private extension MockRepositoryDataSource {

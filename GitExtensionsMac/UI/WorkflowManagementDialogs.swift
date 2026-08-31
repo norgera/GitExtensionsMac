@@ -20,7 +20,8 @@ enum WorkflowManagementDialogs {
         context: RepositoryStashContext,
         window: NSWindow,
         manageStashes: Bool = true,
-        initialStash: String? = nil
+        initialStash: String? = nil,
+        openWithDifftool: (@MainActor (Commit, ChangedFile) -> Void)? = nil
     ) async -> StashDialogResult {
         await StashDialog.present(
             source: source,
@@ -28,6 +29,7 @@ enum WorkflowManagementDialogs {
             manageStashes: manageStashes,
             initialStash: initialStash,
             owner: window,
+            openWithDifftool: openWithDifftool,
             resolveConflicts: { stashWindow in
                 await resolveConflicts(source: source, window: stashWindow)
             }
@@ -36,9 +38,14 @@ enum WorkflowManagementDialogs {
 
     static func resolveConflicts(
         source: any RepositoryConflictResolutionDataSource,
-        window: NSWindow
+        window: NSWindow,
+        offerCommit: Bool? = nil
     ) async -> Bool {
-        await presentConflictResolver(source: source, window: window).repositoryChanged
+        await presentConflictResolver(
+            source: source,
+            window: window,
+            offerMergeCommit: offerCommit
+        ).repositoryChanged
     }
 
     static func resolveCherryPickConflicts(
@@ -72,8 +79,9 @@ enum WorkflowManagementDialogs {
         let panel = NSPanel(contentViewController: controller)
         panel.title = "Resolve merge conflicts"
         panel.styleMask = [.titled, .closable, .resizable]
-        panel.setContentSize(NSSize(width: 680, height: 460))
-        panel.minSize = NSSize(width: 540, height: 350)
+        panel.setContentSize(NSSize(width: 820, height: 650))
+        panel.minSize = NSSize(width: 700, height: 520)
+        panel.setFrameAutosaveName("GitExtensionsMac.ConflictResolver")
         controller.panel = panel
         panel.delegate = controller
         return await withCheckedContinuation { continuation in
@@ -636,30 +644,89 @@ private final class RebaseManagerViewController: NSViewController, NSTableViewDa
     }
 }
 
+private final class ConflictTableView: NSTableView {
+    var onReturn: (() -> Void)?
+
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 36 || event.keyCode == 76 {
+            onReturn?()
+        } else {
+            super.keyDown(with: event)
+        }
+    }
+}
+
+struct ConflictResolverActionState: Equatable {
+    let hasSelection: Bool
+    let hasSingleSelection: Bool
+    let hasConflicts: Bool
+    let hasMergeTool: Bool
+    let hasLocalVersion: Bool
+    let hasBaseVersion: Bool
+    let hasRemoteVersion: Bool
+
+    init(
+        selectedConflicts: [RepositoryConflict],
+        conflictCount: Int,
+        mergeToolConfiguration: RepositoryMergeToolConfiguration?
+    ) {
+        let single = selectedConflicts.count == 1 ? selectedConflicts[0] : nil
+        hasSelection = !selectedConflicts.isEmpty
+        hasSingleSelection = single != nil
+        hasConflicts = conflictCount > 0
+        hasMergeTool = mergeToolConfiguration != nil
+        hasLocalVersion = single?.local != nil
+        hasBaseVersion = single?.base != nil
+        hasRemoteVersion = single?.remote != nil
+    }
+
+    var canRunSelectedMergeTool: Bool { hasSelection && hasMergeTool }
+    var canRunAllMergeTool: Bool { hasConflicts && hasMergeTool }
+    var canResolveSelection: Bool { hasSelection }
+    var canResolveAll: Bool { hasConflicts }
+    var canInspectWorkingFile: Bool { hasSingleSelection }
+}
+
 @MainActor
-private final class ConflictResolverViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSWindowDelegate {
+private final class ConflictResolverViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSWindowDelegate, NSMenuDelegate {
     weak var panel: NSPanel?
     var onClose: ((ConflictResolutionResult) -> Void)?
     private let source: any RepositoryConflictResolutionDataSource
-    private let table = NSTableView()
+    private let table = ConflictTableView()
     private let descriptionLabel = NSTextField(labelWithString: "Select a file")
+    private let localLabel = NSTextField(labelWithString: "Local/current: —")
+    private let baseLabel = NSTextField(labelWithString: "Base: —")
+    private let remoteLabel = NSTextField(labelWithString: "Remote/incoming: —")
+    private let sideSelector = NSSegmentedControl(labels: ["Local", "Base", "Remote"], trackingMode: .selectOne, target: nil, action: nil)
+    private let contentController = RevisionFileContentViewController()
     private let status = NSTextField(labelWithString: "Scanning merge conflicts…")
     private let mergeToolButton = NSButton(title: "Open in mergetool", target: nil, action: nil)
+    private let allMergeToolButton = NSButton(title: "Start mergetool", target: nil, action: nil)
+    private let toolMenuButton = NSPopUpButton()
+    private let chooseLocalButton = NSButton(title: "Choose local", target: nil, action: nil)
+    private let chooseRemoteButton = NSButton(title: "Choose remote", target: nil, action: nil)
+    private let chooseBaseButton = NSButton(title: "Choose base", target: nil, action: nil)
+    private let solvedButton = NSButton(title: "Mark conflict as solved", target: nil, action: nil)
+    private let solvedAllButton = NSButton(title: "Mark all as solved", target: nil, action: nil)
     private let continueButton = NSButton(title: "Continue", target: nil, action: nil)
     private let skipButton = NSButton(title: "Skip", target: nil, action: nil)
     private let abortButton = NSButton(title: "Abort", target: nil, action: nil)
     private var state: RepositoryMutationState?
     private var mergeToolConfiguration: RepositoryMergeToolConfiguration?
     private var mergeInProgress = false
+    private var conflicts: [RepositoryConflict] = []
     private var paths: [String] = []
     private var repositoryChanged = false
     private var commitWindowController: NSWindowController?
     private var task: Task<Void, Never>?
+    private var contentTask: Task<Void, Never>?
     private var didClose = false
     private var sequencerAction = ConflictSequencerAction.none
     private let offerMergeCommit: Bool?
     private var hadMergeConflicts = false
     private var didOfferMergeCompletion = false
+    private var selectedSide: RepositoryConflictSide = .local
+    private var sideContent: [RepositoryConflictSide: RepositoryFileContent] = [:]
 
     init(
         source: any RepositoryConflictResolutionDataSource,
@@ -670,48 +737,125 @@ private final class ConflictResolverViewController: NSViewController, NSTableVie
         super.init(nibName: nil, bundle: nil)
     }
     required init?(coder: NSCoder) { nil }
-    deinit { task?.cancel() }
+    deinit { task?.cancel(); contentTask?.cancel() }
 
     override func loadView() {
         let root = NSView()
         let title = NSTextField(labelWithString: "Unresolved merge conflicts")
         title.font = .boldSystemFont(ofSize: 15)
-        let column = NSTableColumn(identifier: .init("File")); column.title = "File"; column.width = 500
-        table.addTableColumn(column)
+        let fileColumn = NSTableColumn(identifier: .init("File")); fileColumn.title = "Filename"; fileColumn.width = 390
+        let statusColumn = NSTableColumn(identifier: .init("Status")); statusColumn.title = "Conflict"; statusColumn.width = 150
+        table.addTableColumn(fileColumn)
+        table.addTableColumn(statusColumn)
         table.rowHeight = 22
         table.allowsMultipleSelection = true
+        table.allowsEmptySelection = false
         table.delegate = self
         table.dataSource = self
+        table.doubleAction = #selector(openMergeTool)
+        table.target = self
+        table.onReturn = { [weak self] in self?.openMergeTool() }
+        let contextMenu = NSMenu()
+        contextMenu.delegate = self
+        table.menu = contextMenu
         let scroll = NSScrollView(); scroll.documentView = table; scroll.hasVerticalScroller = true; scroll.borderType = .bezelBorder
+
         mergeToolButton.target = self; mergeToolButton.action = #selector(openMergeTool); mergeToolButton.isEnabled = false
-        let solved = NSButton(title: "Mark conflict as solved", target: self, action: #selector(markSolved))
+        allMergeToolButton.target = self; allMergeToolButton.action = #selector(openAllInMergeTool)
+        toolMenuButton.target = self; toolMenuButton.action = #selector(openSelectedConfiguredTool(_:))
+        solvedButton.target = self; solvedButton.action = #selector(markSolved)
+        solvedAllButton.target = self; solvedAllButton.action = #selector(markAllSolved)
+        chooseLocalButton.target = self; chooseLocalButton.action = #selector(chooseLocal)
+        chooseRemoteButton.target = self; chooseRemoteButton.action = #selector(chooseRemote)
+        chooseBaseButton.target = self; chooseBaseButton.action = #selector(chooseBase)
+        chooseLocalButton.keyEquivalent = "1"; chooseLocalButton.keyEquivalentModifierMask = [.command]
+        chooseRemoteButton.keyEquivalent = "2"; chooseRemoteButton.keyEquivalentModifierMask = [.command]
+        chooseBaseButton.keyEquivalent = "3"; chooseBaseButton.keyEquivalentModifierMask = [.command]
         let rescan = NSButton(title: "Rescan merge conflicts", target: self, action: #selector(rescan))
+        rescan.keyEquivalent = "r"; rescan.keyEquivalentModifierMask = [.command]
+        let reset = NSButton(title: "Reset", target: self, action: #selector(resetRepository))
         continueButton.target = self; continueButton.action = #selector(continueOperation)
         skipButton.target = self; skipButton.action = #selector(skipOperation)
         abortButton.target = self; abortButton.action = #selector(abortOperation)
         let close = NSButton(title: "Close", target: self, action: #selector(close)); close.keyEquivalent = "\u{1b}"
+
+        let listButtons = NSStackView(views: [mergeToolButton, allMergeToolButton, toolMenuButton, rescan, reset])
+        listButtons.orientation = .vertical
+        listButtons.alignment = .leading
+        listButtons.spacing = 6
+        let listAndTools = NSStackView(views: [scroll, listButtons])
+        listAndTools.orientation = .horizontal
+        listAndTools.spacing = 8
+        scroll.widthAnchor.constraint(greaterThanOrEqualToConstant: 470).isActive = true
+        listButtons.widthAnchor.constraint(equalToConstant: 155).isActive = true
+
+        [descriptionLabel, localLabel, baseLabel, remoteLabel].forEach {
+            $0.lineBreakMode = .byTruncatingMiddle
+            $0.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        }
+        descriptionLabel.font = .systemFont(ofSize: 12, weight: .semibold)
+        sideSelector.selectedSegment = 0
+        sideSelector.target = self
+        sideSelector.action = #selector(changeSide)
+        let chooseButtons = NSStackView(views: [chooseLocalButton, chooseRemoteButton, chooseBaseButton, solvedButton, solvedAllButton])
+        chooseButtons.orientation = .horizontal
+        chooseButtons.spacing = 6
+        addChild(contentController)
+        let details = NSStackView(views: [descriptionLabel, localLabel, baseLabel, remoteLabel, chooseButtons, sideSelector, contentController.view])
+        details.orientation = .vertical
+        details.alignment = .leading
+        details.spacing = 5
+        contentController.view.widthAnchor.constraint(equalTo: details.widthAnchor).isActive = true
+        contentController.view.heightAnchor.constraint(greaterThanOrEqualToConstant: 150).isActive = true
+
         let spacer = NSView(); spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let buttons = NSStackView(views: [mergeToolButton, solved, rescan, spacer, continueButton, skipButton, abortButton, close])
+        let buttons = NSStackView(views: [spacer, continueButton, skipButton, abortButton, close])
         buttons.orientation = .horizontal; buttons.spacing = 6
-        let stack = NSStackView(views: [title, scroll, descriptionLabel, status, buttons])
+        let stack = NSStackView(views: [title, listAndTools, details, status, buttons])
         stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 8; stack.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(stack)
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 10), stack.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -10),
             stack.topAnchor.constraint(equalTo: root.topAnchor, constant: 10), stack.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -10),
-            scroll.widthAnchor.constraint(equalTo: stack.widthAnchor), scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 230), buttons.widthAnchor.constraint(equalTo: stack.widthAnchor)
+            listAndTools.widthAnchor.constraint(equalTo: stack.widthAnchor), listAndTools.heightAnchor.constraint(greaterThanOrEqualToConstant: 210),
+            details.widthAnchor.constraint(equalTo: stack.widthAnchor), buttons.widthAnchor.constraint(equalTo: stack.widthAnchor)
         ])
         view = root
+        contentController.onEncodingChanged = { [weak self] in self?.loadSelectedSideContent() }
         reloadState()
     }
     func numberOfRows(in tableView: NSTableView) -> Int { paths.count }
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        let cell = NSTableCellView(); let label = NSTextField(labelWithString: paths[row]); label.translatesAutoresizingMaskIntoConstraints = false; cell.addSubview(label)
-        NSLayoutConstraint.activate([label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 5), label.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -5), label.centerYAnchor.constraint(equalTo: cell.centerYAnchor)])
+        let cell = NSTableCellView()
+        let conflict = conflicts[row]
+        let isStatus = tableColumn?.identifier.rawValue == "Status"
+        let value = isStatus ? conflictKindTitle(conflict) : conflict.path
+        let label = NSTextField(labelWithString: value)
+        label.lineBreakMode = .byTruncatingMiddle
+        label.toolTip = value
+        label.translatesAutoresizingMaskIntoConstraints = false
+        cell.addSubview(label)
+        if isStatus {
+            NSLayoutConstraint.activate([label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 5), label.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -5), label.centerYAnchor.constraint(equalTo: cell.centerYAnchor)])
+        } else {
+            let symbol = conflict.isSubmodule ? "shippingbox" : (conflict.kind == .bothAdded ? "plus.square" : "exclamationmark.triangle")
+            let icon = NSImageView(image: NSImage(systemSymbolName: symbol, accessibilityDescription: conflictKindTitle(conflict)) ?? NSImage())
+            icon.contentTintColor = .systemOrange
+            icon.translatesAutoresizingMaskIntoConstraints = false
+            cell.addSubview(icon)
+            NSLayoutConstraint.activate([
+                icon.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 5),
+                icon.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+                icon.widthAnchor.constraint(equalToConstant: 16), icon.heightAnchor.constraint(equalToConstant: 16),
+                label.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 5),
+                label.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -5),
+                label.centerYAnchor.constraint(equalTo: cell.centerYAnchor)
+            ])
+        }
         return cell
     }
     func tableViewSelectionDidChange(_ notification: Notification) {
-        descriptionLabel.stringValue = table.selectedRow >= 0 ? paths[table.selectedRow] : "Select a file"
+        updateSelectionPresentation()
         updateMergeToolButton()
     }
     @objc private func rescan() { reloadState() }
@@ -721,8 +865,9 @@ private final class ConflictResolverViewController: NSViewController, NSTableVie
             guard let self else { return }
             do {
                 async let loadedState = source.loadMutationState()
+                async let loadedConflicts = source.loadConflicts()
                 async let configuredMergeTool = source.loadMergeToolConfiguration()
-                let (state, mergeTool) = try await (loadedState, configuredMergeTool)
+                let (state, conflictValues, mergeTool) = try await (loadedState, loadedConflicts, configuredMergeTool)
                 self.state = state
                 mergeToolConfiguration = mergeTool
                 mergeInProgress = state.mergeInProgress
@@ -732,14 +877,17 @@ private final class ConflictResolverViewController: NSViewController, NSTableVie
                 let selectedPaths = Set(self.table.selectedRowIndexes.compactMap {
                     $0 < self.paths.count ? self.paths[$0] : nil
                 })
-                paths = state.conflictedPaths; table.reloadData()
+                let previousRow = max(0, table.selectedRow)
+                conflicts = conflictValues
+                paths = conflictValues.map(\.path)
+                table.reloadData()
                 let restoredSelection = IndexSet(self.paths.indices.filter {
                     selectedPaths.contains(self.paths[$0])
                 })
                 if !restoredSelection.isEmpty {
                     table.selectRowIndexes(restoredSelection, byExtendingSelection: false)
                 } else if !paths.isEmpty {
-                    table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+                    table.selectRowIndexes(IndexSet(integer: min(previousRow, paths.count - 1)), byExtendingSelection: false)
                 }
                 status.stringValue = paths.isEmpty ? "No unresolved conflicts." : "\(paths.count) unresolved conflict(s)."
                 continueButton.isHidden = !(state.rebaseInProgress || state.cherryPickInProgress || mergeInProgress)
@@ -748,6 +896,8 @@ private final class ConflictResolverViewController: NSViewController, NSTableVie
                 abortButton.isHidden = !(state.rebaseInProgress || state.cherryPickInProgress || mergeInProgress)
                 continueButton.isEnabled = paths.isEmpty
                 updateMergeToolButton()
+                updateToolMenu()
+                updateSelectionPresentation()
                 if mergeInProgress,
                    paths.isEmpty,
                    hadMergeConflicts,
@@ -780,27 +930,342 @@ private final class ConflictResolverViewController: NSViewController, NSTableVie
             finish(repositoryChanged)
         }
     }
+
+    private var selectedConflicts: [RepositoryConflict] {
+        table.selectedRowIndexes.compactMap { conflicts.indices.contains($0) ? conflicts[$0] : nil }
+    }
+
+    private var actionState: ConflictResolverActionState {
+        ConflictResolverActionState(
+            selectedConflicts: selectedConflicts,
+            conflictCount: conflicts.count,
+            mergeToolConfiguration: mergeToolConfiguration
+        )
+    }
+
+    private func conflictKindTitle(_ conflict: RepositoryConflict) -> String {
+        if conflict.isSubmodule { return "Submodule" }
+        return switch conflict.kind {
+        case .bothModified: "Both modified"
+        case .bothAdded: "Both added"
+        case .deletedLocally: "Deleted locally"
+        case .deletedRemotely: "Deleted remotely"
+        case .unmerged: "Unmerged"
+        }
+    }
+
+    private func sideTitle(_ side: RepositoryConflictSide) -> String {
+        let rebase = state?.rebaseInProgress == true
+        return switch side {
+        case .base: "Base"
+        case .local: rebase ? "Local/current (theirs)" : "Local/current (ours)"
+        case .remote: rebase ? "Remote/incoming (ours)" : "Remote/incoming (theirs)"
+        }
+    }
+
+    private func versionText(_ version: RepositoryConflictVersion?) -> String {
+        guard let version else { return "deleted" }
+        return "\(version.path) @\(version.objectID.shortString)"
+    }
+
+    private func updateSelectionPresentation() {
+        sideContent.removeAll()
+        let values = selectedConflicts
+        let single = values.count == 1 ? values[0] : nil
+        if let conflict = single {
+            descriptionLabel.stringValue = "\(conflictKindTitle(conflict)): \(conflict.path)"
+            localLabel.stringValue = "\(sideTitle(.local)): \(versionText(conflict.local))"
+            baseLabel.stringValue = "Base: \(versionText(conflict.base))"
+            remoteLabel.stringValue = "\(sideTitle(.remote)): \(versionText(conflict.remote))"
+            loadSelectedSideContent()
+        } else {
+            descriptionLabel.stringValue = values.isEmpty ? "Select a file" : "\(values.count) conflicts selected"
+            localLabel.stringValue = "Local/current: —"
+            baseLabel.stringValue = "Base: —"
+            remoteLabel.stringValue = "Remote/incoming: —"
+            contentController.apply(file: nil, selectedPath: nil)
+        }
+        chooseLocalButton.isEnabled = !values.isEmpty
+        chooseRemoteButton.isEnabled = !values.isEmpty
+        chooseBaseButton.isEnabled = !values.isEmpty
+        solvedButton.isEnabled = !values.isEmpty
+        solvedAllButton.isEnabled = !paths.isEmpty
+        sideSelector.isEnabled = single != nil
+    }
+
+    @objc private func changeSide() {
+        selectedSide = switch sideSelector.selectedSegment {
+        case 1: .base
+        case 2: .remote
+        default: .local
+        }
+        loadSelectedSideContent()
+    }
+
+    private func loadSelectedSideContent() {
+        guard let conflict = selectedConflicts.first, selectedConflicts.count == 1 else { return }
+        let side = selectedSide
+        contentController.apply(file: nil, selectedPath: conflict.path)
+        contentTask?.cancel()
+        contentTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                guard let content = try await source.loadConflictContent(
+                    path: conflict.path,
+                    side: side,
+                    encoding: contentController.selectedEncoding
+                ) else {
+                    let missing = RepositoryFileContent(
+                        path: conflict.path,
+                        kind: .missing,
+                        text: "This side deleted the file.",
+                        data: Data()
+                    )
+                    sideContent[side] = missing
+                    contentController.apply(content: missing, revisionLabel: sideTitle(side))
+                    return
+                }
+                guard !Task.isCancelled,
+                      self.selectedConflicts.first?.path == conflict.path,
+                      self.selectedSide == side else { return }
+                sideContent[side] = content
+                contentController.apply(content: content, revisionLabel: sideTitle(side))
+            } catch is CancellationError {
+                return
+            } catch {
+                contentController.apply(error: error, selectedPath: conflict.path)
+            }
+        }
+    }
+
+    private func updateToolMenu() {
+        toolMenuButton.removeAllItems()
+        toolMenuButton.addItem(withTitle: "Configured tools…")
+        toolMenuButton.item(at: 0)?.isEnabled = false
+        for tool in mergeToolConfiguration?.availableTools ?? [] {
+            toolMenuButton.addItem(withTitle: tool)
+            toolMenuButton.lastItem?.representedObject = tool
+        }
+        toolMenuButton.isEnabled = toolMenuButton.numberOfItems > 1 && !selectedConflicts.isEmpty
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        let actions = actionState
+        guard actions.hasSelection else { return }
+        addMenuItem("Open in \(mergeToolConfiguration?.name ?? "mergetool")", action: #selector(openMergeTool), enabled: actions.canRunSelectedMergeTool, to: menu)
+        addMenuItem("Mark conflict as solved", action: #selector(markSolved), enabled: actions.canResolveSelection, to: menu)
+        addMenuItem("Mark all conflicts as solved", action: #selector(markAllSolved), enabled: actions.canResolveAll, to: menu)
+        menu.addItem(.separator())
+        addMenuItem(sideTitle(.local).replacingOccurrences(of: ":", with: ""), action: #selector(chooseLocal), enabled: true, to: menu)
+        addMenuItem(sideTitle(.remote).replacingOccurrences(of: ":", with: ""), action: #selector(chooseRemote), enabled: true, to: menu)
+        addMenuItem("Choose base", action: #selector(chooseBase), enabled: true, to: menu)
+        if actions.hasSingleSelection {
+            menu.addItem(.separator())
+            addMenuItem("Open local version", action: #selector(openLocalVersion), enabled: actions.hasLocalVersion, to: menu)
+            addMenuItem("Open remote version", action: #selector(openRemoteVersion), enabled: actions.hasRemoteVersion, to: menu)
+            addMenuItem("Open base version", action: #selector(openBaseVersion), enabled: actions.hasBaseVersion, to: menu)
+            addMenuItem("Save local as…", action: #selector(saveLocalVersion), enabled: actions.hasLocalVersion, to: menu)
+            addMenuItem("Save remote as…", action: #selector(saveRemoteVersion), enabled: actions.hasRemoteVersion, to: menu)
+            addMenuItem("Save base as…", action: #selector(saveBaseVersion), enabled: actions.hasBaseVersion, to: menu)
+            menu.addItem(.separator())
+            addMenuItem("Open working file", action: #selector(openWorkingFile), enabled: true, to: menu)
+            addMenuItem("Show in Finder", action: #selector(showWorkingFile), enabled: true, to: menu)
+            addMenuItem("File history", action: nil, enabled: false, to: menu)
+        }
+    }
+
+    private func addMenuItem(_ title: String, action: Selector?, enabled: Bool, to menu: NSMenu) {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        item.target = action == nil ? nil : self
+        item.isEnabled = enabled
+        menu.addItem(item)
+    }
+
+    @objc private func chooseLocal() { choose(.local) }
+    @objc private func chooseRemote() { choose(.remote) }
+    @objc private func chooseBase() { choose(.base) }
+
+    private func choose(_ side: RepositoryConflictSide) {
+        let values = selectedConflicts
+        guard !values.isEmpty else { return }
+        let missing = values.filter { $0.version(for: side) == nil }
+        if !missing.isEmpty {
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "Delete \(missing.count == 1 ? missing[0].path : "files")?"
+            alert.informativeText = "The selected \(sideTitle(side).lowercased()) side deleted \(missing.count == 1 ? "this file" : "\(missing.count) files"). Choosing it removes the corresponding working-tree path and stages the deletion."
+            alert.addButton(withTitle: "Delete")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
+        let selectedPaths = values.map(\.path)
+        run { try await $0.chooseConflictSide(paths: selectedPaths, side: side) }
+    }
+
+    @objc private func openLocalVersion() { openVersion(.local) }
+    @objc private func openRemoteVersion() { openVersion(.remote) }
+    @objc private func openBaseVersion() { openVersion(.base) }
+    @objc private func saveLocalVersion() { saveVersion(.local) }
+    @objc private func saveRemoteVersion() { saveVersion(.remote) }
+    @objc private func saveBaseVersion() { saveVersion(.base) }
+
+    private func loadContent(_ side: RepositoryConflictSide) async throws -> RepositoryFileContent? {
+        guard let conflict = selectedConflicts.first, selectedConflicts.count == 1 else { return nil }
+        if let content = sideContent[side] { return content }
+        return try await source.loadConflictContent(path: conflict.path, side: side, encoding: contentController.selectedEncoding)
+    }
+
+    private func openVersion(_ side: RepositoryConflictSide) {
+        guard let conflict = selectedConflicts.first, selectedConflicts.count == 1 else { return }
+        task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                guard let content = try await loadContent(side) else { return }
+                let directory = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("GitExtensionsMac-Conflict-\(UUID().uuidString)", isDirectory: true)
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                let name = URL(fileURLWithPath: conflict.path).lastPathComponent
+                let url = directory.appendingPathComponent("\(sideTitle(side).components(separatedBy: " ").first ?? "side")-\(name)")
+                try content.data.write(to: url, options: .atomic)
+                NSWorkspace.shared.open(url)
+            } catch { status.stringValue = error.localizedDescription }
+        }
+    }
+
+    private func saveVersion(_ side: RepositoryConflictSide) {
+        guard let conflict = selectedConflicts.first, selectedConflicts.count == 1 else { return }
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = URL(fileURLWithPath: conflict.path).lastPathComponent
+        guard panel.runModal() == .OK, let destination = panel.url else { return }
+        task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                guard let content = try await loadContent(side) else { return }
+                try content.data.write(to: destination, options: .atomic)
+                status.stringValue = "Saved \(sideTitle(side).lowercased()) version."
+            } catch { status.stringValue = error.localizedDescription }
+        }
+    }
+
+    @objc private func openWorkingFile() { performWorkingFileAction(reveal: false) }
+    @objc private func showWorkingFile() { performWorkingFileAction(reveal: true) }
+
+    private func performWorkingFileAction(reveal: Bool) {
+        guard let conflict = selectedConflicts.first, selectedConflicts.count == 1 else { return }
+        task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let url = try await source.conflictWorkingTreeURL(path: conflict.path)
+                if reveal { NSWorkspace.shared.activateFileViewerSelecting([url]) }
+                else { NSWorkspace.shared.open(url) }
+            } catch { status.stringValue = error.localizedDescription }
+        }
+    }
     private func updateMergeToolButton() {
-        let selectedCount = table.selectedRowIndexes.filter { $0 < paths.count }.count
-        mergeToolButton.isEnabled = selectedCount > 0 && mergeToolConfiguration != nil
+        let actions = actionState
+        mergeToolButton.isEnabled = actions.canRunSelectedMergeTool
+        allMergeToolButton.isEnabled = actions.canRunAllMergeTool
         if let mergeToolConfiguration {
             mergeToolButton.title = "Open in \(mergeToolConfiguration.name)"
             mergeToolButton.toolTip = "Open the selected conflict in \(mergeToolConfiguration.name)"
+            allMergeToolButton.toolTip = "Run \(mergeToolConfiguration.name) for every unresolved conflict"
         } else {
             mergeToolButton.title = "Open in mergetool"
             mergeToolButton.toolTip = "Configure merge.guitool or merge.tool in Git settings"
+            allMergeToolButton.toolTip = mergeToolButton.toolTip
         }
     }
     @objc private func openMergeTool() {
-        let selected = table.selectedRowIndexes.compactMap { $0 < paths.count ? paths[$0] : nil }
+        let selected = selectedConflicts
         guard !selected.isEmpty else { status.stringValue = "Select at least one conflict."; return }
-        status.stringValue = "Opening \(mergeToolConfiguration?.name ?? "merge tool")…"
-        run { try await $0.runMergeTool(paths: selected) }
+        startMergeTool(conflicts: selected, tool: nil)
+    }
+    @objc private func openAllInMergeTool() {
+        guard !paths.isEmpty else { return }
+        startMergeTool(conflicts: conflicts, tool: nil, useAllPathsMode: true)
+    }
+    @objc private func openSelectedConfiguredTool(_ sender: NSPopUpButton) {
+        guard let tool = sender.selectedItem?.representedObject as? String else { return }
+        sender.selectItem(at: 0)
+        let selected = selectedConflicts
+        guard !selected.isEmpty else { return }
+        startMergeTool(conflicts: selected, tool: tool)
+    }
+
+    private func startMergeTool(
+        conflicts: [RepositoryConflict],
+        tool: String?,
+        useAllPathsMode: Bool = false
+    ) {
+        task?.cancel()
+        task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                var containsBinary = false
+                for conflict in conflicts where !conflict.isSubmodule {
+                    let candidate = conflict.local != nil ? RepositoryConflictSide.local : .remote
+                    if let content = try await source.loadConflictContent(
+                        path: conflict.path,
+                        side: candidate,
+                        encoding: .automatic
+                    ), content.kind == .binary || content.kind == .image {
+                        containsBinary = true
+                        break
+                    }
+                }
+                if containsBinary {
+                    let alert = NSAlert()
+                    alert.alertStyle = .warning
+                    alert.messageText = "Open binary conflict in \(tool ?? mergeToolConfiguration?.name ?? "mergetool")?"
+                    alert.informativeText = "At least one selected file appears to be binary."
+                    alert.addButton(withTitle: "Open")
+                    alert.addButton(withTitle: "Cancel")
+                    guard alert.runModal() == .alertFirstButtonReturn else { return }
+                }
+                status.stringValue = "Opening \(tool ?? mergeToolConfiguration?.name ?? "merge tool")…"
+                await execute { source in
+                    try await source.runMergeTool(
+                        paths: useAllPathsMode ? [] : conflicts.map(\.path),
+                        tool: tool
+                    )
+                }
+            } catch { status.stringValue = error.localizedDescription }
+        }
     }
     @objc private func markSolved() {
-        let selected = table.selectedRowIndexes.map { paths[$0] }
+        let selected = selectedConflicts.map(\.path)
         guard !selected.isEmpty else { status.stringValue = "Select at least one conflict."; return }
         run { try await $0.stage(paths: selected) }
+    }
+    @objc private func markAllSolved() {
+        guard !paths.isEmpty else { return }
+        let allPaths = paths
+        run { try await $0.stage(paths: allPaths) }
+    }
+    @objc private func resetRepository() {
+        guard let panel else { return }
+        let first = NSAlert()
+        first.alertStyle = .warning
+        first.messageText = "Reset conflict resolution?"
+        first.informativeText = "A hard reset deletes all changes since the last commit."
+        first.addButton(withTitle: "Continue")
+        first.addButton(withTitle: "Cancel")
+        guard first.runModal() == .alertFirstButtonReturn else { return }
+        let second = NSAlert()
+        second.alertStyle = .critical
+        second.messageText = "Delete all changes?"
+        second.informativeText = "This action cannot be undone."
+        second.addButton(withTitle: "Reset")
+        second.addButton(withTitle: "Cancel")
+        guard second.runModal() == .alertFirstButtonReturn else { return }
+        task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await execute(sequencerAction: .aborted) { source in
+                try await source.resetChanges(RepositoryResetChangesRequest(scope: .all, deleteUntracked: false))
+            }
+            panel.orderOut(nil)
+        }
     }
     @objc private func continueOperation() {
         guard let state else { return }
@@ -905,6 +1370,8 @@ private final class ConflictResolverViewController: NSViewController, NSTableVie
     private func finish(_ changed: Bool) {
         guard !didClose else { return }
         didClose = true
+        task?.cancel()
+        contentTask?.cancel()
         commitWindowController?.close()
         onClose?(ConflictResolutionResult(repositoryChanged: changed, sequencerAction: sequencerAction))
     }

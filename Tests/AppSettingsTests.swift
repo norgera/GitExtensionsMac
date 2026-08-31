@@ -13,10 +13,14 @@ enum AppSettingsTests {
         testPushPreferencesRoundTrip()
         testStashPreferencesRoundTrip()
         testTagPreferencesRoundTrip()
+        testRemoteManagementPreferencesRoundTrip()
+        testRemoteManagementSelectionRestoration()
+        testRepositoryTreePreferencesRoundTrip()
         testMergePreferencesRoundTrip()
         testCheckoutBranchPreferencesRoundTrip()
         testCommitPreferencesRoundTrip()
         testFileStatusListPreferencesRoundTrip()
+        testFileViewerPreferencesRoundTrip()
         testCommitMessageRules()
         testRecentRepositories()
         print("AppSettingsTests: passed")
@@ -42,6 +46,64 @@ enum AppSettingsTests {
             store.saveTagPreferences(preferences)
             precondition(AppSettingsStore(defaults: defaults).tagPreferences == preferences)
         }
+    }
+
+    private static func testRemoteManagementPreferencesRoundTrip() {
+        withStore { store, defaults in
+            var preferences = store.remoteManagementPreferences
+            preferences.showAdvancedOptions = true
+            preferences.windowWidth = 1_080
+            preferences.windowHeight = 620
+            store.saveRemoteManagementPreferences(preferences)
+            store.recordRemoteURL("ssh://example/repository")
+            store.recordRemoteURL("ssh://example/repository")
+            store.replaceRemoteURLHistory("ssh://example/repository", with: "/tmp/repository with spaces")
+            let reloaded = AppSettingsStore(defaults: defaults).remoteManagementPreferences
+            precondition(reloaded.showAdvancedOptions)
+            precondition(reloaded.windowWidth == 1_080 && reloaded.windowHeight == 620)
+            precondition(reloaded.recentURLs == ["/tmp/repository with spaces"])
+        }
+    }
+
+    private static func testRepositoryTreePreferencesRoundTrip() {
+        withStore { store, defaults in
+            var preferences = store.repositoryTreePreferences
+            preferences.visibleRoots.remove(.submodules)
+            preferences.rootOrder = [.tags, .branches, .remotes, .worktrees, .submodules, .stashes]
+            preferences.sortBy = .creatorDate
+            preferences.sortOrder = .descending
+            store.saveRepositoryTreePreferences(preferences)
+            let restored = AppSettingsStore(defaults: defaults).repositoryTreePreferences
+            precondition(restored == preferences)
+        }
+
+        var malformed = RepositoryTreePreferences()
+        malformed.rootOrder = [.branches, .branches]
+        malformed.visibleRoots.insert(.tags)
+        malformed.normalize()
+        precondition(malformed.rootOrder == RepositoryTreeRoot.allCases)
+    }
+
+    private static func testRemoteManagementSelectionRestoration() {
+        let remotes = [
+            RepositoryRemoteConfiguration(
+                name: "origin", fetchURL: "/tmp/origin", pushURL: nil,
+                puttyKeyFile: nil, color: nil, prefix: nil, pushRefSpecs: [], isDisabled: false
+            ),
+            RepositoryRemoteConfiguration(
+                name: "upstream", fetchURL: "/tmp/upstream", pushURL: nil,
+                puttyKeyFile: nil, color: nil, prefix: nil, pushRefSpecs: [], isDisabled: true
+            )
+        ]
+        precondition(RemoteManagementSelectionResolver.preferredRemoteName(configurations: remotes, requested: "upstream") == "upstream")
+        precondition(RemoteManagementSelectionResolver.preferredRemoteName(configurations: remotes, requested: "deleted") == "origin")
+
+        let tracking = [
+            RepositoryBranchTrackingConfiguration(branchName: "main", remoteName: "origin", mergeBranch: "main"),
+            RepositoryBranchTrackingConfiguration(branchName: "topic", remoteName: nil, mergeBranch: nil)
+        ]
+        precondition(RemoteManagementSelectionResolver.preferredLocalBranch(configurations: tracking, requested: "topic") == "topic")
+        precondition(RemoteManagementSelectionResolver.preferredLocalBranch(configurations: tracking, requested: "deleted") == "main")
     }
 
     private static func testRecentRepositories() {
@@ -215,6 +277,21 @@ enum AppSettingsTests {
             )
             store.saveFileStatusListPreferences(preferences)
             precondition(AppSettingsStore(defaults: defaults).fileStatusListPreferences == preferences)
+        }
+    }
+
+    private static func testFileViewerPreferencesRoundTrip() {
+        withStore { store, defaults in
+            var preferences = store.fileViewerPreferences
+            preferences.whitespace = .changes
+            preferences.contextLines = 8
+            preferences.showsEntireFile = true
+            preferences.treatsAllFilesAsText = true
+            preferences.showsNonPrintingCharacters = true
+            preferences.showsSyntaxHighlighting = false
+            preferences.textEncoding = .windows1252
+            store.saveFileViewerPreferences(preferences)
+            precondition(AppSettingsStore(defaults: defaults).fileViewerPreferences == preferences)
         }
     }
 
