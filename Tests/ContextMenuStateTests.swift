@@ -104,8 +104,21 @@ enum ContextMenuStateTests {
         expect(menu.entry(id: "revision.branch.delete")?.isEnabled == false, "revision: deleting the current branch remains visible but disabled")
         expect(menu.entry(id: "revision.branch.rename")?.isEnabled == true, "revision: current branch can be renamed")
         expect(menu.entry(id: "revision.branch.push")?.isEnabled == true, "revision: current branch can be pushed")
+        expect(menu.entry(id: "revision.branch.resetCurrent")?.isEnabled == true, "revision: real commit can reset current branch")
+        expect(menu.entry(id: "revision.branch.resetOther")?.isEnabled == true, "revision: real commit can reset another branch")
         expect(menu.entry(id: "revision.compare.selected")?.isEnabled == true, "revision: a single commit compares with its parent")
         expect(menu.entry(id: "revision.navigate.parent")?.isEnabled == true, "revision: parent navigation follows topology")
+
+        var bareContext = RevisionContextMenuContext(
+            focusedCommit: focused,
+            selectedCommits: [focused],
+            history: [focused, parent],
+            currentBranchName: "main"
+        )
+        bareContext.isBareRepository = true
+        let bareMenu = RevisionContextMenuBuilder.build(bareContext)
+        expect(bareMenu.entry(id: "revision.branch.resetCurrent") == nil, "revision: bare repositories cannot reset current branch")
+        expect(bareMenu.entry(id: "revision.branch.resetOther") == nil, "revision: bare repositories cannot reset another branch")
     }
 
     private static func testNonCurrentRevisionRefCommands() {
@@ -159,6 +172,8 @@ enum ContextMenuStateTests {
         )
         expect(menu.entry(id: "revision.branch.merge") == nil, "revision: artificial revisions cannot be merged")
         expect(menu.entry(id: "revision.branch.create") == nil, "revision: artificial revisions cannot create branches")
+        expect(menu.entry(id: "revision.branch.resetCurrent") == nil, "revision: artificial revisions cannot reset current branch")
+        expect(menu.entry(id: "revision.branch.resetOther") == nil, "revision: artificial revisions cannot reset another branch")
     }
 
     private static func testRevisionStashCommands() {
@@ -253,6 +268,7 @@ enum ContextMenuStateTests {
         expect(menu.entry(id: "repository.branch.checkout") == nil, "tree: current branch checkout is omitted")
         expect(menu.entry(id: "repository.branch.merge") == nil, "tree: current branch self-merge is omitted")
         expect(menu.entry(id: "repository.branch.create")?.isEnabled == true, "tree: create from current branch enabled")
+        expect(menu.entry(id: "repository.branch.reset")?.isEnabled == true, "tree: current branch can reset tracked changes at HEAD")
         expect(menu.entry(id: "repository.branch.rename")?.isEnabled == true, "tree: current branch rename enabled")
         expect(menu.entry(id: "repository.branch.delete") == nil, "tree: current branch delete is omitted")
         expect(menu.entry(id: "repository.branch.push") == nil, "tree: current branch push is omitted")
@@ -282,6 +298,25 @@ enum ContextMenuStateTests {
                 expect(menu.entry(id: "repository.tag.delete")?.isEnabled == true, "tag tree: local deletion remains available in bare repositories")
             }
             expect(menu.entry(id: identifier)?.isEnabled == false, "tree: \(identifier) is disabled in a bare repository")
+        }
+
+        for (kind, identifier) in [
+            (RepositoryMenuNodeKind.localBranch(isCurrent: false), "repository.branch.reset"),
+            (.remoteBranch, "repository.remoteBranch.reset"),
+            (.tag, "repository.tag.reset")
+        ] {
+            var context = RepositoryContextMenuContext(
+                focused: kind,
+                selected: [kind],
+                selectedHaveChildren: false,
+                selectedHaveExpandableChildren: false,
+                selectedHaveCollapsibleChildren: false
+            )
+            var menu = RepositoryContextMenuBuilder.build(context)
+            expect(menu.entry(id: identifier)?.isEnabled == true, "tree reset: \(identifier) is available")
+            context.isBareRepository = true
+            menu = RepositoryContextMenuBuilder.build(context)
+            expect(menu.entry(id: identifier)?.isEnabled == false, "tree reset: \(identifier) is disabled when bare")
         }
     }
 

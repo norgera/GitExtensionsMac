@@ -533,6 +533,8 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
                     || identifier.hasPrefix("revision.branch.checkout.ref.")
                     || identifier.hasPrefix("revision.branch.merge.")
                     || identifier.hasPrefix("revision.branch.rebase.")
+                    || identifier == "revision.branch.resetCurrent"
+                    || identifier == "revision.branch.resetOther"
                     || identifier.hasPrefix("revision.tag.")
             },
             target: self,

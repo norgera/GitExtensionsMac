@@ -18,6 +18,7 @@ final class RepositoryStartupViewController: NSViewController, NSTableViewDataSo
     var onOpenRepository: (() -> Void)?
     var onOpenRecentRepository: ((URL) -> Void)?
     var onCloneRepository: (() -> Void)?
+    var onInitializeRepository: (() -> Void)?
     var onSettings: (() -> Void)?
 
     private let store: AppSettingsStore
@@ -48,8 +49,9 @@ final class RepositoryStartupViewController: NSViewController, NSTableViewDataSo
         open.keyEquivalent = "o"
         open.keyEquivalentModifierMask = .command
         let clone = commandButton("Clone repository…", action: #selector(cloneRepository))
+        let create = commandButton("Create new repository…", action: #selector(initializeRepository))
         let settings = commandButton("Settings…", action: #selector(openSettings))
-        let leftStack = NSStackView(views: [logo, startTitle, open, clone, settings])
+        let leftStack = NSStackView(views: [logo, startTitle, open, clone, create, settings])
         leftStack.orientation = .vertical
         leftStack.alignment = .leading
         leftStack.spacing = 9
@@ -171,6 +173,7 @@ final class RepositoryStartupViewController: NSViewController, NSTableViewDataSo
 
     @objc private func openRepository() { onOpenRepository?() }
     @objc private func cloneRepository() { onCloneRepository?() }
+    @objc private func initializeRepository() { onInitializeRepository?() }
     @objc private func openSettings() { onSettings?() }
 
     @objc private func openSelectedRecent() {
@@ -233,21 +236,6 @@ enum ApplicationShellDialogs {
             }
             window.beginSheet(panel) { _ in continuation.resume() }
         }
-    }
-
-    static func cloneShell(from window: NSWindow) async {
-        let alert = NSAlert()
-        alert.messageText = "Clone repository"
-        alert.informativeText = "Repository networking is not implemented yet. The clone request can be configured but cannot be executed."
-        alert.addButton(withTitle: "Clone")
-        alert.addButton(withTitle: "Cancel")
-        alert.buttons[0].isEnabled = false
-        let stack = formStack()
-        stack.addArrangedSubview(labeled("Repository URL:", NSTextField(string: ""), width: 410))
-        stack.addArrangedSubview(labeled("Destination:", NSTextField(string: ""), width: 410))
-        stack.addArrangedSubview(checkBox("Recursive submodules", false))
-        alert.accessoryView = accessory(for: stack, width: 540)
-        _ = await begin(alert, for: window)
     }
 
     static func presentNetworkWindow(

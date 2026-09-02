@@ -8,6 +8,8 @@ enum AppSettingsTests {
     static func run() {
         testPreferencesRoundTrip()
         testPullPreferencesRoundTrip()
+        testRepositoryCreationPreferencesRoundTrip()
+        testResetPreferencesRoundTrip()
         testRebasePreferencesRoundTrip()
         testCherryPickPreferencesRoundTrip()
         testPushPreferencesRoundTrip()
@@ -35,6 +37,35 @@ enum AppSettingsTests {
             preferences.mergeCommonParentLanes = false
             store.save(preferences)
             precondition(AppSettingsStore(defaults: defaults).preferences == preferences)
+        }
+    }
+
+    private static func testRepositoryCreationPreferencesRoundTrip() {
+        withStore { store, defaults in
+            var preferences = store.repositoryCreationPreferences
+            preferences.cloneDestinationPath = "/tmp/Clones"
+            preferences.cloneWindowWidth = 720
+            store.saveRepositoryCreationPreferences(preferences)
+            store.recordCloneSource("ssh://example.test/repository.git")
+            store.recordCloneSource("ssh://example.test/repository.git")
+            let restored = AppSettingsStore(defaults: defaults).repositoryCreationPreferences
+            precondition(restored.cloneDestinationPath == "/tmp/Clones")
+            precondition(restored.cloneWindowWidth == 720)
+            precondition(restored.recentSources == ["ssh://example.test/repository.git"])
+            let cloned = URL(fileURLWithPath: "/tmp/Clones/repository", isDirectory: true)
+            store.recordRecentRepository(cloned)
+            precondition(store.recentRepositories.first?.path == cloned.path)
+            precondition(store.lastRepositoryPath == nil)
+        }
+    }
+
+    private static func testResetPreferencesRoundTrip() {
+        withStore { store, defaults in
+            var preferences = store.resetPreferences
+            precondition(preferences.checkoutOtherBranchAfterReset)
+            preferences.checkoutOtherBranchAfterReset = false
+            store.saveResetPreferences(preferences)
+            precondition(AppSettingsStore(defaults: defaults).resetPreferences == preferences)
         }
     }
 

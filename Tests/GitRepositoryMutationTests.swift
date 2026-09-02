@@ -216,7 +216,7 @@ enum GitRepositoryMutationTests {
             ), messageFile: path)
             throw MutationFixtureError("tags: specific-key signing accepted an empty key")
         } catch RepositoryTagError.missingSigningKey {
-            // Expected without invoking GPG or requiring a private key.
+            // Expected.
         }
         try require(
             specificallySigned.accessesRemote == false && specificallySigned.changesRepositoryState,

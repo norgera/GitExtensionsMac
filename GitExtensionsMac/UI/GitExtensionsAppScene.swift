@@ -50,7 +50,7 @@ private struct GitExtensionsMenuCommands: Commands {
 
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
-            Button("New repository…") { perform(.unavailable("New repository")) }
+            Button("New repository…") { perform(.initializeRepository) }
             Button("Open repository…") { perform(.openRepository) }
                 .keyboardShortcut("o", modifiers: .command)
             Button("Clone repository…") { perform(.cloneRepository) }
@@ -117,7 +117,8 @@ private struct GitExtensionsMenuCommands: Commands {
             Button("Push…") { perform(.push) }
             Divider()
             Button("Manage stashes…") { perform(.manageStashes) }
-            Button("Reset changes…") { perform(.unavailable("Reset changes")) }
+            Button("Reset changes…") { perform(.resetChanges) }
+                .disabled(!availability.canReset)
             Button("Clean working directory…") { perform(.unavailable("Clean working directory")) }
             Divider()
             Button("Create branch…") { perform(.createBranch) }

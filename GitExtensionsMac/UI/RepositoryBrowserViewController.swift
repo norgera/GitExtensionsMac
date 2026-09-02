@@ -827,6 +827,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         case .deleteTag:
             uiCommands.startDeleteTag()
         case .manageStashes: uiCommands.startStashManagement()
+        case .resetChanges: uiCommands.startResetChanges()
         case .solveMergeConflicts: uiCommands.startConflictResolution()
         case .cherryPick:
             if let commit = revisions.first(where: { $0.id == selectedCommitID && !$0.isArtificial }) {
@@ -902,6 +903,8 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             && state.identity.headID != nil
         BrowserCommandAvailability.shared.canDeleteTag = repositoryModule is any RepositoryTagManagingDataSource
             && !state.references.tags.isEmpty
+        BrowserCommandAvailability.shared.canReset = !state.identity.currentRepository.isBare
+            && repositoryModule is any RepositoryResettingDataSource
         outlineController.apply(
             identity: state.identity,
             references: state.references,
@@ -1399,6 +1402,8 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         case ("repository.branch.merge", .branch(let branch)):
             guard !branch.isCurrent else { return }
             uiCommands.startMergeBranches(initialTarget: branch.name)
+        case ("repository.branch.reset", .branch(let branch)):
+            uiCommands.startResetCurrentBranch(to: branch.commitID, label: branch.name)
         case ("repository.remoteBranch.checkout", .remoteBranch(let branch)):
             uiCommands.checkout(.remote(branch), confirmDirectCheckout: true)
         case ("repository.remoteBranch.create", .remoteBranch(let branch)):
@@ -1407,6 +1412,9 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         case ("repository.remoteBranch.merge", .remoteBranch(let branch)):
             guard let remote = branch.remoteName else { return }
             uiCommands.startMergeBranches(initialTarget: "\(remote)/\(branch.name)")
+        case ("repository.remoteBranch.reset", .remoteBranch(let branch)):
+            let name = branch.remoteName.map { "\($0)/\(branch.name)" } ?? branch.name
+            uiCommands.startResetCurrentBranch(to: branch.commitID, label: name)
         case ("repository.remoteBranch.delete", .remoteBranch(let branch)):
             presentRemoteBranchDeleteWindow(branch)
         case ("repository.remoteBranch.fetch", .remoteBranch(let branch)):
@@ -1453,6 +1461,8 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             uiCommands.deleteBranches(initiallySelected: localBranchNames(in: node))
         case ("repository.tag.merge", .tag(let tag)):
             uiCommands.startMergeBranches(initialTarget: tag.name)
+        case ("repository.tag.reset", .tag(let tag)):
+            uiCommands.startResetCurrentBranch(to: tag.commitID, label: tag.name)
         case ("repository.branch.rebase", .branch(let branch)),
              ("repository.remoteBranch.rebase", .remoteBranch(let branch)):
             guard let commit = revisions.first(where: { $0.id == .object(branch.commitID) }) else { return }
@@ -1552,6 +1562,16 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             guard !focused.isArtificial else { return }
             let boundary = selected.first(where: { $0.id != focused.id && !$0.isArtificial })?.objectID?.string
             uiCommands.startRebase(on: focused, interactive: false, advancedFrom: boundary, showAdvancedOptions: true)
+            return
+        }
+        if identifier == "revision.branch.resetCurrent" {
+            guard !focused.isArtificial else { return }
+            uiCommands.startResetCurrentBranch(to: focused)
+            return
+        }
+        if identifier == "revision.branch.resetOther" {
+            guard !focused.isArtificial else { return }
+            uiCommands.startResetAnotherBranch(to: focused)
             return
         }
         if identifier == "revision.commit.edit" || identifier == "revision.commit.reword" {

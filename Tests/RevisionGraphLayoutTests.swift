@@ -102,6 +102,25 @@ private enum RevisionGraphLayoutTests {
             print("ConflictResolverTests: passed")
             return
         }
+        if CommandLine.arguments.contains("--repository-creation-only") {
+            do {
+                try await GitRepositoryCreationTests.run()
+            } catch {
+                fatalError("GitRepositoryCreationTests failed: \(error.localizedDescription)")
+            }
+            return
+        }
+        if CommandLine.arguments.contains("--reset-only") {
+            ContextMenuStateTests.run()
+            AppSettingsTests.run()
+            RepositoryChangedNotifierTests.run()
+            do {
+                try await GitResetTests.run()
+            } catch {
+                fatalError("GitResetTests failed: \(error.localizedDescription)")
+            }
+            return
+        }
         testObjectIdentity()
         testLinearHistory()
         testRelativeGraphState()
@@ -137,6 +156,8 @@ private enum RevisionGraphLayoutTests {
             try await GitRepositoryMutationTests.runTags()
             try await GitPullTests.run()
             try await GitPushTests.run()
+            try await GitRepositoryCreationTests.run()
+            try await GitResetTests.run()
             if let flagIndex = CommandLine.arguments.firstIndex(of: "--verify-mutations"),
                CommandLine.arguments.indices.contains(flagIndex + 1) {
                 try await GitRepositoryMutationTests.verifyDisposableClone(

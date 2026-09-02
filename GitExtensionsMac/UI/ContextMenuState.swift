@@ -188,7 +188,7 @@ enum RevisionContextMenuBuilder {
                 ]
             ))
         }
-        if !context.isBareRepository {
+        if !revision.isArtificial && !context.isBareRepository {
             entries.append(command("revision.branch.resetCurrent", "Reset current branch to here…"))
         }
         entries.append(.separator)
@@ -505,6 +505,7 @@ enum RepositoryContextMenuBuilder {
             if isCurrent {
                 return [
                     command("repository.branch.create", "Create branch…", enabled: !isBareRepository),
+                    command("repository.branch.reset", "Reset current branch to here…", enabled: !isBareRepository),
                     .separator,
                     command("repository.branch.rename", "Rename branch…")
                 ]
@@ -515,7 +516,7 @@ enum RepositoryContextMenuBuilder {
                 command("repository.branch.merge", "Merge into current branch…", enabled: canMoveHEAD),
                 command("repository.branch.rebase", "Rebase current branch on this branch…", enabled: canMoveHEAD),
                 command("repository.branch.create", "Create branch…", enabled: !isBareRepository),
-                command("repository.branch.reset", "Reset current branch to here…", enabled: false),
+                command("repository.branch.reset", "Reset current branch to here…", enabled: !isBareRepository),
                 .separator,
                 command("repository.branch.rename", "Rename branch…"),
                 command("repository.branch.delete", "Delete branch…", enabled: canMoveHEAD)
@@ -538,7 +539,7 @@ enum RepositoryContextMenuBuilder {
                 command("repository.remoteBranch.merge", "Merge into current branch…", enabled: !isBareRepository),
                 command("repository.remoteBranch.rebase", "Rebase current branch on this remote branch…", enabled: !isBareRepository),
                 command("repository.remoteBranch.create", "Create branch…", enabled: !isBareRepository),
-                command("repository.remoteBranch.reset", "Reset current branch to here…", enabled: false),
+                command("repository.remoteBranch.reset", "Reset current branch to here…", enabled: !isBareRepository),
                 .separator,
                 command("repository.remoteBranch.fetch", "Fetch branch"),
                 command("repository.remoteBranch.pull", "Pull from remote branch", enabled: !isBareRepository),
@@ -555,7 +556,7 @@ enum RepositoryContextMenuBuilder {
                 command("repository.tag.merge", "Merge into current branch…", enabled: !isBareRepository),
                 command("repository.tag.rebase", "Rebase current branch on this tag revision…", enabled: !isBareRepository),
                 command("repository.tag.createBranch", "Create branch…", enabled: !isBareRepository),
-                command("repository.tag.reset", "Reset current branch to here…", enabled: false),
+                command("repository.tag.reset", "Reset current branch to here…", enabled: !isBareRepository),
                 .separator,
                 command("repository.tag.delete", "Delete tag…")
             ]

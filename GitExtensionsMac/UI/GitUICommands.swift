@@ -354,6 +354,154 @@ final class GitUICommands {
         makeCheckoutWorkflowCoordinator()?.checkoutRevision(commit)
     }
 
+    func startResetCurrentBranch(to target: Commit) {
+        guard let browser,
+              let owner = browser.view.window,
+              let identity = browser.repositoryIdentity,
+              !identity.currentRepository.isBare,
+              let targetID = target.objectID,
+              let source = repositoryModule as? any RepositoryResettingDataSource else {
+            browser?.showPlaceholderStatus("Reset is unavailable for this repository")
+            return
+        }
+        let currentBranch = browser.repositoryReferences?.branches.first(where: \.isCurrent)?.name
+        Task { @MainActor [weak self, weak browser, weak owner] in
+            guard let self, let browser, let owner else { return }
+            guard let mode = await ResetDialogs.resetCurrentBranch(
+                branchName: currentBranch,
+                target: target,
+                owner: owner
+            ) else {
+                browser.statusLabel.stringValue = "Reset cancelled"
+                return
+            }
+            await Task.yield()
+            if mode == .hard, !(await ResetDialogs.confirmHardReset(owner: owner)) {
+                browser.statusLabel.stringValue = "Reset cancelled"
+                return
+            }
+            do {
+                let hasChangedTarget = identity.headID != targetID
+                let hasSubmodules = !(browser.repositoryNavigation?.submodules.isEmpty ?? true)
+                let updateSubmodules: Bool
+                if hasChangedTarget, hasSubmodules {
+                    if let preference = AppSettingsStore.shared.checkoutBranchPreferences.updateSubmodulesOnCheckout {
+                        updateSubmodules = preference
+                    } else if mode == .hard {
+                        updateSubmodules = await ResetDialogs.confirmUpdateSubmodules(owner: owner)
+                    } else {
+                        updateSubmodules = false
+                    }
+                } else {
+                    updateSubmodules = false
+                }
+                let result = try await source.resetCurrentBranch(RepositoryResetCurrentBranchRequest(
+                    target: targetID,
+                    mode: mode,
+                    updateSubmodules: updateSubmodules
+                ))
+                notifyRepositoryChanged(preferredCommitID: result.selectedCommitID)
+                browser.statusLabel.stringValue = result.message
+                if case .completedWithSubmoduleUpdateFailure(let detail) = result.outcome {
+                    await ResetDialogs.showError(
+                        RepositoryResetFollowUpError(detail: detail),
+                        title: "Reset completed; submodule update failed",
+                        owner: owner
+                    )
+                }
+            } catch {
+                await ResetDialogs.showError(error, title: "Reset failed", owner: owner)
+            }
+        }
+    }
+
+    func startResetCurrentBranch(to targetID: ObjectID, label: String) {
+        guard let browser else { return }
+        let target = browser.revisions.first(where: { $0.objectID == targetID })
+            ?? RevisionCommitBuilder.placeholderRevision(id: targetID, subject: label)
+        startResetCurrentBranch(to: target)
+    }
+
+    func startResetAnotherBranch(to target: Commit) {
+        guard let browser,
+              let owner = browser.view.window,
+              let identity = browser.repositoryIdentity,
+              !identity.currentRepository.isBare,
+              let targetID = target.objectID,
+              let references = browser.repositoryReferences,
+              let source = repositoryModule as? any RepositoryResettingDataSource else {
+            browser?.showPlaceholderStatus("Reset is unavailable for this repository")
+            return
+        }
+        let currentBranch = references.branches.first(where: \.isCurrent)?.name
+        Task { @MainActor [weak self, weak browser, weak owner] in
+            guard let self, let browser, let owner else { return }
+            guard let value = await ResetDialogs.resetAnotherBranch(
+                source: source,
+                branches: references.branches,
+                localReferences: references.references,
+                currentBranchName: currentBranch,
+                target: target,
+                owner: owner
+            ) else {
+                browser.statusLabel.stringValue = "Reset cancelled"
+                return
+            }
+            do {
+                let result = try await source.resetAnotherBranch(RepositoryResetAnotherBranchRequest(
+                    branch: value.branch.name,
+                    target: targetID,
+                    force: value.force
+                ))
+                notifyRepositoryChanged(preferredCommitID: result.selectedCommitID)
+                browser.statusLabel.stringValue = result.message
+                if value.checkoutAfterReset {
+                    startCheckoutBranch(initialTarget: .local(value.branch))
+                }
+            } catch {
+                await ResetDialogs.showError(error, title: "Reset branch failed", owner: owner)
+            }
+        }
+    }
+
+    func startResetChanges() {
+        guard let browser,
+              let owner = browser.view.window,
+              let identity = browser.repositoryIdentity,
+              !identity.currentRepository.isBare,
+              let source = repositoryModule as? any RepositoryResettingDataSource else {
+            browser?.showPlaceholderStatus("Reset changes is unavailable for this repository")
+            return
+        }
+        Task { @MainActor [weak self, weak browser, weak owner] in
+            guard let self, let browser, let owner else { return }
+            do {
+                let state = try await source.loadMutationState()
+                let hasTracked = state.hasStagedChanges || state.hasUnstagedChanges || !state.conflictedPaths.isEmpty
+                guard hasTracked || state.hasUntrackedFiles else {
+                    browser.statusLabel.stringValue = "There are no changes to reset."
+                    return
+                }
+                guard let deleteUntracked = await ResetDialogs.confirmResetChanges(
+                    hasTrackedChanges: hasTracked,
+                    hasUntrackedFiles: state.hasUntrackedFiles,
+                    owner: owner
+                ) else {
+                    browser.statusLabel.stringValue = "Reset cancelled"
+                    return
+                }
+                let result = try await source.resetChanges(RepositoryResetChangesRequest(
+                    scope: .all,
+                    deleteUntracked: deleteUntracked
+                ))
+                notifyRepositoryChanged(preferredCommitID: result.selectedCommitID)
+                browser.statusLabel.stringValue = result.message
+            } catch {
+                await ResetDialogs.showError(error, title: "Reset changes failed", owner: owner)
+            }
+        }
+    }
+
     func checkout(_ target: CheckoutDialogTarget, confirmDirectCheckout: Bool = false) {
         makeCheckoutWorkflowCoordinator()?.checkout(
             target,

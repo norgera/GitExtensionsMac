@@ -86,6 +86,7 @@ final class ApplicationHostViewController: NSViewController {
         case .openRepository: presentOpenRepositoryPanel()
         case .closeToDashboard: showDashboard()
         case .cloneRepository: presentCloneShell()
+        case .initializeRepository: presentInitializeRepository()
         case .settings: presentSettings()
         case .clearRecentRepositories:
             store.clearRecentRepositories()
@@ -102,6 +103,7 @@ final class ApplicationHostViewController: NSViewController {
         controller.onOpenRepository = { [weak self] in self?.presentOpenRepositoryPanel() }
         controller.onOpenRecentRepository = { [weak self] url in self?.openRepository(url) }
         controller.onCloneRepository = { [weak self] in self?.presentCloneShell() }
+        controller.onInitializeRepository = { [weak self] in self?.presentInitializeRepository() }
         controller.onSettings = { [weak self] in self?.presentSettings() }
         install(controller)
         view.window?.title = "Git Extensions"
@@ -116,6 +118,7 @@ final class ApplicationHostViewController: NSViewController {
             case .openRepository: self.presentOpenRepositoryPanel()
             case .closeToDashboard: self.showDashboard()
             case .cloneRepository: self.presentCloneShell()
+            case .initializeRepository: self.presentInitializeRepository()
             case .settings: self.presentSettings()
             case .clearRecentRepositories:
                 self.store.clearRecentRepositories()
@@ -193,6 +196,53 @@ final class ApplicationHostViewController: NSViewController {
 
     private func presentCloneShell() {
         guard let window = view.window else { return }
-        Task { await ApplicationShellDialogs.cloneShell(from: window) }
+        let creator = repositoryCreator()
+        let context = (activeController as? RepositoryBrowserViewController)?.networkContext
+        let trackingRemote = context?.branches.first(where: { $0.isCurrent })?.remoteName
+        let suggestedRemote = context?.remotes.first(where: { $0.name == trackingRemote })
+            ?? context?.remotes.first(where: { $0.name.caseInsensitiveCompare("origin") == .orderedSame })
+            ?? context?.remotes.first
+        GitUICommands.startCloneRepository(
+            source: creator,
+            owner: window,
+            initialSource: suggestedRemote?.fetchURL,
+            initialDestination: context.map {
+                URL(fileURLWithPath: $0.repository.path, isDirectory: true).deletingLastPathComponent()
+            }
+        ) { [weak self, weak window] result in
+            guard let self else { return }
+            store.recordRecentRepository(result.repositoryURL)
+            (activeController as? RepositoryStartupViewController)?.reloadRecents()
+            let alert = NSAlert()
+            alert.messageText = "Repository cloned successfully"
+            alert.informativeText = "Do you want to open \(result.repositoryURL.path) now?"
+            alert.addButton(withTitle: "Open repository")
+            alert.addButton(withTitle: "Not now")
+            let completion: (NSApplication.ModalResponse) -> Void = { [weak self] response in
+                guard response == .alertFirstButtonReturn else { return }
+                self?.openRepository(result.repositoryURL)
+            }
+            if let window { alert.beginSheetModal(for: window, completionHandler: completion) }
+            else { completion(alert.runModal()) }
+        }
+    }
+
+    private func presentInitializeRepository() {
+        guard let window = view.window else { return }
+        let context = (activeController as? RepositoryBrowserViewController)?.networkContext
+        GitUICommands.startInitializeRepository(
+            source: repositoryCreator(),
+            owner: window,
+            initialDirectory: context.map {
+                URL(fileURLWithPath: $0.repository.path, isDirectory: true).deletingLastPathComponent()
+            }
+        ) { [weak self] result in
+            self?.openRepository(result.repositoryURL)
+        }
+    }
+
+    private func repositoryCreator() -> GitRepositoryCreator {
+        let gitURL = URL(fileURLWithPath: store.preferences.gitExecutablePath)
+        return GitRepositoryCreator(git: GitProcess(executableURL: gitURL))
     }
 }

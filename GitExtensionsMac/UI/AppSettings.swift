@@ -56,6 +56,19 @@ struct PullPreferences: Codable, Equatable, Sendable {
     var updateSubmodulesAfterPull: Bool? = nil
 }
 
+struct RepositoryCreationPreferences: Codable, Equatable, Sendable {
+    var recentSources: [String] = []
+    var cloneDestinationPath = ""
+    var cloneWindowWidth = 647.0
+    var cloneWindowHeight = 359.0
+    var initWindowWidth = 542.0
+    var initWindowHeight = 174.0
+}
+
+struct ResetPreferences: Codable, Equatable, Sendable {
+    var checkoutOtherBranchAfterReset = true
+}
+
 struct RebasePreferences: Codable, Equatable, Sendable {
     var helpExpanded = true
 }
@@ -493,6 +506,8 @@ final class AppSettingsStore {
         static let remoteManagementPreferences = "GitExtensionsMac.remoteManagementPreferences.v1"
         static let mergePreferences = "GitExtensionsMac.mergePreferences.v1"
         static let checkoutBranchPreferences = "GitExtensionsMac.checkoutBranchPreferences.v1"
+        static let repositoryCreationPreferences = "GitExtensionsMac.repositoryCreationPreferences.v1"
+        static let resetPreferences = "GitExtensionsMac.resetPreferences.v1"
     }
 
     private let defaults: UserDefaults
@@ -511,6 +526,8 @@ final class AppSettingsStore {
     private(set) var remoteManagementPreferences: RemoteManagementPreferences
     private(set) var mergePreferences: MergePreferences
     private(set) var checkoutBranchPreferences: CheckoutBranchPreferences
+    private(set) var repositoryCreationPreferences: RepositoryCreationPreferences
+    private(set) var resetPreferences: ResetPreferences
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -571,6 +588,12 @@ final class AppSettingsStore {
         checkoutBranchPreferences = defaults.data(forKey: Key.checkoutBranchPreferences)
             .flatMap { try? decoder.decode(CheckoutBranchPreferences.self, from: $0) }
             ?? CheckoutBranchPreferences()
+        repositoryCreationPreferences = defaults.data(forKey: Key.repositoryCreationPreferences)
+            .flatMap { try? decoder.decode(RepositoryCreationPreferences.self, from: $0) }
+            ?? RepositoryCreationPreferences()
+        resetPreferences = defaults.data(forKey: Key.resetPreferences)
+            .flatMap { try? decoder.decode(ResetPreferences.self, from: $0) }
+            ?? ResetPreferences()
         recentRepositories.removeAll { !FileManager.default.fileExists(atPath: $0.path) }
         applyAppearance()
     }
@@ -695,6 +718,26 @@ final class AppSettingsStore {
         defaults.set(try? JSONEncoder().encode(preferences), forKey: Key.checkoutBranchPreferences)
     }
 
+    func saveRepositoryCreationPreferences(_ preferences: RepositoryCreationPreferences) {
+        repositoryCreationPreferences = preferences
+        defaults.set(try? JSONEncoder().encode(preferences), forKey: Key.repositoryCreationPreferences)
+    }
+
+    func saveResetPreferences(_ preferences: ResetPreferences) {
+        resetPreferences = preferences
+        defaults.set(try? JSONEncoder().encode(preferences), forKey: Key.resetPreferences)
+    }
+
+    func recordCloneSource(_ source: String) {
+        let source = source.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !source.isEmpty else { return }
+        var preferences = repositoryCreationPreferences
+        preferences.recentSources.removeAll { $0 == source }
+        preferences.recentSources.insert(source, at: 0)
+        preferences.recentSources = Array(preferences.recentSources.prefix(20))
+        saveRepositoryCreationPreferences(preferences)
+    }
+
     func recordPullURL(_ value: String) {
         let value = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else { return }
@@ -716,10 +759,14 @@ final class AppSettingsStore {
     }
 
     func recordOpenedRepository(_ url: URL) {
+        recordRecentRepository(url)
+        defaults.set(url.standardizedFileURL.path, forKey: Key.lastRepository)
+    }
+
+    func recordRecentRepository(_ url: URL) {
         let path = url.standardizedFileURL.path
         recentRepositories.removeAll { $0.path == path }
         recentRepositories.insert(RecentRepository(path: path, lastOpened: Date()), at: 0)
-        defaults.set(path, forKey: Key.lastRepository)
         trimRecentRepositories()
     }
 
