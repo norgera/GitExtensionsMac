@@ -111,6 +111,9 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
     private var remoteBranchDeleteWindowController: NSWindowController?
     var checkoutBranchWorkflowCoordinator: CheckoutBranchWorkflowCoordinator?
     private var operationStateTask: Task<Void, Never>?
+    private let bisectBanner = NSView()
+    private let bisectBannerLabel = NSTextField(labelWithString: "")
+    private var bisectBannerHeightConstraint: NSLayoutConstraint?
     private let rebaseBanner = NSView()
     private let rebaseBannerLabel = NSTextField(labelWithString: "")
     private let rebaseResolveButton = NSButton(title: "Resolve…", target: nil, action: nil)
@@ -164,12 +167,13 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
 
         let root = NSView()
         let browserToolbar = makeBrowserToolbar()
+        let bisectBanner = makeBisectBanner()
         let rebaseBanner = makeRebaseBanner()
         let statusBar = makeStatusBar()
 
         addChild(mainSplitController)
         let contentView = mainSplitController.view
-        [browserToolbar, rebaseBanner, contentView, statusBar].forEach {
+        [browserToolbar, bisectBanner, rebaseBanner, contentView, statusBar].forEach {
             $0.translatesAutoresizingMaskIntoConstraints = false
             root.addSubview($0)
         }
@@ -178,6 +182,8 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         toolbarHeight.priority = .defaultHigh
         let statusHeight = statusBar.heightAnchor.constraint(equalToConstant: BrowserMetrics.statusHeight)
         statusHeight.priority = .defaultHigh
+        let bisectHeight = bisectBanner.heightAnchor.constraint(equalToConstant: 0)
+        bisectBannerHeightConstraint = bisectHeight
         let rebaseHeight = rebaseBanner.heightAnchor.constraint(equalToConstant: 0)
         rebaseBannerHeightConstraint = rebaseHeight
         NSLayoutConstraint.activate([
@@ -186,7 +192,12 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             browserToolbar.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             toolbarHeight,
 
-            rebaseBanner.topAnchor.constraint(equalTo: browserToolbar.bottomAnchor),
+            bisectBanner.topAnchor.constraint(equalTo: browserToolbar.bottomAnchor),
+            bisectBanner.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            bisectBanner.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            bisectHeight,
+
+            rebaseBanner.topAnchor.constraint(equalTo: bisectBanner.bottomAnchor),
             rebaseBanner.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             rebaseBanner.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             rebaseHeight,
@@ -237,6 +248,34 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         ])
         rebaseBanner.isHidden = true
         return rebaseBanner
+    }
+
+    private func makeBisectBanner() -> NSView {
+        bisectBanner.wantsLayer = true
+        bisectBanner.layer?.backgroundColor = NSColor.systemBlue.withAlphaComponent(0.22).cgColor
+        let icon = NSImageView(image: NSImage(
+            systemSymbolName: "info.circle.fill",
+            accessibilityDescription: "Bisect in progress"
+        ) ?? NSImage())
+        bisectBannerLabel.font = .systemFont(ofSize: 12)
+        let more = NSButton(title: "More…", target: self, action: #selector(showBisectManager))
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let stack = NSStackView(views: [icon, bisectBannerLabel, spacer, more])
+        stack.orientation = .horizontal
+        stack.alignment = .centerY
+        stack.spacing = 7
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        bisectBanner.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: bisectBanner.leadingAnchor, constant: 8),
+            stack.trailingAnchor.constraint(equalTo: bisectBanner.trailingAnchor, constant: -8),
+            stack.topAnchor.constraint(equalTo: bisectBanner.topAnchor, constant: 3),
+            stack.bottomAnchor.constraint(equalTo: bisectBanner.bottomAnchor, constant: -3),
+            icon.widthAnchor.constraint(equalToConstant: 22)
+        ])
+        bisectBanner.isHidden = true
+        return bisectBanner
     }
 
     private func applyPreferences() {
@@ -828,6 +867,16 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             uiCommands.startDeleteTag()
         case .manageStashes: uiCommands.startStashManagement()
         case .resetChanges: uiCommands.startResetChanges()
+        case .cleanRepository: uiCommands.startCleanRepository()
+        case .bisect:
+            guard repositoryIdentity?.currentRepository.isBare == false,
+                  revisionGridController.selectedCommitCount == 1,
+                  let commit = revisions.first(where: { $0.id == selectedCommitID && !$0.isArtificial })
+            else {
+                statusLabel.stringValue = "Select one revision before opening Bisect."
+                return
+            }
+            uiCommands.startBisect([commit])
         case .solveMergeConflicts: uiCommands.startConflictResolution()
         case .cherryPick:
             if let commit = revisions.first(where: { $0.id == selectedCommitID && !$0.isArtificial }) {
@@ -905,6 +954,9 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             && !state.references.tags.isEmpty
         BrowserCommandAvailability.shared.canReset = !state.identity.currentRepository.isBare
             && repositoryModule is any RepositoryResettingDataSource
+        BrowserCommandAvailability.shared.canClean = !state.identity.currentRepository.isBare
+            && repositoryModule is any RepositoryCleaningDataSource
+        BrowserCommandAvailability.shared.canBisect = false
         outlineController.apply(
             identity: state.identity,
             references: state.references,
@@ -1020,6 +1072,10 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             && !repositoryIdentity.currentRepository.isBare
             && revisionGridController.selectedCommitCount == 1
             && repositoryModule is any RepositoryCheckoutBranchDataSource
+        BrowserCommandAvailability.shared.canBisect = !commit.isArtificial
+            && !repositoryIdentity.currentRepository.isBare
+            && revisionGridController.selectedCommitCount == 1
+            && repositoryModule is any RepositoryBisectingDataSource
         revisionDetailsTask?.cancel()
         let relations = CommitRelationsResolver.resolve(commit: commit, history: revisions)
         let comparisonCommit = commit.parentIDs.first.flatMap { parentID in
@@ -1532,6 +1588,22 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             outlineController.select(reference: reference)
             return
         }
+        if identifier == "revision.bisect.bad" {
+            uiCommands.markBisect(.bad, revision: focused)
+            return
+        }
+        if identifier == "revision.bisect.good" {
+            uiCommands.markBisect(.good, revision: focused)
+            return
+        }
+        if identifier == "revision.bisect.skip" {
+            uiCommands.markBisect(.skip, revision: focused)
+            return
+        }
+        if identifier == "revision.bisect.stop" {
+            uiCommands.stopBisect()
+            return
+        }
         if identifier == "revision.rebase.continue" {
             beginMutation(errorTitle: "Continue rebase failed") { source in
                 try await source.continueRebase()
@@ -1598,6 +1670,10 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         }
         if identifier == "revision.commit.cherryPick" {
             uiCommands.startCherryPick(selected.isEmpty ? [focused] : selected)
+            return
+        }
+        if identifier == "revision.commit.revert" {
+            uiCommands.startRevert(selected.isEmpty ? [focused] : selected)
             return
         }
         if identifier == "revision.branch.merge.commit" {
@@ -2193,12 +2269,19 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         guard let mutationSource = repositoryModule as? any RepositoryMutationStateDataSource else {
             revisionGridController.setCherryPickInProgress(false, hasConflicts: false)
             revisionGridController.setRebaseInProgress(false, hasConflicts: false)
+            revisionGridController.setBisectInProgress(false)
+            updateBisectBanner(inProgress: false)
             updateRebaseBanner(inProgress: false, hasConflicts: false)
             return
         }
         operationStateTask = Task { @MainActor [weak self] in
             guard let self else { return }
             let state = try? await mutationSource.loadMutationState()
+            let bisectState: RepositoryBisectState? = if let source = repositoryModule as? any RepositoryBisectingDataSource {
+                try? await source.loadBisectState()
+            } else {
+                nil
+            }
             guard !Task.isCancelled else { return }
             revisionGridController.setCherryPickInProgress(
                 state?.cherryPickInProgress == true,
@@ -2208,11 +2291,25 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
                 state?.rebaseInProgress == true,
                 hasConflicts: !(state?.conflictedPaths.isEmpty ?? true)
             )
+            revisionGridController.setBisectInProgress(bisectState?.isActive == true)
+            updateBisectBanner(inProgress: bisectState?.isActive == true)
             updateRebaseBanner(
                 inProgress: state?.rebaseInProgress == true,
                 hasConflicts: !(state?.conflictedPaths.isEmpty ?? true)
             )
         }
+    }
+
+    private func updateBisectBanner(inProgress: Bool) {
+        bisectBanner.isHidden = !inProgress
+        bisectBannerHeightConstraint?.constant = inProgress ? 34 : 0
+        bisectBannerLabel.stringValue = "Bisect is currently in progress."
+    }
+
+    @objc private func showBisectManager() {
+        guard let commit = revisions.first(where: { $0.id == selectedCommitID && !$0.isArtificial })
+            ?? revisions.first(where: { !$0.isArtificial }) else { return }
+        uiCommands.startBisect([commit])
     }
 
     private func updateRebaseBanner(inProgress: Bool, hasConflicts: Bool) {

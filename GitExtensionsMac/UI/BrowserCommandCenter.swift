@@ -39,6 +39,8 @@ enum BrowserCommand: Equatable, Sendable {
     case deleteTag
     case manageStashes
     case resetChanges
+    case cleanRepository
+    case bisect
     case solveMergeConflicts
     case cherryPick
     case rebase
@@ -88,6 +90,8 @@ final class BrowserCommandAvailability: ObservableObject {
     @Published var canCreateTag = false
     @Published var canDeleteTag = false
     @Published var canReset = false
+    @Published var canClean = false
+    @Published var canBisect = false
 
     private init() {}
 }

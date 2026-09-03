@@ -375,6 +375,28 @@ enum MutationDialogs {
         return await begin(alert: alert, for: window) == .alertFirstButtonReturn
     }
 
+    static func confirmResolveRevertConflicts(paths: [String], window: NSWindow) async -> Bool {
+        let alert = NSAlert()
+        alert.messageText = "Resolve merge conflicts?"
+        alert.informativeText = paths.isEmpty
+            ? "The revert stopped with conflicts."
+            : "The revert stopped with conflicts in \(paths.count) path(s)."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Resolve conflicts")
+        alert.addButton(withTitle: "Later")
+        return await begin(alert: alert, for: window) == .alertFirstButtonReturn
+    }
+
+    static func confirmAbortRevert(window: NSWindow) async -> Bool {
+        let alert = NSAlert()
+        alert.messageText = "Abort revert?"
+        alert.informativeText = "Git will restore the working tree and index to their state before the current revert began."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Abort")
+        alert.addButton(withTitle: "Cancel")
+        return await begin(alert: alert, for: window) == .alertFirstButtonReturn
+    }
+
     static func confirmResolveStashConflicts(paths: [String], window: NSWindow) async -> Bool {
         let alert = NSAlert()
         alert.messageText = "Resolve merge conflicts?"

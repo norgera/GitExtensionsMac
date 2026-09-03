@@ -55,6 +55,13 @@ enum WorkflowManagementDialogs {
         await presentConflictResolver(source: source, window: window)
     }
 
+    static func resolveRevertConflicts(
+        source: any RepositoryRevertingDataSource,
+        window: NSWindow
+    ) async -> ConflictResolutionResult {
+        await presentConflictResolver(source: source, window: window)
+    }
+
     static func resolveMergeConflicts(
         source: any RepositoryMergingDataSource,
         offerCommit: Bool,
@@ -890,10 +897,10 @@ private final class ConflictResolverViewController: NSViewController, NSTableVie
                     table.selectRowIndexes(IndexSet(integer: min(previousRow, paths.count - 1)), byExtendingSelection: false)
                 }
                 status.stringValue = paths.isEmpty ? "No unresolved conflicts." : "\(paths.count) unresolved conflict(s)."
-                continueButton.isHidden = !(state.rebaseInProgress || state.cherryPickInProgress || mergeInProgress)
+                continueButton.isHidden = !(state.rebaseInProgress || state.cherryPickInProgress || state.revertInProgress || mergeInProgress)
                 continueButton.title = mergeInProgress ? "Commit merge…" : "Continue"
                 skipButton.isHidden = !state.rebaseInProgress
-                abortButton.isHidden = !(state.rebaseInProgress || state.cherryPickInProgress || mergeInProgress)
+                abortButton.isHidden = !(state.rebaseInProgress || state.cherryPickInProgress || state.revertInProgress || mergeInProgress)
                 continueButton.isEnabled = paths.isEmpty
                 updateMergeToolButton()
                 updateToolMenu()
@@ -1273,6 +1280,8 @@ private final class ConflictResolverViewController: NSViewController, NSTableVie
             run(sequencerAction: .continued) { _ in try await source.continueRebase() }
         } else if state.cherryPickInProgress, let source = source as? any RepositoryCherryPickDataSource {
             run(sequencerAction: .continued) { _ in try await source.continueCherryPick() }
+        } else if state.revertInProgress, let source = source as? any RepositoryRevertingDataSource {
+            run(sequencerAction: .continued) { _ in try await source.continueRevert() }
         }
         else if mergeInProgress { presentMergeCommit(closeWhenCommitWindowCloses: false) }
     }
@@ -1290,6 +1299,10 @@ private final class ConflictResolverViewController: NSViewController, NSTableVie
                       let source = source as? any RepositoryCherryPickDataSource {
                 guard await MutationDialogs.confirmAbortCherryPick(window: panel) else { return }
                 await execute(sequencerAction: .aborted) { _ in try await source.abortCherryPick() }
+            } else if state.revertInProgress,
+                      let source = source as? any RepositoryRevertingDataSource {
+                guard await MutationDialogs.confirmAbortRevert(window: panel) else { return }
+                await execute(sequencerAction: .aborted) { _ in try await source.abortRevert() }
             } else if mergeInProgress {
                 guard await MutationDialogs.confirmAbortMerge(window: panel) else { return }
                 await execute(sequencerAction: .aborted) { try await $0.abortMerge() }

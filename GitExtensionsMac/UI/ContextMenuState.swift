@@ -130,9 +130,9 @@ enum RevisionContextMenuBuilder {
 
         if context.isBisecting {
             entries += [
-                command("revision.bisect.bad", "Mark revision as bad"),
-                command("revision.bisect.good", "Mark revision as good"),
-                command("revision.bisect.skip", "Skip revision"),
+                command("revision.bisect.bad", "Mark revision as bad", enabled: !revision.isArtificial),
+                command("revision.bisect.good", "Mark revision as good", enabled: !revision.isArtificial),
+                command("revision.bisect.skip", "Skip revision", enabled: !revision.isArtificial),
                 command("revision.bisect.stop", "Stop bisect"),
                 .separator
             ]
@@ -226,7 +226,11 @@ enum RevisionContextMenuBuilder {
         if !context.isBareRepository {
             entries += [
                 command("revision.commit.checkout", "Checkout this commit…"),
-                command("revision.commit.revert", "Revert this commit…"),
+                command(
+                    "revision.commit.revert",
+                    "Revert this commit…",
+                    enabled: !revision.isArtificial && selected.allSatisfy { !$0.isArtificial }
+                ),
                 command(
                     "revision.commit.cherryPick",
                     "Cherry pick this commit…",

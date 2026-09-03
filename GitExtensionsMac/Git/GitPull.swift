@@ -261,6 +261,7 @@ extension GitRepositoryModule: RepositoryPullingDataSource {
                 conflictedPaths: [],
                 mergeInProgress: false,
                 cherryPickInProgress: false,
+                revertInProgress: false,
                 rebaseInProgress: false
             )
         } else {

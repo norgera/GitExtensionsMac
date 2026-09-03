@@ -308,6 +308,157 @@ final class GitUICommands {
         )
     }
 
+    func startRevert(_ selectedCommits: [Commit]) {
+        guard let browser,
+              browser.repositoryIdentity?.currentRepository.isBare == false,
+              let window = browser.view.window,
+              let source = repositoryModule as? any RepositoryRevertingDataSource else {
+            browser?.showPlaceholderStatus("Revert is unavailable for this repository")
+            return
+        }
+
+        let history = browser.revisions
+        let ordered = RevertWorkflowOrdering.ordered(selectedCommits, in: history)
+        guard !ordered.isEmpty else { return }
+        let previousSelection = browser.selectedCommitID
+
+        Task { @MainActor [weak self, weak browser, weak window] in
+            guard let self, let browser, let window else { return }
+            var completedCount = 0
+            var preferredCommitID = previousSelection
+
+            for commit in ordered {
+                guard let commitID = commit.objectID else { continue }
+                guard let selection = await RevertDialog.present(
+                    commit: commit,
+                    history: history,
+                    owner: window
+                ) else {
+                    browser.statusLabel.stringValue = completedCount == 0
+                        ? "Revert cancelled."
+                        : "Reverted \(completedCount) commit(s); remaining revisions were cancelled."
+                    return
+                }
+
+                do {
+                    browser.statusLabel.stringValue = "Reverting \(commit.shortID)…"
+                    let result = try await source.revert(RepositoryRevertRequest(
+                        commitID: commitID,
+                        automaticallyCommit: selection.automaticallyCommit,
+                        mainlineParent: selection.mainlineParent
+                    ))
+                    preferredCommitID = result.selectedCommitID ?? preferredCommitID
+                    notifyRepositoryChanged(preferredCommitID: preferredCommitID)
+
+                    switch result.outcome {
+                    case .completed:
+                        completedCount += 1
+                        browser.statusLabel.stringValue = result.message
+                    case .conflicts(let paths):
+                        browser.statusLabel.stringValue = result.message
+                        guard await MutationDialogs.confirmResolveRevertConflicts(paths: paths, window: window) else {
+                            return
+                        }
+                        let resolution = await WorkflowManagementDialogs.resolveRevertConflicts(
+                            source: source,
+                            window: window
+                        )
+                        if resolution.repositoryChanged {
+                            notifyRepositoryChanged(preferredCommitID: preferredCommitID)
+                        }
+                        switch resolution.sequencerAction {
+                        case .continued:
+                            completedCount += 1
+                            browser.statusLabel.stringValue = "Revert continued."
+                        case .aborted:
+                            browser.statusLabel.stringValue = completedCount == 0
+                                ? "Revert aborted."
+                                : "Revert aborted after \(completedCount) completed commit(s)."
+                            return
+                        case .none:
+                            browser.statusLabel.stringValue = "Revert remains paused. Resolve all conflicts, then Continue or Abort."
+                            return
+                        }
+                    case .paused(let reason):
+                        browser.statusLabel.stringValue = reason
+                        return
+                    }
+                } catch is CancellationError {
+                    return
+                } catch {
+                    browser.statusLabel.stringValue = error.localizedDescription
+                    await MutationDialogs.showError(error, title: "Revert failed", window: window)
+                    return
+                }
+            }
+        }
+    }
+
+    func startBisect(_ selectedCommits: [Commit]) {
+        guard let browser,
+              browser.repositoryIdentity?.currentRepository.isBare == false,
+              let window = browser.view.window,
+              let source = repositoryModule as? any RepositoryBisectingDataSource else {
+            browser?.showPlaceholderStatus("Bisect is unavailable for this repository")
+            return
+        }
+        let revisions = selectedCommits.filter { !$0.isArtificial && $0.objectID != nil }
+        guard !revisions.isEmpty else { return }
+        Task { @MainActor [weak self, weak browser, weak window] in
+            guard let self, let browser, let window else { return }
+            let result = await BisectDialog.present(
+                source: source,
+                selectedRevisions: revisions,
+                owner: window,
+                statusChanged: { [weak browser] in browser?.statusLabel.stringValue = $0 }
+            )
+            if result.repositoryChanged {
+                notifyRepositoryChanged(
+                    preferredCommitID: result.preferredCommitID ?? browser.selectedCommitID
+                )
+            }
+        }
+    }
+
+    func markBisect(_ mark: RepositoryBisectMark, revision: Commit) {
+        guard let browser,
+              let window = browser.view.window,
+              let objectID = revision.objectID,
+              let source = repositoryModule as? any RepositoryBisectingDataSource else { return }
+        Task { @MainActor [weak self, weak browser, weak window] in
+            guard let self, let browser, let window else { return }
+            do {
+                let result = try await source.markBisect(mark, revisions: [objectID])
+                notifyRepositoryChanged(preferredCommitID: result.selectedCommitID ?? browser.selectedCommitID)
+                browser.statusLabel.stringValue = result.message
+            } catch is CancellationError {
+                return
+            } catch {
+                browser.statusLabel.stringValue = error.localizedDescription
+                await MutationDialogs.showError(error, title: "Bisect failed", window: window)
+            }
+        }
+    }
+
+    func stopBisect() {
+        guard let browser,
+              let window = browser.view.window,
+              let source = repositoryModule as? any RepositoryBisectingDataSource else { return }
+        Task { @MainActor [weak self, weak browser, weak window] in
+            guard let self, let browser, let window else { return }
+            do {
+                let result = try await source.resetBisect()
+                notifyRepositoryChanged(preferredCommitID: result.selectedCommitID ?? browser.selectedCommitID)
+                browser.statusLabel.stringValue = result.message
+            } catch is CancellationError {
+                return
+            } catch {
+                browser.statusLabel.stringValue = error.localizedDescription
+                await MutationDialogs.showError(error, title: "Stop bisect failed", window: window)
+            }
+        }
+    }
+
     func startRebase(on target: Commit, interactive: Bool, showAdvancedOptions: Bool) {
         startRebase(
             on: target,
@@ -500,6 +651,29 @@ final class GitUICommands {
                 await ResetDialogs.showError(error, title: "Reset changes failed", owner: owner)
             }
         }
+    }
+
+    func startCleanRepository(initialPath: String? = nil) {
+        guard let browser,
+              let owner = browser.view.window,
+              let identity = browser.repositoryIdentity,
+              !identity.currentRepository.isBare,
+              let source = repositoryModule as? any RepositoryCleaningDataSource else {
+            browser?.showPlaceholderStatus("Clean is unavailable for this repository")
+            return
+        }
+        CleanDialog.present(
+            source: source,
+            repositoryURL: URL(fileURLWithPath: identity.currentRepository.path, isDirectory: true),
+            initialPath: initialPath,
+            owner: owner,
+            repositoryChanged: { [weak self] in
+                self?.notifyRepositoryChanged(preferredCommitID: .workingDirectory)
+            },
+            statusChanged: { [weak browser] status in
+                browser?.statusLabel.stringValue = status
+            }
+        )
     }
 
     func checkout(_ target: CheckoutDialogTarget, confirmDirectCheckout: Bool = false) {

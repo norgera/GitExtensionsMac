@@ -79,6 +79,15 @@
 		B20000000000000000000001 /* GitReset.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000001 /* GitReset.swift */; };
 		B20000000000000000000002 /* ResetDialogs.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000002 /* ResetDialogs.swift */; };
 		B20000000000000000000003 /* GitResetTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B10000000000000000000003 /* GitResetTests.swift */; };
+		C20000000000000000000001 /* GitClean.swift in Sources */ = {isa = PBXBuildFile; fileRef = C10000000000000000000001 /* GitClean.swift */; };
+		C20000000000000000000002 /* CleanDialog.swift in Sources */ = {isa = PBXBuildFile; fileRef = C10000000000000000000002 /* CleanDialog.swift */; };
+		C20000000000000000000003 /* GitCleanTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C10000000000000000000003 /* GitCleanTests.swift */; };
+		D20000000000000000000001 /* GitRevert.swift in Sources */ = {isa = PBXBuildFile; fileRef = D10000000000000000000001 /* GitRevert.swift */; };
+		D20000000000000000000002 /* RevertDialog.swift in Sources */ = {isa = PBXBuildFile; fileRef = D10000000000000000000002 /* RevertDialog.swift */; };
+		D20000000000000000000003 /* GitRevertTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D10000000000000000000003 /* GitRevertTests.swift */; };
+		E20000000000000000000001 /* GitBisect.swift in Sources */ = {isa = PBXBuildFile; fileRef = E10000000000000000000001 /* GitBisect.swift */; };
+		E20000000000000000000002 /* BisectDialog.swift in Sources */ = {isa = PBXBuildFile; fileRef = E10000000000000000000002 /* BisectDialog.swift */; };
+		E20000000000000000000003 /* GitBisectTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E10000000000000000000003 /* GitBisectTests.swift */; };
 		A165FDA54D1D8FEF8EB27280 /* RepoStateClean.png in Resources */ = {isa = PBXBuildFile; fileRef = C1EC223D3244B0A182AB06AB /* RepoStateClean.png */; };
 		A30E0440049928116A4FE564 /* ShowOnlyFirstParent.png in Resources */ = {isa = PBXBuildFile; fileRef = AA2B71E02E8D15ABC2854D97 /* ShowOnlyFirstParent.png */; };
 		A42057411418B499243502D5 /* BranchRemoteMerged.png in Resources */ = {isa = PBXBuildFile; fileRef = 736BEFF0764DB9636402383B /* BranchRemoteMerged.png */; };
@@ -269,6 +278,15 @@
 		B10000000000000000000001 /* GitReset.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GitReset.swift; sourceTree = "<group>"; };
 		B10000000000000000000002 /* ResetDialogs.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ResetDialogs.swift; sourceTree = "<group>"; };
 		B10000000000000000000003 /* GitResetTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GitResetTests.swift; sourceTree = "<group>"; };
+		C10000000000000000000001 /* GitClean.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GitClean.swift; sourceTree = "<group>"; };
+		C10000000000000000000002 /* CleanDialog.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CleanDialog.swift; sourceTree = "<group>"; };
+		C10000000000000000000003 /* GitCleanTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GitCleanTests.swift; sourceTree = "<group>"; };
+		D10000000000000000000001 /* GitRevert.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GitRevert.swift; sourceTree = "<group>"; };
+		D10000000000000000000002 /* RevertDialog.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = RevertDialog.swift; sourceTree = "<group>"; };
+		D10000000000000000000003 /* GitRevertTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GitRevertTests.swift; sourceTree = "<group>"; };
+		E10000000000000000000001 /* GitBisect.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GitBisect.swift; sourceTree = "<group>"; };
+		E10000000000000000000002 /* BisectDialog.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = BisectDialog.swift; sourceTree = "<group>"; };
+		E10000000000000000000003 /* GitBisectTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GitBisectTests.swift; sourceTree = "<group>"; };
 		A951A517309105DBD1E33BF3 /* Cocoa.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Cocoa.framework; path = Platforms/MacOSX.platform/Developer/SDKs/MacOSX10.15.sdk/System/Library/Frameworks/Cocoa.framework; sourceTree = DEVELOPER_DIR; };
 		AA2B71E02E8D15ABC2854D97 /* ShowOnlyFirstParent.png */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = image.png; path = ShowOnlyFirstParent.png; sourceTree = "<group>"; };
 		AACDBF250D361734280610CE /* FolderSubmodule.png */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = image.png; path = FolderSubmodule.png; sourceTree = "<group>"; };
@@ -451,6 +469,9 @@
 				F60000000000000000000001 /* FileViewerTests.swift */,
 				A10000000000000000000003 /* GitRepositoryCreationTests.swift */,
 				B10000000000000000000003 /* GitResetTests.swift */,
+				C10000000000000000000003 /* GitCleanTests.swift */,
+				D10000000000000000000003 /* GitRevertTests.swift */,
+				E10000000000000000000003 /* GitBisectTests.swift */,
 			);
 			name = Tests;
 			path = Tests;
@@ -504,6 +525,9 @@
 				F20000000000000000000002 /* TagDialogs.swift */,
 				A10000000000000000000002 /* RepositoryCreationDialogs.swift */,
 				B10000000000000000000002 /* ResetDialogs.swift */,
+				C10000000000000000000002 /* CleanDialog.swift */,
+				D10000000000000000000002 /* RevertDialog.swift */,
+				E10000000000000000000002 /* BisectDialog.swift */,
 			);
 			name = UI;
 			path = UI;
@@ -604,6 +628,9 @@
 				F40000000000000000000001 /* FileContentDecoder.swift */,
 				A10000000000000000000001 /* GitRepositoryCreation.swift */,
 				B10000000000000000000001 /* GitReset.swift */,
+				C10000000000000000000001 /* GitClean.swift */,
+				D10000000000000000000001 /* GitRevert.swift */,
+				E10000000000000000000001 /* GitBisect.swift */,
 			);
 			name = Git;
 			path = Git;
@@ -918,6 +945,9 @@
 				F30000000000000000000001 /* FileContentDecoder.swift in Sources */,
 				A20000000000000000000001 /* GitRepositoryCreation.swift in Sources */,
 				B20000000000000000000001 /* GitReset.swift in Sources */,
+				C20000000000000000000001 /* GitClean.swift in Sources */,
+				D20000000000000000000001 /* GitRevert.swift in Sources */,
+				E20000000000000000000001 /* GitBisect.swift in Sources */,
 				233DB63159CEBA451F6A90CE /* RepositoryBrowsingDataSource.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -944,6 +974,9 @@
 				F50000000000000000000001 /* FileViewerTests.swift in Sources */,
 				A20000000000000000000003 /* GitRepositoryCreationTests.swift in Sources */,
 				B20000000000000000000003 /* GitResetTests.swift in Sources */,
+				C20000000000000000000003 /* GitCleanTests.swift in Sources */,
+				D20000000000000000000003 /* GitRevertTests.swift in Sources */,
+				E20000000000000000000003 /* GitBisectTests.swift in Sources */,
 				210C0F1568AC2EB5B1268796 /* RevisionGraphLayoutTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -993,6 +1026,9 @@
 				F10000000000000000000002 /* TagDialogs.swift in Sources */,
 				A20000000000000000000002 /* RepositoryCreationDialogs.swift in Sources */,
 				B20000000000000000000002 /* ResetDialogs.swift in Sources */,
+				C20000000000000000000002 /* CleanDialog.swift in Sources */,
+				D20000000000000000000002 /* RevertDialog.swift in Sources */,
+				E20000000000000000000002 /* BisectDialog.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

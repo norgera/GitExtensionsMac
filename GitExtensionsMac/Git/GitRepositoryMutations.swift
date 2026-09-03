@@ -447,6 +447,7 @@ package struct RepositoryMutationState: Equatable, Sendable {
     package let conflictedPaths: [String]
     package let mergeInProgress: Bool
     package let cherryPickInProgress: Bool
+    package let revertInProgress: Bool
     package let rebaseInProgress: Bool
 
     package var isDirty: Bool {
@@ -2353,7 +2354,7 @@ extension GitRepositoryModule: RepositoryBrowserMutationDataSource, RepositorySt
         return paths.filter { !$0.isEmpty && seen.insert($0).inserted }
     }
 
-    private func commitEncodingName(in repository: ResolvedGitRepository) async -> String {
+    package func commitEncodingName(in repository: ResolvedGitRepository) async -> String {
         guard let result = try? await rawMutation(["config", "--get", "i18n.commitEncoding"], in: repository),
               result.succeeded else { return "UTF-8" }
         let value = result.standardOutputString.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2405,6 +2406,9 @@ extension GitRepositoryModule: RepositoryBrowserMutationDataSource, RepositorySt
             ),
             cherryPickInProgress: FileManager.default.fileExists(
                 atPath: repository.gitDirectoryURL.appendingPathComponent("CHERRY_PICK_HEAD").path
+            ),
+            revertInProgress: FileManager.default.fileExists(
+                atPath: repository.gitDirectoryURL.appendingPathComponent("REVERT_HEAD").path
             ),
             rebaseInProgress: FileManager.default.fileExists(
                 atPath: repository.gitDirectoryURL.appendingPathComponent("rebase-merge").path

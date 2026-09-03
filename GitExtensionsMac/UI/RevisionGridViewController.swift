@@ -24,6 +24,7 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
     private var cherryPickHasConflicts = false
     private var isRebasing = false
     private var rebaseHasConflicts = false
+    private var isBisecting = false
     private var graphTask: Task<Void, Never>?
     private var graphGeneration = 0
     private var pendingSelectionID: RevisionID?
@@ -144,6 +145,10 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
     func setRebaseInProgress(_ inProgress: Bool, hasConflicts: Bool) {
         isRebasing = inProgress
         rebaseHasConflicts = hasConflicts
+    }
+
+    func setBisectInProgress(_ inProgress: Bool) {
+        isBisecting = inProgress
     }
 
     func setTextFilter(_ value: String) {
@@ -497,6 +502,7 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
             selectedCommits: selectedCommits,
             history: allCommits,
             currentBranchName: currentBranchName,
+            isBisecting: isBisecting,
             isCherryPicking: isCherryPicking,
             cherryPickHasConflicts: cherryPickHasConflicts,
             isRebasing: isRebasing,
@@ -524,6 +530,8 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
                     || identifier == "revision.commit.fixup"
                     || identifier == "revision.commit.squash"
                     || identifier == "revision.commit.cherryPick"
+                    || identifier == "revision.commit.revert"
+                    || identifier.hasPrefix("revision.bisect.")
                     || identifier == "revision.cherryPick.continue"
                     || identifier == "revision.cherryPick.abort"
                     || identifier.hasPrefix("revision.rebase.")

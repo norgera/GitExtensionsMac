@@ -106,6 +106,7 @@ enum ContextMenuStateTests {
         expect(menu.entry(id: "revision.branch.push")?.isEnabled == true, "revision: current branch can be pushed")
         expect(menu.entry(id: "revision.branch.resetCurrent")?.isEnabled == true, "revision: real commit can reset current branch")
         expect(menu.entry(id: "revision.branch.resetOther")?.isEnabled == true, "revision: real commit can reset another branch")
+        expect(menu.entry(id: "revision.commit.revert")?.isEnabled == true, "revision: real commit can be reverted")
         expect(menu.entry(id: "revision.compare.selected")?.isEnabled == true, "revision: a single commit compares with its parent")
         expect(menu.entry(id: "revision.navigate.parent")?.isEnabled == true, "revision: parent navigation follows topology")
 
@@ -119,6 +120,7 @@ enum ContextMenuStateTests {
         let bareMenu = RevisionContextMenuBuilder.build(bareContext)
         expect(bareMenu.entry(id: "revision.branch.resetCurrent") == nil, "revision: bare repositories cannot reset current branch")
         expect(bareMenu.entry(id: "revision.branch.resetOther") == nil, "revision: bare repositories cannot reset another branch")
+        expect(bareMenu.entry(id: "revision.commit.revert") == nil, "revision: bare repositories cannot revert commits")
     }
 
     private static func testNonCurrentRevisionRefCommands() {
@@ -155,6 +157,7 @@ enum ContextMenuStateTests {
         expect(menu.entry(id: "revision.compare.selected")?.isEnabled == true, "revision: selected revisions can be compared")
         expect(menu.entry(id: "revision.commit.edit")?.isEnabled == false, "revision: edit is disabled for multi-selection")
         expect(menu.entry(id: "revision.commit.cherryPick")?.isEnabled == true, "revision: real multi-selection can be cherry-picked")
+        expect(menu.entry(id: "revision.commit.revert")?.isEnabled == true, "revision: real multi-selection can be reverted")
     }
 
     private static func testArtificialRevisionCherryPickState() {
@@ -170,6 +173,7 @@ enum ContextMenuStateTests {
             menu.entry(id: "revision.commit.cherryPick")?.isEnabled == false,
             "revision: artificial revisions cannot be cherry-picked"
         )
+        expect(menu.entry(id: "revision.commit.revert")?.isEnabled == false, "revision: artificial revisions cannot be reverted")
         expect(menu.entry(id: "revision.branch.merge") == nil, "revision: artificial revisions cannot be merged")
         expect(menu.entry(id: "revision.branch.create") == nil, "revision: artificial revisions cannot create branches")
         expect(menu.entry(id: "revision.branch.resetCurrent") == nil, "revision: artificial revisions cannot reset current branch")

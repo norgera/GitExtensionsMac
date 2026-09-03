@@ -119,7 +119,8 @@ private struct GitExtensionsMenuCommands: Commands {
             Button("Manage stashes…") { perform(.manageStashes) }
             Button("Reset changes…") { perform(.resetChanges) }
                 .disabled(!availability.canReset)
-            Button("Clean working directory…") { perform(.unavailable("Clean working directory")) }
+            Button("Clean working directory…") { perform(.cleanRepository) }
+                .disabled(!availability.canClean)
             Divider()
             Button("Create branch…") { perform(.createBranch) }
                 .keyboardShortcut("b", modifiers: .control)
@@ -144,7 +145,8 @@ private struct GitExtensionsMenuCommands: Commands {
             Button("Archive revision…") { perform(.unavailable("Archive revision")) }
             Button("Checkout revision…") { perform(.checkoutRevision) }
                 .disabled(!availability.canCheckoutRevision)
-            Button("Bisect…") { perform(.unavailable("Bisect")) }
+            Button("Bisect…") { perform(.bisect) }
+                .disabled(!availability.canBisect)
             Button("Show reflog…") { perform(.unavailable("Show reflog")) }
             Divider()
             Button("Format patch…") { perform(.unavailable("Format patch")) }

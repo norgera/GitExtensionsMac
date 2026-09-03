@@ -121,6 +121,35 @@ private enum RevisionGraphLayoutTests {
             }
             return
         }
+        if CommandLine.arguments.contains("--clean-only") {
+            RepositoryChangedNotifierTests.run()
+            do {
+                try await GitCleanTests.run()
+            } catch {
+                fatalError("GitCleanTests failed: \(error.localizedDescription)")
+            }
+            return
+        }
+        if CommandLine.arguments.contains("--revert-only") {
+            ContextMenuStateTests.run()
+            RepositoryChangedNotifierTests.run()
+            do {
+                try await GitRevertTests.run()
+            } catch {
+                fatalError("GitRevertTests failed: \(error.localizedDescription)")
+            }
+            return
+        }
+        if CommandLine.arguments.contains("--bisect-only") {
+            ContextMenuStateTests.run()
+            RepositoryChangedNotifierTests.run()
+            do {
+                try await GitBisectTests.run()
+            } catch {
+                fatalError("GitBisectTests failed: \(error.localizedDescription)")
+            }
+            return
+        }
         testObjectIdentity()
         testLinearHistory()
         testRelativeGraphState()
@@ -158,6 +187,9 @@ private enum RevisionGraphLayoutTests {
             try await GitPushTests.run()
             try await GitRepositoryCreationTests.run()
             try await GitResetTests.run()
+            try await GitCleanTests.run()
+            try await GitRevertTests.run()
+            try await GitBisectTests.run()
             if let flagIndex = CommandLine.arguments.firstIndex(of: "--verify-mutations"),
                CommandLine.arguments.indices.contains(flagIndex + 1) {
                 try await GitRepositoryMutationTests.verifyDisposableClone(
