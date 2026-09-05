@@ -38,6 +38,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
     private let stashMenu = NSMenu(title: "Stash")
     private let pushButton = NSButton()
     private let commitButton = NSButton()
+    private let reflogReferencesButton = NSButton()
     private var workingDirectoryWidthConstraint: NSLayoutConstraint?
     private var branchWidthConstraint: NSLayoutConstraint?
     private(set) var repositoryIdentity: RepositoryIdentityState?
@@ -284,6 +285,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             mergeCommonParentLanes: settings.mergeCommonParentLanes,
             straightenDiagonals: settings.straightenGraphDiagonals
         )
+        reflogReferencesButton.state = AppSettingsStore.shared.showReflogReferences ? .on : .off
     }
 
     override func viewDidAppear() {
@@ -409,7 +411,16 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         stack.addArrangedSubview(toolbarGap)
 
         stack.addArrangedSubview(AppKitFactory.resourceButton("FunnelPencil", tooltip: "Advanced filter", width: 32, target: self, action: #selector(placeholderToolbarButton(_:))))
-        stack.addArrangedSubview(AppKitFactory.resourceButton("Book", tooltip: "Show reflog", target: self, action: #selector(placeholderToolbarButton(_:))))
+        configureDynamicToolbarButton(
+            reflogReferencesButton,
+            imageName: "Book",
+            tooltip: "Show reflog references",
+            action: #selector(toggleReflogReferences(_:))
+        )
+        reflogReferencesButton.setButtonType(.toggle)
+        reflogReferencesButton.setAccessibilityLabel("Show reflog references")
+        reflogReferencesButton.state = AppSettingsStore.shared.showReflogReferences ? .on : .off
+        stack.addArrangedSubview(reflogReferencesButton)
 
         let branchScope = NSPopUpButton()
         branchScope.removeAllItems()
@@ -877,6 +888,8 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
                 return
             }
             uiCommands.startBisect([commit])
+        case .reflog:
+            uiCommands.startReflog()
         case .solveMergeConflicts: uiCommands.startConflictResolution()
         case .cherryPick:
             if let commit = revisions.first(where: { $0.id == selectedCommitID && !$0.isArtificial }) {
@@ -957,6 +970,8 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         BrowserCommandAvailability.shared.canClean = !state.identity.currentRepository.isBare
             && repositoryModule is any RepositoryCleaningDataSource
         BrowserCommandAvailability.shared.canBisect = false
+        BrowserCommandAvailability.shared.canReflog = !state.identity.currentRepository.isBare
+            && repositoryModule is any RepositoryReflogDataSource
         outlineController.apply(
             identity: state.identity,
             references: state.references,
@@ -1023,7 +1038,10 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             guard let self else { return }
             do {
                 await request.reader.cancel()
-                let batches = await request.reader.read(request.context)
+                let context = request.context.showingReflogReferences(
+                    AppSettingsStore.shared.showReflogReferences
+                )
+                let batches = await request.reader.read(context)
                 for try await batch in batches {
                     guard !Task.isCancelled, activeRevisionReader === request.reader else { return }
                     revisions.append(contentsOf: batch)
@@ -1382,6 +1400,18 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         BrowserCommandCenter.perform(.unavailable(title))
     }
 
+    @objc private func toggleReflogReferences(_ sender: NSButton) {
+        setShowsReflogReferences(sender.state == .on)
+    }
+
+    private func setShowsReflogReferences(_ show: Bool) {
+        guard AppSettingsStore.shared.showReflogReferences != show else { return }
+        AppSettingsStore.shared.saveShowReflogReferences(show)
+        reflogReferencesButton.state = show ? .on : .off
+        statusLabel.stringValue = show ? "Showing reflog references" : "Hiding reflog references"
+        restartRevisionReadForFilterChange()
+    }
+
     @objc private func settingsToolbarButton(_ sender: NSButton) {
         performTopLevelCommand(.settings)
     }
@@ -1581,6 +1611,10 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
     }
 
     private func performRevisionCommand(_ identifier: String, selected: [Commit], focused: Commit) {
+        if identifier == "revision.other.reflog" {
+            setShowsReflogReferences(!AppSettingsStore.shared.showReflogReferences)
+            return
+        }
         let selectPrefix = "revision.selectInLeftPanel.ref."
         if identifier.hasPrefix(selectPrefix) {
             let referenceID = String(identifier.dropFirst(selectPrefix.count))

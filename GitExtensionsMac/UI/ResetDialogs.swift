@@ -18,12 +18,14 @@ enum ResetDialogs {
     static func resetCurrentBranch(
         branchName: String?,
         target: Commit,
+        initialMode: RepositoryResetMode = .soft,
         owner: NSWindow
     ) async -> RepositoryResetMode? {
         await withCheckedContinuation { continuation in
             let controller = ResetCurrentBranchViewController(
                 branchName: branchName,
                 target: target,
+                initialMode: initialMode,
                 completion: { value in continuation.resume(returning: value) }
             )
             let panel = NSPanel(contentViewController: controller)
@@ -127,6 +129,7 @@ private final class ResetCurrentBranchViewController: NSViewController, NSWindow
     weak var panel: NSPanel?
     private let branchName: String?
     private let target: Commit
+    private let initialMode: RepositoryResetMode
     private let completion: (RepositoryResetMode?) -> Void
     private let summary = CommitSummaryView()
     private let soft = NSButton(radioButtonWithTitle: "Soft: leave working directory and index untouched", target: nil, action: nil)
@@ -136,9 +139,10 @@ private final class ResetCurrentBranchViewController: NSViewController, NSWindow
     private let hard = NSButton(radioButtonWithTitle: "Hard: reset working directory and index (discard ALL local changes)", target: nil, action: nil)
     private var completed = false
 
-    init(branchName: String?, target: Commit, completion: @escaping (RepositoryResetMode?) -> Void) {
+    init(branchName: String?, target: Commit, initialMode: RepositoryResetMode, completion: @escaping (RepositoryResetMode?) -> Void) {
         self.branchName = branchName
         self.target = target
+        self.initialMode = initialMode
         self.completion = completion
         super.init(nibName: nil, bundle: nil)
     }
@@ -160,7 +164,14 @@ private final class ResetCurrentBranchViewController: NSViewController, NSWindow
             mode.heightAnchor.constraint(equalToConstant: 38).isActive = true
             mode.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         }
-        soft.state = .on
+        let initialButton: NSButton = switch initialMode {
+        case .soft: soft
+        case .mixed: mixed
+        case .keep: keep
+        case .merge: merge
+        case .hard: hard
+        }
+        initialButton.state = .on
         style(soft, color: .systemGreen)
         style(mixed, color: .systemYellow)
         style(keep, color: .systemYellow)
@@ -201,7 +212,14 @@ private final class ResetCurrentBranchViewController: NSViewController, NSWindow
     override func viewDidAppear() {
         super.viewDidAppear()
         panel?.delegate = self
-        panel?.makeFirstResponder(soft)
+        let initialButton: NSButton = switch initialMode {
+        case .soft: soft
+        case .mixed: mixed
+        case .keep: keep
+        case .merge: merge
+        case .hard: hard
+        }
+        panel?.makeFirstResponder(initialButton)
     }
 
     @objc private func selectMode(_ sender: NSButton) {

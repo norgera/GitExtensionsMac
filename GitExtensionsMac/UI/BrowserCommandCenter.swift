@@ -41,6 +41,7 @@ enum BrowserCommand: Equatable, Sendable {
     case resetChanges
     case cleanRepository
     case bisect
+    case reflog
     case solveMergeConflicts
     case cherryPick
     case rebase
@@ -92,6 +93,7 @@ final class BrowserCommandAvailability: ObservableObject {
     @Published var canReset = false
     @Published var canClean = false
     @Published var canBisect = false
+    @Published var canReflog = false
 
     private init() {}
 }

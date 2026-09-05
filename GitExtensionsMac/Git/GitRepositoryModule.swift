@@ -44,11 +44,11 @@ package actor RevisionReader {
                     case .revisions(let revisions):
                         session.publish(revisions)
                     case .repository(let git, let directory):
+                        var arguments = ["log", "-z", "--all"]
+                        if context.showReflogReferences { arguments.append("--reflog") }
+                        arguments.append("--format=%H%x00%P%x00%at%x00%ct%x00%aN%x00%aE%x00%cN%x00%cE%x00%B")
                         let command = GitCommand(
-                            arguments: [
-                                "log", "-z", "--all",
-                                "--format=%H%x00%P%x00%at%x00%ct%x00%aN%x00%aE%x00%cN%x00%cE%x00%B"
-                            ],
+                            arguments: arguments,
                             accessesRemote: false,
                             changesRepositoryState: false
                         )
@@ -264,17 +264,30 @@ package struct RevisionReadContext: Sendable {
     package let referencesByCommit: [ObjectID: [RevisionReference]]
     package let headID: ObjectID?
     package let includeArtificial: Bool
+    package let showReflogReferences: Bool
 
     package init(
         stashes: [GitStashRecord],
         referencesByCommit: [ObjectID: [RevisionReference]],
         headID: ObjectID?,
-        includeArtificial: Bool
+        includeArtificial: Bool,
+        showReflogReferences: Bool = false
     ) {
         self.stashes = stashes
         self.referencesByCommit = referencesByCommit
         self.headID = headID
         self.includeArtificial = includeArtificial
+        self.showReflogReferences = showReflogReferences
+    }
+
+    package func showingReflogReferences(_ show: Bool) -> RevisionReadContext {
+        RevisionReadContext(
+            stashes: stashes,
+            referencesByCommit: referencesByCommit,
+            headID: headID,
+            includeArtificial: includeArtificial,
+            showReflogReferences: show
+        )
     }
 }
 

@@ -64,6 +64,9 @@ enum CheckoutBranchDialogs {
         suggestedPrefix: String? = nil,
         isUnbornRepository: Bool,
         updateSubmodules: Bool,
+        checkoutAfterCreation: Bool? = nil,
+        userCanChangeRevision: Bool = true,
+        couldBeOrphan: Bool = true,
         owner: NSWindow
     ) async -> RepositoryCreateBranchRequest? {
         let controller = CreateBranchViewController(
@@ -73,7 +76,10 @@ enum CheckoutBranchDialogs {
             sourceRevision: sourceRevision,
             suggestedPrefix: suggestedPrefix,
             isUnbornRepository: isUnbornRepository,
-            updateSubmodules: updateSubmodules
+            updateSubmodules: updateSubmodules,
+            checkoutAfterCreation: checkoutAfterCreation,
+            userCanChangeRevision: userCanChangeRevision,
+            couldBeOrphan: couldBeOrphan
         )
         return await present(
             controller,
@@ -668,6 +674,9 @@ private final class CreateBranchViewController: BranchFormViewController<Reposit
     private let initialRevision: Commit?
     private let updateSubmodules: Bool
     private let isUnbornRepository: Bool
+    private let initialCheckoutAfterCreation: Bool?
+    private let userCanChangeRevision: Bool
+    private let couldBeOrphan: Bool
     private let name: NSTextField
     private let source = NSComboBox()
     private let sourceCaption = NSTextField(labelWithString: "Create branch at this revision:")
@@ -678,8 +687,11 @@ private final class CreateBranchViewController: BranchFormViewController<Reposit
     private let validation = NSTextField(labelWithString: "")
     private let summary = CommitSummaryView()
 
-    init(context: RepositoryBranchContext, revisions: [Commit], source: any RepositoryCheckoutBranchDataSource, sourceRevision: Commit?, suggestedPrefix: String?, isUnbornRepository: Bool, updateSubmodules: Bool) {
+    init(context: RepositoryBranchContext, revisions: [Commit], source: any RepositoryCheckoutBranchDataSource, sourceRevision: Commit?, suggestedPrefix: String?, isUnbornRepository: Bool, updateSubmodules: Bool, checkoutAfterCreation: Bool?, userCanChangeRevision: Bool, couldBeOrphan: Bool) {
         self.context = context; self.revisions = revisions; self.sourceCapability = source; initialRevision = sourceRevision; self.isUnbornRepository = isUnbornRepository; self.updateSubmodules = updateSubmodules
+        initialCheckoutAfterCreation = checkoutAfterCreation
+        self.userCanChangeRevision = userCanChangeRevision
+        self.couldBeOrphan = couldBeOrphan
         name = NSTextField(string: suggestedPrefix ?? Self.suggestedName(from: sourceRevision))
         super.init(nibName: nil, bundle: nil)
     }
@@ -691,10 +703,12 @@ private final class CreateBranchViewController: BranchFormViewController<Reposit
         source.stringValue = initialRevision.map { "\($0.shortID)  \($0.subject)" } ?? "HEAD"
         source.completes = true
         source.delegate = self
+        source.isEnabled = userCanChangeRevision
         source.widthAnchor.constraint(greaterThanOrEqualToConstant: 360).isActive = true
-        checkout.state = .on
+        checkout.state = (initialCheckoutAfterCreation ?? true) ? .on : .off
         orphan.target = self; orphan.action = #selector(orphanChanged)
         clear.state = .on; clear.isEnabled = false
+        orphan.isEnabled = couldBeOrphan
         if isUnbornRepository {
             source.isHidden = true
             sourceCaption.stringValue = "Creating orphan branch (repository has no commits)"
@@ -736,7 +750,7 @@ private final class CreateBranchViewController: BranchFormViewController<Reposit
     override func viewDidAppear() { super.viewDidAppear(); configurePanel(); panel?.makeFirstResponder(name); name.selectText(nil) }
     @objc private func orphanChanged() {
         clear.isEnabled = orphan.state == .on
-        source.isEnabled = orphan.state != .on
+        source.isEnabled = userCanChangeRevision && orphan.state != .on
         if orphan.state == .on {
             checkout.state = .on
             checkout.isEnabled = false
@@ -804,6 +818,7 @@ private final class CreateBranchViewController: BranchFormViewController<Reposit
     }
     func comboBoxSelectionDidChange(_ notification: Notification) { updateSummary() }
     private var selectedRevision: String? {
+        if !userCanChangeRevision { return initialRevision?.objectID?.string }
         let prefix = source.stringValue.split(separator: " ", maxSplits: 1).first.map(String.init) ?? source.stringValue
         if prefix == "HEAD" || prefix.isEmpty { return nil }
         return revisions.first { $0.shortID == prefix || $0.id.description == prefix }?.objectID?.string ?? prefix
@@ -811,6 +826,7 @@ private final class CreateBranchViewController: BranchFormViewController<Reposit
     private func updateSummary() {
         let selected = selectedRevision
         let commit = revisions.first { $0.objectID?.string == selected || $0.shortID == selected }
+            ?? (initialRevision?.objectID?.string == selected ? initialRevision : nil)
             ?? (!isUnbornRepository ? revisions.first(where: \.isHEAD) : nil)
         summary.apply(commit)
     }

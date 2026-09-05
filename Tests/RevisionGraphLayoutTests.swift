@@ -150,6 +150,15 @@ private enum RevisionGraphLayoutTests {
             }
             return
         }
+        if CommandLine.arguments.contains("--reflog-only") {
+            AppSettingsTests.run()
+            do {
+                try await GitReflogTests.run()
+            } catch {
+                fatalError("GitReflogTests failed: \(error.localizedDescription)")
+            }
+            return
+        }
         testObjectIdentity()
         testLinearHistory()
         testRelativeGraphState()
@@ -190,6 +199,7 @@ private enum RevisionGraphLayoutTests {
             try await GitCleanTests.run()
             try await GitRevertTests.run()
             try await GitBisectTests.run()
+            try await GitReflogTests.run()
             if let flagIndex = CommandLine.arguments.firstIndex(of: "--verify-mutations"),
                CommandLine.arguments.indices.contains(flagIndex + 1) {
                 try await GitRepositoryMutationTests.verifyDisposableClone(

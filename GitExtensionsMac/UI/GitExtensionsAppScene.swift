@@ -147,7 +147,8 @@ private struct GitExtensionsMenuCommands: Commands {
                 .disabled(!availability.canCheckoutRevision)
             Button("Bisect…") { perform(.bisect) }
                 .disabled(!availability.canBisect)
-            Button("Show reflog…") { perform(.unavailable("Show reflog")) }
+            Button("Show reflog…") { perform(.reflog) }
+                .disabled(!availability.canReflog)
             Divider()
             Button("Format patch…") { perform(.unavailable("Format patch")) }
             Button("Apply patch…") { perform(.unavailable("Apply patch")) }

@@ -165,7 +165,13 @@ final class CheckoutBranchWorkflowCoordinator {
         }
     }
 
-    func createBranch(sourceRevision: Commit?, suggestedPrefix: String? = nil) {
+    func createBranch(
+        sourceRevision: Commit?,
+        suggestedPrefix: String? = nil,
+        checkoutAfterCreation: Bool? = nil,
+        userCanChangeRevision: Bool = true,
+        couldBeOrphan: Bool = true
+    ) {
         guard !context.repository.isBare, sourceRevision?.isArtificial != true, let owner else { return }
         let startingContext = context
         let previousSelection = startingContext.headID.map(RevisionID.object)
@@ -181,6 +187,9 @@ final class CheckoutBranchWorkflowCoordinator {
                     suggestedPrefix: suggestedPrefix,
                     isUnbornRepository: state.headID == nil,
                     updateSubmodules: false,
+                    checkoutAfterCreation: checkoutAfterCreation,
+                    userCanChangeRevision: userCanChangeRevision,
+                    couldBeOrphan: couldBeOrphan,
                     owner: owner
                 ) else { onStatus("Create branch cancelled"); return }
                 onStatus("Creating branch…")

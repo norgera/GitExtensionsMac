@@ -8,6 +8,8 @@ final class GitUICommands {
     private weak var browser: RepositoryBrowserViewController?
     let repositoryChangedNotifier: RepositoryChangedNotifier
     private var remoteWindowController: NSWindowController?
+    private var reflogWindowController: NSWindowController?
+    private var reflogBranchWorkflowCoordinator: CheckoutBranchWorkflowCoordinator?
 
     init(
         repositoryModule: any RepositoryBrowsingDataSource,
@@ -505,9 +507,15 @@ final class GitUICommands {
         makeCheckoutWorkflowCoordinator()?.checkoutRevision(commit)
     }
 
-    func startResetCurrentBranch(to target: Commit) {
+    func startResetCurrentBranch(
+        to target: Commit,
+        owner overrideOwner: NSWindow? = nil,
+        initialMode: RepositoryResetMode = .soft,
+        confirmDirtyWorkingTree: Bool = false
+    ) {
+        let owner = overrideOwner ?? browser?.view.window
         guard let browser,
-              let owner = browser.view.window,
+              let owner,
               let identity = browser.repositoryIdentity,
               !identity.currentRepository.isBare,
               let targetID = target.objectID,
@@ -518,9 +526,24 @@ final class GitUICommands {
         let currentBranch = browser.repositoryReferences?.branches.first(where: \.isCurrent)?.name
         Task { @MainActor [weak self, weak browser, weak owner] in
             guard let self, let browser, let owner else { return }
+            if confirmDirtyWorkingTree {
+                let warning = NSAlert()
+                warning.alertStyle = .warning
+                warning.messageText = "Changes not committed…"
+                warning.informativeText = "You have changes in your working directory that could be lost.\n\nDo you want to continue?"
+                warning.addButton(withTitle: "Continue")
+                warning.addButton(withTitle: "Cancel")
+                warning.buttons[1].keyEquivalent = "\r"
+                warning.buttons[0].keyEquivalent = ""
+                guard await warning.beginSheetModal(for: owner) == .alertFirstButtonReturn else {
+                    browser.statusLabel.stringValue = "Reset cancelled"
+                    return
+                }
+            }
             guard let mode = await ResetDialogs.resetCurrentBranch(
                 branchName: currentBranch,
                 target: target,
+                initialMode: initialMode,
                 owner: owner
             ) else {
                 browser.statusLabel.stringValue = "Reset cancelled"
@@ -571,6 +594,70 @@ final class GitUICommands {
         let target = browser.revisions.first(where: { $0.objectID == targetID })
             ?? RevisionCommitBuilder.placeholderRevision(id: targetID, subject: label)
         startResetCurrentBranch(to: target)
+    }
+
+    func startReflog() {
+        if let reflogWindowController {
+            ReflogDialog.focus(reflogWindowController)
+            return
+        }
+        guard let browser,
+              let owner = browser.view.window,
+              browser.repositoryIdentity?.currentRepository.isBare == false,
+              let source = repositoryModule as? any RepositoryReflogDataSource else {
+            browser?.showPlaceholderStatus("Reflog is unavailable for this repository")
+            return
+        }
+        reflogWindowController = ReflogDialog.present(
+            source: source,
+            owner: owner,
+            createBranch: { [weak self] objectID, selector, actionOwner in
+                Task { @MainActor [weak self] in
+                    guard let self, let browser = self.browser else { return }
+                    let revision: Commit
+                    if let existing = browser.revisions.first(where: { $0.objectID == objectID }) {
+                        revision = existing
+                    } else if let loaded = try? await source.loadReflogRevision(objectID) {
+                        revision = loaded
+                    } else {
+                        revision = RevisionCommitBuilder.placeholderRevision(id: objectID, subject: selector)
+                    }
+                    self.reflogBranchWorkflowCoordinator = self.makeCheckoutWorkflowCoordinator(
+                        owner: actionOwner,
+                        retainOnBrowser: false
+                    )
+                    self.reflogBranchWorkflowCoordinator?.createBranch(
+                        sourceRevision: revision,
+                        checkoutAfterCreation: false,
+                        userCanChangeRevision: false,
+                        couldBeOrphan: false
+                    )
+                }
+            },
+            resetCurrentBranch: { [weak self] objectID, selector, isDirty, actionOwner in
+                Task { @MainActor [weak self] in
+                    guard let self, let browser = self.browser else { return }
+                    let revision: Commit
+                    if let existing = browser.revisions.first(where: { $0.objectID == objectID }) {
+                        revision = existing
+                    } else if let loaded = try? await source.loadReflogRevision(objectID) {
+                        revision = loaded
+                    } else {
+                        revision = RevisionCommitBuilder.placeholderRevision(id: objectID, subject: selector)
+                    }
+                    self.startResetCurrentBranch(
+                        to: revision,
+                        owner: actionOwner,
+                        initialMode: isDirty ? .soft : .hard,
+                        confirmDirtyWorkingTree: isDirty
+                    )
+                }
+            },
+            onClose: { [weak self] in
+                self?.reflogWindowController = nil
+                self?.reflogBranchWorkflowCoordinator = nil
+            }
+        )
     }
 
     func startResetAnotherBranch(to target: Commit) {
@@ -840,10 +927,14 @@ final class GitUICommands {
         return activeRemotes.first?.name
     }
 
-    private func makeCheckoutWorkflowCoordinator() -> CheckoutBranchWorkflowCoordinator? {
+    private func makeCheckoutWorkflowCoordinator(
+        owner overrideOwner: NSWindow? = nil,
+        retainOnBrowser: Bool = true
+    ) -> CheckoutBranchWorkflowCoordinator? {
+        let owner = overrideOwner ?? browser?.view.window
         guard let browser,
               let context = browser.branchContext,
-              let window = browser.view.window,
+              let owner,
               let source = repositoryModule as? any RepositoryCheckoutBranchDataSource else {
             return nil
         }
@@ -853,7 +944,7 @@ final class GitUICommands {
             pullSource: repositoryModule as? any RepositoryPullingDataSource,
             context: context,
             revisions: browser.revisions,
-            owner: window,
+            owner: owner,
             onRepositoryChanged: { [weak self, weak browser] selectedCommitID in
                 self?.notifyRepositoryChanged(preferredCommitID: selectedCommitID ?? browser?.selectedCommitID)
             },
@@ -870,7 +961,7 @@ final class GitUICommands {
                 self?.startRebase(on: commit, interactive: false)
             }
         )
-        browser.checkoutBranchWorkflowCoordinator = coordinator
+        if retainOnBrowser { browser.checkoutBranchWorkflowCoordinator = coordinator }
         return coordinator
     }
 

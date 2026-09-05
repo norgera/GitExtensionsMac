@@ -508,6 +508,7 @@ final class AppSettingsStore {
         static let checkoutBranchPreferences = "GitExtensionsMac.checkoutBranchPreferences.v1"
         static let repositoryCreationPreferences = "GitExtensionsMac.repositoryCreationPreferences.v1"
         static let resetPreferences = "GitExtensionsMac.resetPreferences.v1"
+        static let showReflogReferences = "GitExtensionsMac.showReflogReferences"
     }
 
     private let defaults: UserDefaults
@@ -528,6 +529,7 @@ final class AppSettingsStore {
     private(set) var checkoutBranchPreferences: CheckoutBranchPreferences
     private(set) var repositoryCreationPreferences: RepositoryCreationPreferences
     private(set) var resetPreferences: ResetPreferences
+    private(set) var showReflogReferences: Bool
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -594,6 +596,7 @@ final class AppSettingsStore {
         resetPreferences = defaults.data(forKey: Key.resetPreferences)
             .flatMap { try? decoder.decode(ResetPreferences.self, from: $0) }
             ?? ResetPreferences()
+        showReflogReferences = defaults.object(forKey: Key.showReflogReferences) as? Bool ?? false
         recentRepositories.removeAll { !FileManager.default.fileExists(atPath: $0.path) }
         applyAppearance()
     }
@@ -726,6 +729,11 @@ final class AppSettingsStore {
     func saveResetPreferences(_ preferences: ResetPreferences) {
         resetPreferences = preferences
         defaults.set(try? JSONEncoder().encode(preferences), forKey: Key.resetPreferences)
+    }
+
+    func saveShowReflogReferences(_ show: Bool) {
+        showReflogReferences = show
+        defaults.set(show, forKey: Key.showReflogReferences)
     }
 
     func recordCloneSource(_ source: String) {

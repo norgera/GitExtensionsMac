@@ -69,7 +69,11 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
             self?.handleQuickSearchKey(event) ?? false
         }
         tableView.handleNavigationKey = { [weak self] command in
-            self?.performNavigation(command)
+            if command == "revision.other.reflog" {
+                self?.performCommand(command, focusedCommitID: nil)
+            } else {
+                self?.performNavigation(command)
+            }
             return true
         }
 
@@ -543,16 +547,23 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
                     || identifier.hasPrefix("revision.branch.rebase.")
                     || identifier == "revision.branch.resetCurrent"
                     || identifier == "revision.branch.resetOther"
+                    || identifier == "revision.other.reflog"
                     || identifier.hasPrefix("revision.tag.")
             },
             target: self,
             action: #selector(performMutationMenuCommand(_:))
         )
+        menuItem(withIdentifier: "revision.other.reflog", in: menu)?.state =
+            AppSettingsStore.shared.showReflogReferences ? .on : .off
     }
 
     @objc private func performMutationMenuCommand(_ sender: NSMenuItem) {
-        guard let identifier = sender.identifier?.rawValue,
-              let focused = focusedCommit(id: menuFocusedCommitID) else { return }
+        guard let identifier = sender.identifier?.rawValue else { return }
+        performCommand(identifier, focusedCommitID: menuFocusedCommitID)
+    }
+
+    private func performCommand(_ identifier: String, focusedCommitID: RevisionID?) {
+        guard let focused = focusedCommit(id: focusedCommitID) else { return }
         var selected = tableView.selectedRowIndexes.compactMap { index in
             index < commits.count ? commits[index] : nil
         }
@@ -640,6 +651,8 @@ private final class RevisionTableView: NSTableView {
             navigationID = "revision.navigate.mergeBase"
         } else if navigationModifiers == [.control, .shift], key == "c" {
             navigationID = "revision.navigate.current"
+        } else if navigationModifiers == [.control, .shift], key == "l" {
+            navigationID = "revision.other.reflog"
         } else {
             navigationID = nil
         }

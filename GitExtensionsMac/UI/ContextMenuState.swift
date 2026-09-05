@@ -292,7 +292,7 @@ enum RevisionContextMenuBuilder {
             children: [
                 command("revision.other.createPatch", "Create patch…"),
                 command("revision.other.formatPatch", "Format patch…"),
-                command("revision.other.reflog", "Show reflog"),
+                command("revision.other.reflog", "Show reflog references"),
                 command("revision.other.object", "Show object information")
             ]
         ))

@@ -10,6 +10,7 @@ enum AppSettingsTests {
         testPullPreferencesRoundTrip()
         testRepositoryCreationPreferencesRoundTrip()
         testResetPreferencesRoundTrip()
+        testReflogReferencesPreferenceRoundTrip()
         testRebasePreferencesRoundTrip()
         testCherryPickPreferencesRoundTrip()
         testPushPreferencesRoundTrip()
@@ -66,6 +67,14 @@ enum AppSettingsTests {
             preferences.checkoutOtherBranchAfterReset = false
             store.saveResetPreferences(preferences)
             precondition(AppSettingsStore(defaults: defaults).resetPreferences == preferences)
+        }
+    }
+
+    private static func testReflogReferencesPreferenceRoundTrip() {
+        withStore { store, defaults in
+            precondition(!store.showReflogReferences)
+            store.saveShowReflogReferences(true)
+            precondition(AppSettingsStore(defaults: defaults).showReflogReferences)
         }
     }
 
