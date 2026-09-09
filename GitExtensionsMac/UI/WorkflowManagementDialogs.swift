@@ -668,6 +668,7 @@ struct ConflictResolverActionState: Equatable {
     let hasSingleSelection: Bool
     let hasConflicts: Bool
     let hasMergeTool: Bool
+    let hasOnlySubmodules: Bool
     let hasLocalVersion: Bool
     let hasBaseVersion: Bool
     let hasRemoteVersion: Bool
@@ -682,12 +683,13 @@ struct ConflictResolverActionState: Equatable {
         hasSingleSelection = single != nil
         hasConflicts = conflictCount > 0
         hasMergeTool = mergeToolConfiguration != nil
+        hasOnlySubmodules = !selectedConflicts.isEmpty && selectedConflicts.allSatisfy(\.isSubmodule)
         hasLocalVersion = single?.local != nil
         hasBaseVersion = single?.base != nil
         hasRemoteVersion = single?.remote != nil
     }
 
-    var canRunSelectedMergeTool: Bool { hasSelection && hasMergeTool }
+    var canRunSelectedMergeTool: Bool { hasSelection && (hasMergeTool || hasOnlySubmodules) }
     var canRunAllMergeTool: Bool { hasConflicts && hasMergeTool }
     var canResolveSelection: Bool { hasSelection }
     var canResolveAll: Bool { hasConflicts }
@@ -1060,7 +1062,7 @@ private final class ConflictResolverViewController: NSViewController, NSTableVie
         menu.removeAllItems()
         let actions = actionState
         guard actions.hasSelection else { return }
-        addMenuItem("Open in \(mergeToolConfiguration?.name ?? "mergetool")", action: #selector(openMergeTool), enabled: actions.canRunSelectedMergeTool, to: menu)
+        addMenuItem(actions.hasOnlySubmodules ? "Resolve submodule conflict" : "Open in \(mergeToolConfiguration?.name ?? "mergetool")", action: #selector(openMergeTool), enabled: actions.canRunSelectedMergeTool, to: menu)
         addMenuItem("Mark conflict as solved", action: #selector(markSolved), enabled: actions.canResolveSelection, to: menu)
         addMenuItem("Mark all conflicts as solved", action: #selector(markAllSolved), enabled: actions.canResolveAll, to: menu)
         menu.addItem(.separator())
@@ -1173,7 +1175,10 @@ private final class ConflictResolverViewController: NSViewController, NSTableVie
         let actions = actionState
         mergeToolButton.isEnabled = actions.canRunSelectedMergeTool
         allMergeToolButton.isEnabled = actions.canRunAllMergeTool
-        if let mergeToolConfiguration {
+        if actions.hasOnlySubmodules {
+            mergeToolButton.title = "Resolve submodule conflict"
+            mergeToolButton.toolTip = "Inspect the gitlink commits and stage the submodule's resolved checkout"
+        } else if let mergeToolConfiguration {
             mergeToolButton.title = "Open in \(mergeToolConfiguration.name)"
             mergeToolButton.toolTip = "Open the selected conflict in \(mergeToolConfiguration.name)"
             allMergeToolButton.toolTip = "Run \(mergeToolConfiguration.name) for every unresolved conflict"
@@ -1209,6 +1214,13 @@ private final class ConflictResolverViewController: NSViewController, NSTableVie
         task = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
+                if let submodules = source as? any RepositorySubmoduleManagingDataSource, let panel {
+                    for conflict in conflicts where conflict.isSubmodule {
+                        if await GitUICommands.resolveSubmoduleConflict(source: submodules, path: conflict.path, owner: panel) { repositoryChanged = true }
+                    }
+                }
+                let conflicts = conflicts.filter { !$0.isSubmodule }
+                guard !conflicts.isEmpty else { reloadState(); return }
                 var containsBinary = false
                 for conflict in conflicts where !conflict.isSubmodule {
                     let candidate = conflict.local != nil ? RepositoryConflictSide.local : .remote
@@ -1231,9 +1243,10 @@ private final class ConflictResolverViewController: NSViewController, NSTableVie
                     guard alert.runModal() == .alertFirstButtonReturn else { return }
                 }
                 status.stringValue = "Opening \(tool ?? mergeToolConfiguration?.name ?? "merge tool")…"
+                let commandPaths = useAllPathsMode && !self.conflicts.contains(where: \.isSubmodule) ? [] : conflicts.map(\.path)
                 await execute { source in
                     try await source.runMergeTool(
-                        paths: useAllPathsMode ? [] : conflicts.map(\.path),
+                        paths: commandPaths,
                         tool: tool
                     )
                 }

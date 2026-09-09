@@ -9,6 +9,12 @@ final class GitUICommands {
     let repositoryChangedNotifier: RepositoryChangedNotifier
     private var remoteWindowController: NSWindowController?
     private var reflogWindowController: NSWindowController?
+    private var worktreeWindowController: NSWindowController?
+    private var submoduleWindowController: NSWindowController?
+    private var submodulePullWindowController: NSWindowController?
+    private var submoduleRemoteWindowController: NSWindowController?
+    private var submoduleCommitWindowController: NSWindowController?
+    private var submoduleSources: [String: any RepositoryBrowsingDataSource] = [:]
     private var reflogBranchWorkflowCoordinator: CheckoutBranchWorkflowCoordinator?
 
     init(
@@ -36,6 +42,239 @@ final class GitUICommands {
     func notifyRepositoryChanged(preferredCommitID: RevisionID? = nil) {
         browser?.prepareNotifierRefresh(preferredCommitID: preferredCommitID)
         repositoryChangedNotifier.notify()
+    }
+
+    func startWorktreeManagement() {
+        if let worktreeWindowController { worktreeWindowController.showWindow(nil); worktreeWindowController.window?.makeKeyAndOrderFront(nil); return }
+        guard let owner = browser?.view.window, let source = repositoryModule as? any RepositoryWorktreeManagingDataSource else { return }
+        worktreeWindowController = WorktreeDialogs.manage(
+            source: source, owner: owner,
+            create: { [weak self] in await self?.createWorktree(owner: $0) },
+            delete: { [weak self] in await self?.deleteWorktree($0, owner: $1) },
+            prune: { [weak self] in await self?.pruneWorktrees(owner: $0) },
+            open: { [weak self] in self?.openWorktree($0, owner: $1) ?? false },
+            closed: { [weak self] in self?.worktreeWindowController = nil }
+        )
+    }
+
+    func startSubmoduleManagement() {
+        if let submoduleWindowController { submoduleWindowController.showWindow(nil); submoduleWindowController.window?.makeKeyAndOrderFront(nil); return }
+        guard let owner = browser?.view.window, browser?.repositoryIdentity?.currentRepository.isBare == false,
+              let source = repositoryModule as? any RepositorySubmoduleManagingDataSource else { return }
+        submoduleWindowController = SubmoduleDialogs.manage(source: source, owner: owner,
+            changed: { [weak self] in self?.notifyRepositoryChanged() },
+            open: { [weak self] submodule, pull in
+                if pull { self?.startSubmodulePull(path: submodule.path) }
+                else { self?.startOpenSubmodule(submodule) }
+            }, closed: { [weak self] in self?.submoduleWindowController = nil })
+    }
+
+    static func resolveSubmoduleConflict(source: any RepositorySubmoduleManagingDataSource, path: String, owner: NSWindow) async -> Bool {
+        await SubmoduleDialogs.resolveConflict(source: source, path: path, owner: owner)
+    }
+
+    func startSubmoduleAction(_ action: RepositorySubmoduleAction) {
+        guard let source = repositoryModule as? any RepositorySubmoduleManagingDataSource,
+              let owner = browser?.view.window, browser?.repositoryIdentity?.currentRepository.isBare == false else { return }
+        Task { @MainActor in
+            let result = await SubmoduleDialogs.run(title: "Submodules", owner: owner) { output in try await source.performSubmoduleAction(action, output: output) }
+            completeSubmoduleOperation(result)
+        }
+    }
+
+    func completeSubmoduleOperation(_ result: RepositorySubmoduleResult) {
+        if result.changed { notifyRepositoryChanged() }
+        browser?.showPlaceholderStatus(result.output.isEmpty ? "Submodules refreshed." : result.output)
+    }
+
+    func startOpenSubmodule(_ submodule: Submodule, newWindow: Bool = false) {
+        guard let repository = browser?.repositoryIdentity?.currentRepository else { return }
+        let url = URL(fileURLWithPath: repository.path).appendingPathComponent(submodule.path)
+        openSubmoduleURL(url, newWindow: newWindow)
+    }
+
+    func startOpenSubmodule(_ item: SubmoduleTreeItem, newWindow: Bool = false) {
+        guard let source = repositoryModule as? any RepositorySubmoduleManagingDataSource else { return }
+        Task { @MainActor in
+            do {
+                let url = try await source.submoduleTreeLocation(item)
+                let selection: [RevisionID]
+                if item.isCurrent { selection = browser?.workflowRevisionSelection ?? [] }
+                else if newWindow || (!item.isTop && (item.isDirty || item.commitID != item.recordedID)) {
+                    selection = [.workingDirectory] + (item.commitID != item.recordedID ? item.recordedID.map { [.object($0)] } ?? [] : [])
+                } else { selection = [] }
+                openSubmoduleURL(url, newWindow: newWindow, validated: true, selection: selection)
+            } catch {
+                if let owner = browser?.view.window { worktreeError(error.localizedDescription, owner: owner) }
+                else { browser?.showPlaceholderStatus(error.localizedDescription) }
+            }
+        }
+    }
+
+    private func openSubmoduleURL(_ url: URL, newWindow: Bool, validated: Bool = false, selection: [RevisionID] = []) {
+        guard validated || FileManager.default.fileExists(atPath: url.appendingPathComponent(".git").path) else {
+            browser?.showPlaceholderStatus("Initialize the submodule before opening it."); return
+        }
+        if newWindow {
+            let configuration = NSWorkspace.OpenConfiguration(); configuration.createsNewApplicationInstance = true
+            configuration.arguments = ["--repository", url.path] + RepositoryOpeningSelection.arguments(selection)
+            NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: configuration) { _, error in
+                if let error { Task { @MainActor in self.browser?.showPlaceholderStatus(error.localizedDescription) } }
+            }
+        } else if selection.isEmpty { browser?.onApplicationCommand?(.openRecentRepository(url)) }
+        else { browser?.onApplicationCommand?(.openRepositoryAtRevisions(url, selection)) }
+    }
+
+    func startSubmoduleTreeUpdate(_ item: SubmoduleTreeItem) {
+        guard let source = repositoryModule as? any RepositorySubmoduleManagingDataSource, let owner = browser?.view.window else { return }
+        Task { @MainActor in
+            let result = await SubmoduleDialogs.run(title: "Submodules", owner: owner) { output in
+                try await source.updateSubmoduleTreeItem(item, output: output)
+            }
+            completeSubmoduleOperation(result)
+        }
+    }
+
+    private func submoduleSource(path: String) async throws -> any RepositoryBrowsingDataSource {
+        if let existing = submoduleSources[path] { return existing }
+        guard let parent = repositoryModule as? any RepositorySubmoduleManagingDataSource else { throw RepositorySubmoduleError.missingSubmodule }
+        let child = try await parent.submoduleRepository(path: path)
+        submoduleSources[path] = child
+        return child
+    }
+
+    private func startSubmodulePull(path: String) {
+        if let submodulePullWindowController { submodulePullWindowController.window?.makeKeyAndOrderFront(nil); return }
+        Task { @MainActor in
+            do {
+                let child = try await submoduleSource(path: path)
+                guard let pullSource = child as? any RepositoryPullingDataSource else { return }
+                let state = try await child.loadRepositoryState()
+                let context = RepositoryNetworkContext(repository: state.identity.currentRepository, headID: state.identity.headID,
+                    branches: state.references.branches, remotes: state.navigation.remotes,
+                    references: state.references.references, submodules: state.navigation.submodules)
+                submodulePullWindowController = ApplicationShellDialogs.presentPullWindow(initialAction: .merge, executeImmediately: false,
+                    context: context, source: pullSource,
+                    onManageRemotes: { [weak self] remote, branch in
+                        guard let self, let remotes = child as? any RepositoryRemoteManagingDataSource else { return }
+                        self.submoduleRemoteWindowController = RemoteManagementDialog.present(source: remotes, selectedRemote: remote, selectedLocalBranch: branch,
+                            onFetchRemote: { name, owner in
+                                _ = await PullProcessDialog.run(request: RepositoryPullRequest(source: .remote(name), mode: .fetch), source: pullSource, parent: owner)
+                            }, onRepositoryChanged: { [weak self] in self?.notifyRepositoryChanged() },
+                            onClose: { [weak self] in self?.submoduleRemoteWindowController = nil })
+                    }, onRepositoryChanged: { [weak self] _ in self?.notifyRepositoryChanged() },
+                    onClose: { [weak self] in self?.submodulePullWindowController = nil })
+            } catch { if let owner = browser?.view.window { worktreeError(error.localizedDescription, owner: owner) } }
+        }
+    }
+
+    enum SubmoduleChildAction { case reset, stash, commit }
+    func startSubmoduleChildAction(_ action: SubmoduleChildAction, submodule: SubmoduleTreeItem) {
+        guard let owner = browser?.view.window else { return }
+        Task { @MainActor in
+            do {
+                guard let parent = repositoryModule as? any RepositorySubmoduleManagingDataSource else { return }
+                let child: any RepositoryBrowsingDataSource
+                if let cached = submoduleSources[submodule.id] { child = cached }
+                else { child = try await parent.submoduleTreeRepository(submodule); submoduleSources[submodule.id] = child }
+                switch action {
+                case .commit:
+                    if let submoduleCommitWindowController { submoduleCommitWindowController.window?.makeKeyAndOrderFront(nil); return }
+                    guard let commitSource = child as? any RepositoryCommitWorkflowDataSource else { return }
+                    submoduleCommitWindowController = CommitWorkflowDialog.present(source: commitSource,
+                        pushSource: child as? any RepositoryPushingDataSource, initialMode: .normal, head: nil, draft: nil, owner: owner,
+                        onManageRemotes: { [weak self] remote, branch in
+                            guard let self, let remotes = child as? any RepositoryRemoteManagingDataSource else { return }
+                            self.submoduleRemoteWindowController = RemoteManagementDialog.present(source: remotes, selectedRemote: remote, selectedLocalBranch: branch,
+                                onFetchRemote: { name, window in
+                                    if let pull = child as? any RepositoryPullingDataSource { _ = await PullProcessDialog.run(request: .init(source: .remote(name), mode: .fetch), source: pull, parent: window) }
+                                }, onRepositoryChanged: { [weak self] in self?.notifyRepositoryChanged() }, onClose: { [weak self] in self?.submoduleRemoteWindowController = nil })
+                        }, onRepositoryChanged: { [weak self] _ in self?.notifyRepositoryChanged() }, onClose: { [weak self] in self?.submoduleCommitWindowController = nil })
+                case .stash:
+                    guard let stash = child as? any RepositoryStashDataSource else { return }
+                    let before = try await child.loadRepositoryState().navigation.stashes
+                    let result = try await stash.createStash(.init(message: "", includeUntracked: AppSettingsStore.shared.stashPreferences.includeUntracked, keepIndex: false, stagedOnly: false))
+                    if try await child.loadRepositoryState().navigation.stashes != before { notifyRepositoryChanged() }
+                    browser?.showPlaceholderStatus(result.message)
+                case .reset:
+                    guard let reset = child as? any RepositoryResettingDataSource else { return }
+                    let state = try await reset.loadMutationState()
+                    let tracked = state.hasStagedChanges || state.hasUnstagedChanges || !state.conflictedPaths.isEmpty
+                    guard tracked || state.hasUntrackedFiles else { browser?.showPlaceholderStatus("There are no changes to reset."); return }
+                    guard let clean = await ResetDialogs.confirmResetChanges(hasTrackedChanges: tracked, hasUntrackedFiles: state.hasUntrackedFiles, owner: owner) else { return }
+                    let result = try await reset.resetChanges(.init(scope: .all, deleteUntracked: clean))
+                    notifyRepositoryChanged(); browser?.showPlaceholderStatus(result.message)
+                }
+            } catch { worktreeError(error.localizedDescription, owner: owner) }
+        }
+    }
+
+    func startCreateWorktree() { Task { @MainActor in if let owner = browser?.view.window { await createWorktree(owner: owner) } } }
+    func startDeleteWorktree(_ worktree: Worktree) { Task { @MainActor in if let owner = browser?.view.window { await deleteWorktree(worktree, owner: owner) } } }
+    func startPruneWorktrees() { Task { @MainActor in if let owner = browser?.view.window { await pruneWorktrees(owner: owner) } } }
+    func startOpenWorktree(_ worktree: Worktree, confirm: Bool = true) { if let owner = browser?.view.window { _ = openWorktree(worktree, owner: owner, confirm: confirm) } }
+
+    private func reportWorktreeResult(_ result: RepositoryWorktreeResult) {
+        if result.changed { notifyRepositoryChanged() }
+        browser?.showPlaceholderStatus(result.output.isEmpty ? "Worktrees refreshed." : result.output)
+    }
+
+    private func createWorktree(owner: NSWindow) async {
+        guard let source = repositoryModule as? any RepositoryWorktreeManagingDataSource else { return }
+        do {
+            let context = try await source.loadWorktreeContext()
+            let path = await WorktreeDialogs.create(context: context, owner: owner) { [weak self] request, output in
+                let result = try await source.createWorktree(request, output: output)
+                self?.reportWorktreeResult(result)
+                return result
+            }
+            if let path, let worktree = try await source.loadWorktreeContext().worktrees.first(where: { $0.path == URL(fileURLWithPath: path).standardizedFileURL.path }) {
+                _ = openWorktree(worktree, owner: owner)
+            }
+        } catch { worktreeError(error.localizedDescription, owner: owner) }
+    }
+
+    private func deleteWorktree(_ worktree: Worktree, owner: NSWindow) async {
+        guard worktree.canDelete, let source = repositoryModule as? any RepositoryWorktreeManagingDataSource else { return }
+        let confirmation = NSAlert()
+        confirmation.alertStyle = .warning
+        confirmation.messageText = "This cannot be undone"
+        confirmation.informativeText = "Delete worktree ‘\(worktree.path)’?\nThe directory and all its contents, including uncommitted and untracked files, will be permanently deleted."
+        confirmation.addButton(withTitle: "Cancel"); confirmation.addButton(withTitle: "Delete worktree")
+        guard await confirmation.beginSheetModal(for: owner) == .alertSecondButtonReturn else { return }
+        do {
+            let result = try await source.deleteWorktree(path: worktree.path)
+            reportWorktreeResult(result)
+            if !result.succeeded { worktreeError(result.output, owner: owner) }
+        } catch { worktreeError(error.localizedDescription, owner: owner) }
+    }
+
+    private func pruneWorktrees(owner: NSWindow) async {
+        guard let source = repositoryModule as? any RepositoryWorktreeManagingDataSource else { return }
+        do {
+            let result = try await source.pruneWorktrees(); reportWorktreeResult(result)
+            if !result.succeeded { worktreeError(result.output, owner: owner) }
+        } catch { worktreeError(error.localizedDescription, owner: owner) }
+    }
+
+    private func openWorktree(_ worktree: Worktree, owner: NSWindow, confirm: Bool = true) -> Bool {
+        guard worktree.canOpen else { return false }
+        guard FileManager.default.fileExists(atPath: worktree.path) else { worktreeError("The worktree directory no longer exists: \(worktree.path)", owner: owner); return false }
+        if confirm && !UserDefaults.standard.bool(forKey: "GitExtensionsMac.DontConfirmSwitchWorktree") {
+            let alert = NSAlert(); alert.messageText = "Switch worktree?"
+            alert.informativeText = "Open ‘\(worktree.path)’ in Git Extensions?"
+            alert.addButton(withTitle: "Yes"); alert.addButton(withTitle: "No")
+            alert.showsSuppressionButton = true
+            guard alert.runModal() == .alertFirstButtonReturn else { return false }
+            if alert.suppressionButton?.state == .on { UserDefaults.standard.set(true, forKey: "GitExtensionsMac.DontConfirmSwitchWorktree") }
+        }
+        worktreeWindowController?.close()
+        return browser?.onApplicationCommand?(.openRecentRepository(URL(fileURLWithPath: worktree.path))) ?? false
+    }
+
+    private func worktreeError(_ message: String, owner: NSWindow) {
+        let alert = NSAlert(); alert.alertStyle = .warning; alert.messageText = "Worktree operation failed"; alert.informativeText = message
+        alert.beginSheetModal(for: owner)
     }
 
     func startDifftool(commit: Commit, file: ChangedFile) {

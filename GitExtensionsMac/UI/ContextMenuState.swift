@@ -406,8 +406,8 @@ enum RepositoryMenuNodeKind: Hashable, Sendable {
     case remoteBranch
     case tag
     case stash
-    case worktree(isCurrent: Bool, pathExists: Bool)
-    case submodule
+    case worktree(isCurrent: Bool, pathExists: Bool, isMain: Bool = false)
+    case submodule(isInitialized: Bool = false, isCurrent: Bool = false)
     case branchFolder
     case remoteBranchFolder
     case tagFolder
@@ -573,23 +573,24 @@ enum RepositoryContextMenuBuilder {
                 command("repository.stash.drop", "Drop stash…", enabled: !isBareRepository)
             ]
 
-        case .worktree(_, let pathExists):
+        case .worktree(let isCurrent, let pathExists, let isMain):
             return [
-                command("repository.worktree.open", "Open worktree", enabled: false),
-                command("repository.worktree.delete", "Delete worktree…", enabled: false),
+                command("repository.worktree.open", "Open worktree", enabled: !isCurrent && pathExists),
+                command("repository.worktree.delete", "Delete worktree…", enabled: !isCurrent && pathExists && !isMain),
                 command("repository.worktree.copyPath", "Copy worktree path"),
                 command("repository.worktree.show", "Show worktree in Finder", enabled: pathExists)
             ]
 
-        case .submodule:
+        case .submodule(_, let isCurrent):
             return [
-                command("repository.submodule.open", "Open submodule", enabled: false),
-                command("repository.submodule.openGE", "Open in Git Extensions", enabled: false),
-                command("repository.submodule.update", "Update submodule", enabled: false),
-                command("repository.submodule.synchronize", "Synchronize submodule", enabled: false),
-                command("repository.submodule.reset", "Reset submodule", enabled: false),
-                command("repository.submodule.stash", "Stash submodule", enabled: false),
-                command("repository.submodule.commit", "Commit submodule", enabled: false)
+                command("repository.submodule.open", "Open submodule", enabled: !isCurrent),
+                command("repository.submodule.openGE", "Open in Git Extensions"),
+                command("repository.submodule.update", "Update submodule"),
+                command("repository.submodules.manage", "Manage…", enabled: isCurrent && !isBareRepository),
+                command("repository.submodules.synchronize", "Synchronize", enabled: isCurrent && !isBareRepository),
+                command("repository.submodule.reset", "Reset submodule", enabled: !isBareRepository),
+                command("repository.submodule.stash", "Stash submodule", enabled: !isBareRepository),
+                command("repository.submodule.commit", "Commit submodule", enabled: !isBareRepository)
             ]
 
         case .branchFolder:
@@ -620,9 +621,9 @@ enum RepositoryContextMenuBuilder {
                 ]
             case .worktrees:
                 return [
-                    command("repository.worktrees.create", "Create worktree…", enabled: false),
-                    command("repository.worktrees.prune", "Prune worktrees", enabled: false),
-                    command("repository.worktrees.manage", "Manage worktrees…", enabled: false)
+                    command("repository.worktrees.create", "Create worktree…"),
+                    command("repository.worktrees.prune", "Prune worktrees"),
+                    command("repository.worktrees.manage", "Manage worktrees…")
                 ]
             default:
                 return []

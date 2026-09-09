@@ -11,7 +11,7 @@ final class RepositoryTreeNode: NSObject {
         case tag(Tag)
         case stash(Stash)
         case worktree(Worktree)
-        case submodule(Submodule)
+        case submodule(SubmoduleTreeItem)
         case folder(prefix: String, isRemote: Bool)
         case tagFolder(prefix: String)
     }
@@ -39,6 +39,57 @@ final class RepositoryTreeNode: NSObject {
         self.symbolName = symbolName
         self.toolTip = toolTip ?? title
         self.children = children
+    }
+}
+
+enum SubmoduleTreePresentation {
+    static func defaultCommand(_ item: SubmoduleTreeItem) -> String {
+        item.isCurrent ? "repository.submodule.openGE" : "repository.submodule.open"
+    }
+    static func title(_ item: SubmoduleTreeItem) -> String {
+        var text = item.repositoryURL.lastPathComponent
+        if let branch = item.branch { text += " (\(branch))" }
+        if item.commitState == .uninitialized { text += " (not initialized)" }
+        if item.commitState == .missing { text += " (missing)" }
+        if item.commitState == .conflicted { text += " (conflict)" }
+        if let added = item.addedCommits, let removed = item.removedCommits, added != 0 || removed != 0 {
+            text += " (+\(added)-\(removed))"
+        }
+        return text
+    }
+    static func icon(_ item: SubmoduleTreeItem) -> String {
+        let direction: String? = switch item.commitState {
+        case .ahead: "Up"
+        case .behind: "Down"
+        case .newer: "SemiUp"
+        case .older: "SemiDown"
+        default: nil
+        }
+        if let direction { return "SubmoduleRevision" + direction + (item.isDirty ? "Dirty" : "") }
+        if item.isDirty { return "SubmoduleDirty" }
+        return item.commitState == .modified || item.commitState == .conflicted ? "FileStatusModified" : "FolderSubmodule"
+    }
+    static func toolTip(_ item: SubmoduleTreeItem) -> String {
+        var lines = [item.repositoryURL.path]
+        if item.isTop { lines.append("Top superproject") }
+        if item.isCurrent { lines.append("Current repository") }
+        lines.append("Recorded gitlink: \(item.recordedID?.string ?? "—")")
+        lines.append("Current commit: \(item.commitID?.string ?? "—")")
+        let type: String = switch item.commitState {
+        case .same: "Same commit"
+        case .ahead: "Fast Forward"
+        case .behind: "Rewind"
+        case .newer: "Newer commit time"
+        case .older: "Older commit time"
+        case .modified: "Modified"
+        case .missing: "Missing directory"
+        case .uninitialized: "Not initialized"
+        case .conflicted: "Conflict"
+        }
+        lines.append("Type: \(type)\(item.isDirty ? " (dirty)" : "")")
+        if let added = item.addedCommits, let removed = item.removedCommits { lines.append("\(added) added / \(removed) removed commits") }
+        if !item.commitDescription.isEmpty { lines.append(item.commitDescription) }
+        return lines.joined(separator: "\n")
     }
 }
 
@@ -97,16 +148,17 @@ enum RepositoryTreeBuilder {
             )]
         let remotesRoot = root(.remotes, symbol: "RemoteBranchRoot", children: remoteNodes)
 
+        let worktreeDisplayPaths = WorktreePresentation.displayPaths(navigation.worktrees)
         let worktreesRoot = root(
             .worktrees,
             symbol: "WorkTree",
             children: navigation.worktrees.map { worktree in
                 RepositoryTreeNode(
                     id: "worktree:\(worktree.path)",
-                    title: worktree.name,
+                    title: worktree.displayName(worktreeDisplayPaths[worktree.path] ?? worktree.name),
                     kind: .worktree(worktree),
                     symbolName: "WorkTree",
-                    toolTip: "\(worktree.path)\(worktree.isCurrent ? " (current)" : "")\nBranch: \(worktree.branchName)"
+                    toolTip: "\(worktree.path)\(worktree.isCurrent ? " (current)" : worktree.isDeleted ? " (deleted)" : "")\nBranch: \(worktree.branchName)\(worktree.headID.map { "\nHEAD: \($0.shortString)" } ?? "")"
                 )
             }
         )
@@ -121,26 +173,55 @@ enum RepositoryTreeBuilder {
             )
         )
 
-        let submodulesRoot = root(
-            .submodules,
-            symbol: "FolderSubmodule",
-            children: navigation.submodules.map { submodule in
-                let suffix: String = switch submodule.state {
-                case .clean: ""
-                case .uninitialized: " (not initialized)"
-                case .modified: " (modified)"
-                case .conflicted: " (conflict)"
-                case .unknown: " (unknown)"
-                }
-                return RepositoryTreeNode(
-                    id: "submodule:\(submodule.path)",
-                    title: submodule.path + suffix,
+        let treeItems = navigation.submoduleTree.isEmpty ? navigation.submodules.map { module in
+            SubmoduleTreeItem(repositoryURL: URL(fileURLWithPath: module.path), parentURL: URL(fileURLWithPath: module.parentPath),
+                path: module.path, localPath: module.localPath, isCurrent: false, isTop: false,
+                isInitialized: module.state != .uninitialized && module.state != .unknown, branch: nil,
+                commitID: module.commitID, recordedID: module.expectedCommitID,
+                commitState: module.state == .uninitialized ? .uninitialized : .same, isDirty: module.isDirty)
+        } : navigation.submoduleTree
+        let submoduleNodes = Dictionary(treeItems.map { submodule in
+                return (submodule.path, RepositoryTreeNode(
+                    id: "submodule:\(navigation.submoduleTree.isEmpty ? submodule.path : submodule.id)",
+                    title: SubmoduleTreePresentation.title(submodule),
                     kind: .submodule(submodule),
-                    symbolName: submodule.state == .clean ? "FolderSubmodule" : "FileStatusModified",
-                    toolTip: "\(submodule.path)\n\(submodule.state.rawValue)\(submodule.description.map { "\n\($0)" } ?? "")"
-                )
+                    symbolName: SubmoduleTreePresentation.icon(submodule),
+                    toolTip: SubmoduleTreePresentation.toolTip(submodule),
+                    children: []
+                ))
+        }, uniquingKeysWith: { first, _ in first })
+        var submodulePaths = submoduleNodes
+        for path in submoduleNodes.keys {
+            let parts = path.split(separator: "/")
+            for length in 1..<max(1, parts.count) {
+                let prefix = parts.prefix(length).joined(separator: "/")
+                if submodulePaths[prefix] == nil {
+                    submodulePaths[prefix] = RepositoryTreeNode(id: "submodule-folder:\(prefix)", title: String(parts[length - 1]),
+                        kind: .group, symbolName: "FolderClosed", toolTip: prefix)
+                }
             }
-        )
+        }
+        var topSubmodules: [RepositoryTreeNode] = []
+        for path in submodulePaths.keys.sorted(by: { $0.localizedCompare($1) == .orderedAscending }) {
+            guard let node = submodulePaths[path] else { continue }
+            let parent = path.split(separator: "/").dropLast().joined(separator: "/")
+            if !path.isEmpty, let parentNode = submodulePaths[parent] { parentNode.children.append(node) }
+            else { topSubmodules.append(node) }
+        }
+        func compactFolders(_ node: RepositoryTreeNode) {
+            for child in node.children { compactFolders(child) }
+            node.children = node.children.map { child in
+                guard child.id.hasPrefix("submodule-folder:") else { return child }
+                var last = child
+                var title = child.title
+                while last.children.count == 1, let next = last.children.first, next.id.hasPrefix("submodule-folder:") {
+                    title += "/" + next.title; last = next
+                }
+                return RepositoryTreeNode(id: child.id, title: title, kind: .group, symbolName: "FolderClosed", toolTip: last.toolTip, children: last.children)
+            }
+        }
+        topSubmodules.forEach(compactFolders)
+        let submodulesRoot = root(.submodules, symbol: "FolderSubmodule", children: topSubmodules)
 
         let stashesRoot = root(
             .stashes,
@@ -850,10 +931,16 @@ final class RepositoryOutlineViewController: NSViewController, NSOutlineViewData
         case .worktree(let worktree) where worktree.isCurrent:
             cell.textField?.font = .boldSystemFont(ofSize: 11)
             cell.textField?.textColor = .labelColor
+        case .submodule(let item) where item.isCurrent:
+            cell.textField?.font = .boldSystemFont(ofSize: 11)
+            cell.textField?.textColor = .labelColor
         case .branch, .remoteBranch, .tag, .stash where !node.isRevisionVisible:
             cell.textField?.font = .systemFont(ofSize: 11)
             cell.textField?.textColor = .tertiaryLabelColor
         case .remote(let remote) where remote.isDisabled:
+            cell.textField?.font = .systemFont(ofSize: 11)
+            cell.textField?.textColor = .secondaryLabelColor
+        case .worktree(let worktree) where worktree.isDeleted:
             cell.textField?.font = .systemFont(ofSize: 11)
             cell.textField?.textColor = .secondaryLabelColor
         default:
@@ -971,7 +1058,12 @@ final class RepositoryOutlineViewController: NSViewController, NSOutlineViewData
             "repository.sortOrder.ascending",
             "repository.sortOrder.descending",
             "repository.worktree.copyPath",
-            "repository.worktree.show"
+            "repository.worktree.show",
+            "repository.worktree.open", "repository.worktree.delete",
+            "repository.submodule.open", "repository.submodule.update",
+            "repository.submodule.openGE", "repository.submodule.reset", "repository.submodule.stash", "repository.submodule.commit",
+            "repository.submodules.manage", "repository.submodules.update", "repository.submodules.synchronize",
+            "repository.worktrees.create", "repository.worktrees.prune", "repository.worktrees.manage"
         ]
         retargetMenuItems(
             in: menu,
@@ -1096,6 +1188,10 @@ final class RepositoryOutlineViewController: NSViewController, NSOutlineViewData
             onCommand?("repository.stash.open", node)
         case .remote:
             onCommand?("repository.remote.manage", node)
+        case .worktree(let worktree) where worktree.canOpen:
+            onCommand?("repository.worktree.open", node)
+        case .submodule(let submodule):
+            onCommand?(SubmoduleTreePresentation.defaultCommand(submodule), node)
         default:
             break
         }
@@ -1148,6 +1244,7 @@ private extension RepositoryTreeNode {
     var menuKind: RepositoryMenuNodeKind {
         switch kind {
         case .group:
+            if id.hasPrefix("submodule-folder:") { return .group(.other) }
             return .group(RepositoryMenuNodeKind.Group(rawValue: title) ?? .other)
         case .branch(let branch):
             return .localBranch(isCurrent: branch.isCurrent)
@@ -1166,10 +1263,11 @@ private extension RepositoryTreeNode {
         case .worktree(let worktree):
             return .worktree(
                 isCurrent: worktree.isCurrent,
-                pathExists: FileManager.default.fileExists(atPath: worktree.path)
+                pathExists: !worktree.isDeleted && FileManager.default.fileExists(atPath: worktree.path),
+                isMain: worktree.isMain
             )
-        case .submodule:
-            return .submodule
+        case .submodule(let submodule):
+            return .submodule(isInitialized: submodule.isInitialized, isCurrent: submodule.isCurrent)
         case .folder(_, let isRemote):
             return isRemote ? .remoteBranchFolder : .branchFolder
         case .tagFolder:

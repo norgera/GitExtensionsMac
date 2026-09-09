@@ -5,11 +5,14 @@ import AppKit
 final class RevisionGridViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate {
     var onCommand: ((String, [Commit], Commit) -> Void)?
     var selectedCommitCount: Int { tableView.selectedRowIndexes.count }
+    var selectedRevisionIDs: [RevisionID] { tableView.selectedRowIndexes.compactMap { commits.indices.contains($0) ? commits[$0].id : nil } }
     var onSelection: ((Commit) -> Void)?
 
     private let tableView = RevisionTableView()
     private let quickSearchLabel = NSTextField(labelWithString: "")
     private var allCommits: [Commit] = []
+    private var pendingOpeningSelection: [RevisionID] = []
+    private var graphReloadPending = false
     private var commits: [Commit] = []
     private var graphRows: [RevisionGraphLayout.Row] = []
     private var textFilter = ""
@@ -128,6 +131,7 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
     }
 
     func beginIncrementalLoad(preferredCommitID: RevisionID? = nil) {
+        pendingOpeningSelection = []
         pendingSelectionID = preferredCommitID
         allCommits = []
         commits = []
@@ -182,6 +186,19 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
         onSelection?(commits[index])
     }
 
+    func selectCommits(ids: [RevisionID]) {
+        pendingOpeningSelection = ids
+        guard !graphReloadPending else { return }
+        let requested = Set(ids)
+        let indices = IndexSet(commits.indices.filter { requested.contains(commits[$0].id) })
+        guard let first = indices.first else { return }
+        pendingOpeningSelection = []
+        pendingSelectionID = nil
+        tableView.selectRowIndexes(indices, byExtendingSelection: false)
+        tableView.scrollRowToVisible(first)
+        onSelection?(commits[first])
+    }
+
     var visibleCommitCount: Int { commits.count }
 
     func setGraphConfiguration(mergeCommonParentLanes: Bool, straightenDiagonals: Bool) {
@@ -216,6 +233,7 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
         let completeHistory = allCommits
         let configuration = graphConfiguration
         graphGeneration += 1
+        graphReloadPending = true
         let generation = graphGeneration
         graphTask?.cancel()
         graphTask = Task { @MainActor [weak self] in
@@ -223,11 +241,20 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
                 RevisionGraphLayout.build(commits: filteredCommits, completeHistory: completeHistory, configuration: configuration)
             }.value
             guard let self, !Task.isCancelled, generation == self.graphGeneration else { return }
+            self.graphReloadPending = false
             self.commits = filteredCommits
             self.graphRows = graph.rows
             self.tableView.reloadData()
             self.updateGraphColumnWidthForVisibleRows(fallbackLaneCount: graph.maximumLaneCount)
             guard !filteredCommits.isEmpty else { return }
+            if !self.pendingOpeningSelection.isEmpty {
+                let ids = self.pendingOpeningSelection
+                self.pendingOpeningSelection = []
+                if ids.contains(where: { id in filteredCommits.contains(where: { $0.id == id }) }) {
+                    self.selectCommits(ids: ids)
+                    return
+                }
+            }
             let requestedID = self.pendingSelectionID
             let requestedIndex = requestedID.flatMap { id in filteredCommits.firstIndex(where: { $0.id == id }) }
             let index = requestedIndex ?? (selectFirst ? filteredCommits.firstIndex(where: { !$0.isArtificial }) ?? 0 : 0)

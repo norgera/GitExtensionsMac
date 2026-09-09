@@ -89,13 +89,28 @@
 		E20000000000000000000002 /* BisectDialog.swift in Sources */ = {isa = PBXBuildFile; fileRef = E10000000000000000000002 /* BisectDialog.swift */; };
 		E20000000000000000000003 /* GitBisectTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E10000000000000000000003 /* GitBisectTests.swift */; };
 		F70000000000000000000001 /* GitReflog.swift in Sources */ = {isa = PBXBuildFile; fileRef = F71000000000000000000001 /* GitReflog.swift */; };
+F80000000000000000000001 /* GitWorktrees.swift in Sources */ = {isa = PBXBuildFile; fileRef = F81000000000000000000001 /* GitWorktrees.swift */; };
+		F90000000000000000000001 /* GitSubmodules.swift in Sources */ = {isa = PBXBuildFile; fileRef = F91000000000000000000001 /* GitSubmodules.swift */; };
 		F70000000000000000000002 /* ReflogDialog.swift in Sources */ = {isa = PBXBuildFile; fileRef = F71000000000000000000002 /* ReflogDialog.swift */; };
+		F80000000000000000000002 /* WorktreeDialogs.swift in Sources */ = {isa = PBXBuildFile; fileRef = F81000000000000000000002 /* WorktreeDialogs.swift */; };
+		F90000000000000000000002 /* SubmoduleDialogs.swift in Sources */ = {isa = PBXBuildFile; fileRef = F91000000000000000000002 /* SubmoduleDialogs.swift */; };
 		F70000000000000000000003 /* GitReflogTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F71000000000000000000003 /* GitReflogTests.swift */; };
+		F80000000000000000000003 /* GitWorktreeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F81000000000000000000003 /* GitWorktreeTests.swift */; };
+		F90000000000000000000003 /* GitSubmoduleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F91000000000000000000003 /* GitSubmoduleTests.swift */; };
 		A165FDA54D1D8FEF8EB27280 /* RepoStateClean.png in Resources */ = {isa = PBXBuildFile; fileRef = C1EC223D3244B0A182AB06AB /* RepoStateClean.png */; };
 		A30E0440049928116A4FE564 /* ShowOnlyFirstParent.png in Resources */ = {isa = PBXBuildFile; fileRef = AA2B71E02E8D15ABC2854D97 /* ShowOnlyFirstParent.png */; };
 		A42057411418B499243502D5 /* BranchRemoteMerged.png in Resources */ = {isa = PBXBuildFile; fileRef = 736BEFF0764DB9636402383B /* BranchRemoteMerged.png */; };
 		A77C0DE10000000000000001 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A77C0DE20000000000000001 /* Assets.xcassets */; };
 		A90EEF75FC1801192C84BD0F /* FolderSubmodule.png in Resources */ = {isa = PBXBuildFile; fileRef = AACDBF250D361734280610CE /* FolderSubmodule.png */; };
+		FA1000000000000000000001 /* SubmoduleDirty.png in Resources */ = {isa = PBXBuildFile; fileRef = FA2000000000000000000001 /* SubmoduleDirty.png */; };
+		FA1000000000000000000002 /* SubmoduleRevisionDown.png in Resources */ = {isa = PBXBuildFile; fileRef = FA2000000000000000000002 /* SubmoduleRevisionDown.png */; };
+		FA1000000000000000000003 /* SubmoduleRevisionDownDirty.png in Resources */ = {isa = PBXBuildFile; fileRef = FA2000000000000000000003 /* SubmoduleRevisionDownDirty.png */; };
+		FA1000000000000000000004 /* SubmoduleRevisionSemiDown.png in Resources */ = {isa = PBXBuildFile; fileRef = FA2000000000000000000004 /* SubmoduleRevisionSemiDown.png */; };
+		FA1000000000000000000005 /* SubmoduleRevisionSemiDownDirty.png in Resources */ = {isa = PBXBuildFile; fileRef = FA2000000000000000000005 /* SubmoduleRevisionSemiDownDirty.png */; };
+		FA1000000000000000000006 /* SubmoduleRevisionSemiUp.png in Resources */ = {isa = PBXBuildFile; fileRef = FA2000000000000000000006 /* SubmoduleRevisionSemiUp.png */; };
+		FA1000000000000000000007 /* SubmoduleRevisionSemiUpDirty.png in Resources */ = {isa = PBXBuildFile; fileRef = FA2000000000000000000007 /* SubmoduleRevisionSemiUpDirty.png */; };
+		FA1000000000000000000008 /* SubmoduleRevisionUp.png in Resources */ = {isa = PBXBuildFile; fileRef = FA2000000000000000000008 /* SubmoduleRevisionUp.png */; };
+		FA1000000000000000000009 /* SubmoduleRevisionUpDirty.png in Resources */ = {isa = PBXBuildFile; fileRef = FA2000000000000000000009 /* SubmoduleRevisionUpDirty.png */; };
 		AACB7A0340F5D968273A504B /* FileStatusRenamed.png in Resources */ = {isa = PBXBuildFile; fileRef = 9B7DD03D72969BA265BED088 /* FileStatusRenamed.png */; };
 		B47D7D48739C0F067FFCEB9A /* GitPush.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB6200000000000000000001 /* GitPush.swift */; };
 		B4C518AA41CC3D86D1E8A9EE /* WorkTree.png in Resources */ = {isa = PBXBuildFile; fileRef = 0C987A792115F7C216AE0623 /* WorkTree.png */; };
@@ -291,11 +306,26 @@
 		E10000000000000000000002 /* BisectDialog.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = BisectDialog.swift; sourceTree = "<group>"; };
 		E10000000000000000000003 /* GitBisectTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GitBisectTests.swift; sourceTree = "<group>"; };
 		F71000000000000000000001 /* GitReflog.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GitReflog.swift; sourceTree = "<group>"; };
+		F81000000000000000000001 /* GitWorktrees.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GitWorktrees.swift; sourceTree = "<group>"; };
+		F91000000000000000000001 /* GitSubmodules.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GitSubmodules.swift; sourceTree = "<group>"; };
 		F71000000000000000000002 /* ReflogDialog.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ReflogDialog.swift; sourceTree = "<group>"; };
+		F81000000000000000000002 /* WorktreeDialogs.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = WorktreeDialogs.swift; sourceTree = "<group>"; };
+		F91000000000000000000002 /* SubmoduleDialogs.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SubmoduleDialogs.swift; sourceTree = "<group>"; };
 		F71000000000000000000003 /* GitReflogTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GitReflogTests.swift; sourceTree = "<group>"; };
+		F81000000000000000000003 /* GitWorktreeTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GitWorktreeTests.swift; sourceTree = "<group>"; };
+		F91000000000000000000003 /* GitSubmoduleTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GitSubmoduleTests.swift; sourceTree = "<group>"; };
 		A951A517309105DBD1E33BF3 /* Cocoa.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Cocoa.framework; path = Platforms/MacOSX.platform/Developer/SDKs/MacOSX10.15.sdk/System/Library/Frameworks/Cocoa.framework; sourceTree = DEVELOPER_DIR; };
 		AA2B71E02E8D15ABC2854D97 /* ShowOnlyFirstParent.png */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = image.png; path = ShowOnlyFirstParent.png; sourceTree = "<group>"; };
 		AACDBF250D361734280610CE /* FolderSubmodule.png */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = image.png; path = FolderSubmodule.png; sourceTree = "<group>"; };
+		FA2000000000000000000001 /* SubmoduleDirty.png */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = image.png; path = SubmoduleDirty.png; sourceTree = "<group>"; };
+		FA2000000000000000000002 /* SubmoduleRevisionDown.png */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = image.png; path = SubmoduleRevisionDown.png; sourceTree = "<group>"; };
+		FA2000000000000000000003 /* SubmoduleRevisionDownDirty.png */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = image.png; path = SubmoduleRevisionDownDirty.png; sourceTree = "<group>"; };
+		FA2000000000000000000004 /* SubmoduleRevisionSemiDown.png */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = image.png; path = SubmoduleRevisionSemiDown.png; sourceTree = "<group>"; };
+		FA2000000000000000000005 /* SubmoduleRevisionSemiDownDirty.png */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = image.png; path = SubmoduleRevisionSemiDownDirty.png; sourceTree = "<group>"; };
+		FA2000000000000000000006 /* SubmoduleRevisionSemiUp.png */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = image.png; path = SubmoduleRevisionSemiUp.png; sourceTree = "<group>"; };
+		FA2000000000000000000007 /* SubmoduleRevisionSemiUpDirty.png */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = image.png; path = SubmoduleRevisionSemiUpDirty.png; sourceTree = "<group>"; };
+		FA2000000000000000000008 /* SubmoduleRevisionUp.png */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = image.png; path = SubmoduleRevisionUp.png; sourceTree = "<group>"; };
+		FA2000000000000000000009 /* SubmoduleRevisionUpDirty.png */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = image.png; path = SubmoduleRevisionUpDirty.png; sourceTree = "<group>"; };
 		ADB4DF41D3F4ED3B37F9F318 /* DetailTabsViewController.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = DetailTabsViewController.swift; sourceTree = "<group>"; };
 		B6C91C19D614504FA0220624 /* GitExtensionsCore.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = GitExtensionsCore.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		BB0000000000000000000001 /* MutationDialogs.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = MutationDialogs.swift; sourceTree = "<group>"; };
@@ -479,6 +509,8 @@
 				D10000000000000000000003 /* GitRevertTests.swift */,
 				E10000000000000000000003 /* GitBisectTests.swift */,
 				F71000000000000000000003 /* GitReflogTests.swift */,
+				F81000000000000000000003 /* GitWorktreeTests.swift */,
+				F91000000000000000000003 /* GitSubmoduleTests.swift */,
 			);
 			name = Tests;
 			path = Tests;
@@ -536,6 +568,8 @@
 				D10000000000000000000002 /* RevertDialog.swift */,
 				E10000000000000000000002 /* BisectDialog.swift */,
 				F71000000000000000000002 /* ReflogDialog.swift */,
+				F81000000000000000000002 /* WorktreeDialogs.swift */,
+				F91000000000000000000002 /* SubmoduleDialogs.swift */,
 			);
 			name = UI;
 			path = UI;
@@ -570,6 +604,15 @@
 				91BF922B82AB639C6C127088 /* FileTree.png */,
 				633A4A86ED42A2F3D4C3758A /* FolderClosed.png */,
 				AACDBF250D361734280610CE /* FolderSubmodule.png */,
+				FA2000000000000000000001 /* SubmoduleDirty.png */,
+				FA2000000000000000000002 /* SubmoduleRevisionDown.png */,
+				FA2000000000000000000003 /* SubmoduleRevisionDownDirty.png */,
+				FA2000000000000000000004 /* SubmoduleRevisionSemiDown.png */,
+				FA2000000000000000000005 /* SubmoduleRevisionSemiDownDirty.png */,
+				FA2000000000000000000006 /* SubmoduleRevisionSemiUp.png */,
+				FA2000000000000000000007 /* SubmoduleRevisionSemiUpDirty.png */,
+				FA2000000000000000000008 /* SubmoduleRevisionUp.png */,
+				FA2000000000000000000009 /* SubmoduleRevisionUpDirty.png */,
 				D5A6667946728F14C998170D /* FunnelPencil.png */,
 				18380254780F2F71655E1BD8 /* GitForWindows.png */,
 				FF5000000000000000000001 /* HelpPullFetch.png */,
@@ -640,6 +683,8 @@
 				D10000000000000000000001 /* GitRevert.swift */,
 				E10000000000000000000001 /* GitBisect.swift */,
 				F71000000000000000000001 /* GitReflog.swift */,
+				F81000000000000000000001 /* GitWorktrees.swift */,
+				F91000000000000000000001 /* GitSubmodules.swift */,
 			);
 			name = Git;
 			path = Git;
@@ -891,6 +936,15 @@
 				A05495E6CFD56B0CCC4F4FF2 /* FileTree.png in Resources */,
 				3123374A5BD0C729D427C4D2 /* FolderClosed.png in Resources */,
 				A90EEF75FC1801192C84BD0F /* FolderSubmodule.png in Resources */,
+				FA1000000000000000000001 /* SubmoduleDirty.png in Resources */,
+				FA1000000000000000000002 /* SubmoduleRevisionDown.png in Resources */,
+				FA1000000000000000000003 /* SubmoduleRevisionDownDirty.png in Resources */,
+				FA1000000000000000000004 /* SubmoduleRevisionSemiDown.png in Resources */,
+				FA1000000000000000000005 /* SubmoduleRevisionSemiDownDirty.png in Resources */,
+				FA1000000000000000000006 /* SubmoduleRevisionSemiUp.png in Resources */,
+				FA1000000000000000000007 /* SubmoduleRevisionSemiUpDirty.png in Resources */,
+				FA1000000000000000000008 /* SubmoduleRevisionUp.png in Resources */,
+				FA1000000000000000000009 /* SubmoduleRevisionUpDirty.png in Resources */,
 				889DAA0451F09BB9BE2E3CAC /* FunnelPencil.png in Resources */,
 				07E9D0F67EB72584374CD9C7 /* GitForWindows.png in Resources */,
 				9F918840B89A9A56D8DF611E /* LayoutFooter.png in Resources */,
@@ -958,6 +1012,8 @@
 				D20000000000000000000001 /* GitRevert.swift in Sources */,
 				E20000000000000000000001 /* GitBisect.swift in Sources */,
 				F70000000000000000000001 /* GitReflog.swift in Sources */,
+				F80000000000000000000001 /* GitWorktrees.swift in Sources */,
+				F90000000000000000000001 /* GitSubmodules.swift in Sources */,
 				233DB63159CEBA451F6A90CE /* RepositoryBrowsingDataSource.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -988,6 +1044,8 @@
 				D20000000000000000000003 /* GitRevertTests.swift in Sources */,
 				E20000000000000000000003 /* GitBisectTests.swift in Sources */,
 				F70000000000000000000003 /* GitReflogTests.swift in Sources */,
+				F80000000000000000000003 /* GitWorktreeTests.swift in Sources */,
+				F90000000000000000000003 /* GitSubmoduleTests.swift in Sources */,
 				210C0F1568AC2EB5B1268796 /* RevisionGraphLayoutTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -1041,6 +1099,8 @@
 				D20000000000000000000002 /* RevertDialog.swift in Sources */,
 				E20000000000000000000002 /* BisectDialog.swift in Sources */,
 				F70000000000000000000002 /* ReflogDialog.swift in Sources */,
+				F80000000000000000000002 /* WorktreeDialogs.swift in Sources */,
+				F90000000000000000000002 /* SubmoduleDialogs.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

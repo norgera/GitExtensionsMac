@@ -174,13 +174,33 @@ package struct Worktree: Identifiable, Hashable, Sendable {
     package let path: String
     package let branchName: String
     package let isCurrent: Bool
+    package let headID: ObjectID?
+    package let isMain: Bool
+    package let isBare: Bool
+    package let isDetached: Bool
+    package let isDeleted: Bool
 
-    package init(id: String, name: String, path: String, branchName: String, isCurrent: Bool) {
+    package init(id: String, name: String, path: String, branchName: String, isCurrent: Bool,
+                 headID: ObjectID? = nil, isMain: Bool = false, isBare: Bool = false,
+                 isDetached: Bool = false, isDeleted: Bool = false) {
         self.id = id
         self.name = name
         self.path = path
         self.branchName = branchName
         self.isCurrent = isCurrent
+        self.headID = headID
+        self.isMain = isMain
+        self.isBare = isBare
+        self.isDetached = isDetached
+        self.isDeleted = isDeleted
+    }
+
+    package var canOpen: Bool { !isCurrent && !isDeleted }
+    package var canDelete: Bool { canOpen && !isMain }
+    package var headType: String { isBare ? "Bare" : isDetached ? "Detached" : "Branch" }
+    package func displayName(_ name: String) -> String {
+        let state = isBare ? "bare" : isDetached ? "detached at \(headID.map { String($0.string.prefix(7)) } ?? "???")" : branchName
+        return "\(name) (\(state))"
     }
 }
 
@@ -200,8 +220,12 @@ package struct Submodule: Identifiable, Hashable, Sendable {
     package let commitID: ObjectID?
     package let description: String?
     package let state: State
+    package let parentPath: String
+    package let localPath: String
+    package let isDirty: Bool
+    package let expectedCommitID: ObjectID?
 
-    package init(id: String, name: String, path: String, url: String?, commitID: ObjectID?, description: String?, state: State) {
+    package init(id: String, name: String, path: String, url: String?, commitID: ObjectID?, description: String?, state: State, parentPath: String = "", localPath: String? = nil, isDirty: Bool = false, expectedCommitID: ObjectID? = nil) {
         self.id = id
         self.name = name
         self.path = path
@@ -209,6 +233,45 @@ package struct Submodule: Identifiable, Hashable, Sendable {
         self.commitID = commitID
         self.description = description
         self.state = state
+        self.parentPath = parentPath
+        self.localPath = localPath ?? path
+        self.isDirty = isDirty
+        self.expectedCommitID = expectedCommitID
+    }
+}
+
+package struct SubmoduleTreeItem: Identifiable, Hashable, Sendable {
+    package enum CommitState: String, Sendable {
+        case same, ahead, behind, newer, older, modified, uninitialized, missing, conflicted
+    }
+    package let repositoryURL: URL
+    package let parentURL: URL
+    package let path: String
+    package let localPath: String
+    package let isCurrent: Bool
+    package let isTop: Bool
+    package let isInitialized: Bool
+    package let branch: String?
+    package let commitID: ObjectID?
+    package let recordedID: ObjectID?
+    package let commitState: CommitState
+    package let addedCommits: Int?
+    package let removedCommits: Int?
+    package let isDirty: Bool
+    package let commitDescription: String
+    package var id: String { repositoryURL.path }
+
+    package init(repositoryURL: URL, parentURL: URL, path: String, localPath: String,
+                 isCurrent: Bool, isTop: Bool, isInitialized: Bool, branch: String?,
+                 commitID: ObjectID?, recordedID: ObjectID?, commitState: CommitState,
+                 addedCommits: Int? = nil, removedCommits: Int? = nil, isDirty: Bool = false,
+                 commitDescription: String = "") {
+        self.repositoryURL = repositoryURL; self.parentURL = parentURL
+        self.path = path; self.localPath = localPath; self.isCurrent = isCurrent; self.isTop = isTop
+        self.isInitialized = isInitialized; self.branch = branch; self.commitID = commitID
+        self.recordedID = recordedID; self.commitState = commitState
+        self.addedCommits = addedCommits; self.removedCommits = removedCommits
+        self.isDirty = isDirty; self.commitDescription = commitDescription
     }
 }
 
@@ -862,12 +925,14 @@ package struct RepositoryNavigationState: Sendable {
     package let stashes: [Stash]
     package let worktrees: [Worktree]
     package let submodules: [Submodule]
+    package let submoduleTree: [SubmoduleTreeItem]
 
-    package init(remotes: [Remote], stashes: [Stash], worktrees: [Worktree], submodules: [Submodule]) {
+    package init(remotes: [Remote], stashes: [Stash], worktrees: [Worktree], submodules: [Submodule], submoduleTree: [SubmoduleTreeItem] = []) {
         self.remotes = remotes
         self.stashes = stashes
         self.worktrees = worktrees
         self.submodules = submodules
+        self.submoduleTree = submoduleTree
     }
 }
 

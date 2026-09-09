@@ -16,6 +16,7 @@ enum BrowserCommand: Equatable, Sendable {
     case settings
     case clearRecentRepositories
     case openRecentRepository(URL)
+    case openRepositoryAtRevisions(URL, [RevisionID])
 
     case refresh
     case toggleRevisionTags
@@ -42,6 +43,10 @@ enum BrowserCommand: Equatable, Sendable {
     case cleanRepository
     case bisect
     case reflog
+    case manageWorktrees
+    case manageSubmodules
+    case updateSubmodules
+    case synchronizeSubmodules
     case solveMergeConflicts
     case cherryPick
     case rebase
@@ -94,6 +99,8 @@ final class BrowserCommandAvailability: ObservableObject {
     @Published var canClean = false
     @Published var canBisect = false
     @Published var canReflog = false
+    @Published var canManageWorktrees = false
+    @Published var canManageSubmodules = false
 
     private init() {}
 }

@@ -159,6 +159,18 @@ private enum RevisionGraphLayoutTests {
             }
             return
         }
+        if CommandLine.arguments.contains("--worktrees-only") {
+            ContextMenuStateTests.run()
+            RepositoryChangedNotifierTests.run()
+            do { try await GitWorktreeTests.run() } catch { fatalError("GitWorktreeTests failed: \(error.localizedDescription)") }
+            return
+        }
+        if CommandLine.arguments.contains("--submodules-only") {
+            ContextMenuStateTests.run()
+            RepositoryChangedNotifierTests.run()
+            do { try await GitSubmoduleTests.run() } catch { fatalError("GitSubmoduleTests failed: \(error.localizedDescription)") }
+            return
+        }
         testObjectIdentity()
         testLinearHistory()
         testRelativeGraphState()
@@ -200,6 +212,8 @@ private enum RevisionGraphLayoutTests {
             try await GitRevertTests.run()
             try await GitBisectTests.run()
             try await GitReflogTests.run()
+            try await GitWorktreeTests.run()
+            try await GitSubmoduleTests.run()
             if let flagIndex = CommandLine.arguments.firstIndex(of: "--verify-mutations"),
                CommandLine.arguments.indices.contains(flagIndex + 1) {
                 try await GitRepositoryMutationTests.verifyDisposableClone(

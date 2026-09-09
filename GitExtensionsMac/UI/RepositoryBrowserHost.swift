@@ -6,7 +6,23 @@ import SwiftUI
 enum RepositoryBrowserLaunch {
     case dashboard
     case mock
-    case repository(URL)
+    case repository(URL, selection: [RevisionID] = [])
+}
+
+enum RepositoryOpeningSelection {
+    static func arguments(_ ids: [RevisionID]) -> [String] {
+        ids.flatMap { ["--select-revision", $0.description] }
+    }
+    static func parse(_ arguments: [String]) -> [RevisionID] {
+        arguments.indices.compactMap { index in
+            guard arguments[index] == "--select-revision", index + 1 < arguments.count else { return nil }
+            switch arguments[index + 1] {
+            case "WORKTREE": return .workingDirectory
+            case "INDEX": return .index
+            case let value: return (try? ObjectID.parse(value)).map(RevisionID.object)
+            }
+        }
+    }
 }
 
 struct RepositoryBrowserHost: NSViewControllerRepresentable {
@@ -68,9 +84,9 @@ final class ApplicationHostViewController: NSViewController {
             showDashboard()
         case .mock:
             showBrowser(repositoryModule: MockRepositoryDataSource())
-        case .repository(let url):
+        case .repository(let url, let selection):
             showDashboard()
-            openRepository(url)
+            openRepository(url, selection: selection)
         }
     }
 
@@ -93,6 +109,8 @@ final class ApplicationHostViewController: NSViewController {
             (activeController as? RepositoryStartupViewController)?.reloadRecents()
         case .openRecentRepository(let url):
             openRepository(url)
+        case .openRepositoryAtRevisions(let url, let selection):
+            openRepository(url, selection: selection)
         default: break
         }
     }
@@ -110,8 +128,8 @@ final class ApplicationHostViewController: NSViewController {
         if let error { controller.show(error: error) }
     }
 
-    private func showBrowser(repositoryModule: any RepositoryBrowsingDataSource) {
-        let controller = RepositoryBrowserViewController(repositoryModule: repositoryModule)
+    private func showBrowser(repositoryModule: any RepositoryBrowsingDataSource, selection: [RevisionID] = []) {
+        let controller = RepositoryBrowserViewController(repositoryModule: repositoryModule, openingSelection: selection)
         controller.onApplicationCommand = { [weak self] command in
             guard let self else { return false }
             switch command {
@@ -124,6 +142,8 @@ final class ApplicationHostViewController: NSViewController {
                 self.store.clearRecentRepositories()
             case .openRecentRepository(let url):
                 self.openRepository(url)
+            case .openRepositoryAtRevisions(let url, let selection):
+                self.openRepository(url, selection: selection)
             default: return false
             }
             return true
@@ -168,7 +188,7 @@ final class ApplicationHostViewController: NSViewController {
         }
     }
 
-    private func openRepository(_ url: URL) {
+    private func openRepository(_ url: URL, selection: [RevisionID] = []) {
         openTask?.cancel()
         if !(activeController is RepositoryStartupViewController) { showDashboard() }
         let gitURL = URL(fileURLWithPath: store.preferences.gitExecutablePath)
@@ -179,7 +199,7 @@ final class ApplicationHostViewController: NSViewController {
                 _ = try await repositoryModule.loadRepositoryState()
                 guard !Task.isCancelled else { return }
                 store.recordOpenedRepository(url)
-                showBrowser(repositoryModule: repositoryModule)
+                showBrowser(repositoryModule: repositoryModule, selection: selection)
             } catch is CancellationError {
                 return
             } catch {

@@ -503,7 +503,8 @@ package actor GitRepositoryModule: RepositoryOpeningDataSource {
         )
         let stashes = makeStashes(stashRecords)
         let worktrees = try makeWorktrees(output: worktreesResult.standardOutput, repository: repository)
-        let submodules = repository.isBare ? [] : try await loadSubmodules(repository: repository)
+        let submodules = repository.isBare ? [] : try await loadSubmodules(repository: repository, recursive: true)
+        let submoduleTree = try await loadSubmoduleTree(repository: repository, descendants: submodules)
         let revisionContext = RevisionReadContext(
             stashes: stashRecords,
             referencesByCommit: refModels.referencesByCommit,
@@ -541,7 +542,8 @@ package actor GitRepositoryModule: RepositoryOpeningDataSource {
             remotes: remotes,
             stashes: stashes,
             worktrees: worktrees,
-            submodules: submodules
+            submodules: submodules,
+            submoduleTree: submoduleTree
         )
         let status = RepositoryStatusSummary(
             workingDirectoryChangeCount: workingDirectoryChangeCount
@@ -767,7 +769,7 @@ package actor GitRepositoryModule: RepositoryOpeningDataSource {
         return data
     }
 
-    private func resolveRepository(at url: URL) async throws -> ResolvedGitRepository {
+    func resolveRepository(at url: URL) async throws -> ResolvedGitRepository {
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue else {
             throw GitError.invalidRepository(url.path)
@@ -840,7 +842,7 @@ package actor GitRepositoryModule: RepositoryOpeningDataSource {
         return try GitOutputParser.parsePorcelainV2(output.standardOutput)
     }
 
-    private func loadSubmodules(repository: ResolvedGitRepository) async throws -> [Submodule] {
+    func loadSubmodules(repository: ResolvedGitRepository, recursive: Bool = false, parentPath: String = "") async throws -> [Submodule] {
         let modulesURL = repository.rootURL.appendingPathComponent(".gitmodules")
         guard FileManager.default.fileExists(atPath: modulesURL.path) else { return [] }
 
@@ -883,13 +885,17 @@ package actor GitRepositoryModule: RepositoryOpeningDataSource {
             else { return nil }
             return (prefix, objectID, String(fields[1]))
         }
-        return config.values.compactMap { item in
+        let modules: [Submodule] = config.values.compactMap { item in
             guard let path = item.path else { return nil }
             let matching = statusLines.first { record in
-                record.pathAndDescription == path || record.pathAndDescription.hasPrefix(path + " ")
+                let paths = config.values.compactMap(\.path).filter {
+                    record.pathAndDescription == $0 || record.pathAndDescription.hasPrefix($0 + " (")
+                }
+                return paths.max(by: { $0.count < $1.count }) == path
             }
+            guard matching != nil else { return nil }
             let prefix = matching?.prefix
-            let commitID = matching?.objectID
+            let commitID = matching.flatMap { $0.objectID.string.allSatisfy { $0 == "0" } ? nil : $0.objectID }
             let description = matching.flatMap { record -> String? in
                 let remainder = String(record.pathAndDescription.dropFirst(path.count)).trimmingCharacters(in: .whitespaces)
                 return remainder.isEmpty ? nil : remainder
@@ -903,6 +909,34 @@ package actor GitRepositoryModule: RepositoryOpeningDataSource {
             }
             return Submodule(id: path, name: item.name, path: path, url: item.url, commitID: commitID, description: description, state: state)
         }.sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
+        let index = try await checked(GitCommand(arguments: ["ls-files", "--stage", "-z"], accessesRemote: false, changesRepositoryState: false), directory: repository.rootURL)
+        var expected: [String: ObjectID] = [:]
+        for record in index.standardOutput.split(separator: 0) {
+            guard let tab = record.firstIndex(of: 9) else { continue }
+            let fields = String(decoding: record[..<tab], as: UTF8.self).split(separator: " ")
+            if fields.count == 3, fields[0] == "160000", fields[2] == "0", let id = try? ObjectID.parse(String(fields[1])) {
+                expected[String(decoding: record[record.index(after: tab)...], as: UTF8.self)] = id
+            }
+        }
+        var result: [Submodule] = []
+        for module in modules {
+            let path = parentPath.isEmpty ? module.path : parentPath + "/" + module.path
+            let childURL = repository.rootURL.appendingPathComponent(module.path).standardizedFileURL
+            let inside = childURL.resolvingSymlinksInPath().path.hasPrefix(repository.rootURL.resolvingSymlinksInPath().path + "/")
+            let initialized = inside && module.state != .uninitialized && FileManager.default.fileExists(atPath: childURL.appendingPathComponent(".git").path)
+            var dirty = false
+            if initialized {
+                let status = try await git.run(GitCommand(arguments: ["status", "--porcelain=v1", "-z", "--untracked-files=all"], accessesRemote: false, changesRepositoryState: false), in: childURL)
+                dirty = status.succeeded && !status.standardOutput.isEmpty
+            }
+            result.append(Submodule(id: path, name: module.name, path: path, url: module.url, commitID: module.commitID,
+                description: module.description, state: module.state, parentPath: parentPath, localPath: module.path, isDirty: dirty, expectedCommitID: expected[module.path]))
+            if recursive && initialized {
+                let child = try await resolveRepository(at: childURL)
+                result += try await loadSubmodules(repository: child, recursive: true, parentPath: path)
+            }
+        }
+        return result
     }
 
     private func makeRefs(records: [GitRefRecord], currentBranch: String, headID: ObjectID?) -> (
@@ -1055,8 +1089,8 @@ package actor GitRepositoryModule: RepositoryOpeningDataSource {
         }
     }
 
-    private func makeWorktrees(output: Data, repository: ResolvedGitRepository) throws -> [Worktree] {
-        try GitOutputParser.parseWorktrees(output).map { record in
+    func makeWorktrees(output: Data, repository: ResolvedGitRepository) throws -> [Worktree] {
+        try GitOutputParser.parseWorktrees(output).enumerated().map { index, record in
             let pathURL = URL(fileURLWithPath: record.path, isDirectory: true).standardizedFileURL
             let branchName: String
             if let branchRef = record.branchRef {
@@ -1071,7 +1105,12 @@ package actor GitRepositoryModule: RepositoryOpeningDataSource {
                 name: pathURL.lastPathComponent,
                 path: pathURL.path,
                 branchName: branchName,
-                isCurrent: pathURL.path == repository.rootURL.path
+                isCurrent: pathURL.resolvingSymlinksInPath() == repository.rootURL.resolvingSymlinksInPath(),
+                headID: record.headID,
+                isMain: index == 0,
+                isBare: record.isBare,
+                isDetached: record.isDetached,
+                isDeleted: !FileManager.default.fileExists(atPath: pathURL.path)
             )
         }
     }

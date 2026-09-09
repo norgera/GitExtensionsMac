@@ -19,7 +19,7 @@ package struct GitExtensionsAppScene: Scene {
             return valueIndex < arguments.endIndex ? arguments[valueIndex] : nil
         }
         if let explicitPath {
-            launch = .repository(URL(fileURLWithPath: explicitPath, isDirectory: true))
+            launch = .repository(URL(fileURLWithPath: explicitPath, isDirectory: true), selection: RepositoryOpeningSelection.parse(arguments))
         } else if AppSettingsStore.shared.preferences.reopenLastRepository,
                   let path = AppSettingsStore.shared.lastRepositoryPath,
                   FileManager.default.fileExists(atPath: path) {
@@ -83,11 +83,15 @@ private struct GitExtensionsMenuCommands: Commands {
             Divider()
             Button("Remote repositories…") { perform(.remoteRepositories) }
             Divider()
-            Button("Manage submodules…") { perform(.unavailable("Manage submodules")) }
-            Button("Update all submodules") { perform(.unavailable("Update all submodules")) }
-            Button("Synchronize all submodules") { perform(.unavailable("Synchronize all submodules")) }
+            Button("Manage submodules…") { perform(.manageSubmodules) }
+                .disabled(!availability.canManageSubmodules)
+            Button("Update all submodules") { perform(.updateSubmodules) }
+                .disabled(!availability.canManageSubmodules)
+            Button("Synchronize all submodules") { perform(.synchronizeSubmodules) }
+                .disabled(!availability.canManageSubmodules)
             Divider()
-            Button("Manage worktrees…") { perform(.unavailable("Manage worktrees")) }
+            Button("Manage worktrees…") { perform(.manageWorktrees) }
+                .disabled(!availability.canManageWorktrees)
             Divider()
             Button("Edit .gitignore") { perform(.unavailable("Edit .gitignore")) }
             Button("Edit .git/info/exclude") { perform(.unavailable("Edit .git/info/exclude")) }

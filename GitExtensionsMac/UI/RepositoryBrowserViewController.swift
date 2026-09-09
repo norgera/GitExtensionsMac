@@ -126,9 +126,12 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
     private var notifierPreferredCommitID: RevisionID?
     var selectedCommitID: RevisionID?
     var commitDraft: CommitDialogDraft?
+    private var openingSelection: [RevisionID]
+    var workflowRevisionSelection: [RevisionID] { revisionGridController.selectedRevisionIDs }
 
-    init(repositoryModule: any RepositoryBrowsingDataSource) {
+    init(repositoryModule: any RepositoryBrowsingDataSource, openingSelection: [RevisionID] = []) {
         self.repositoryModule = repositoryModule
+        self.openingSelection = openingSelection
         super.init(nibName: nil, bundle: nil)
         uiCommands = GitUICommands(repositoryModule: repositoryModule, browser: self)
         repositoryChangeSubscription = uiCommands.repositoryChangedNotifier.subscribe { [weak self] _, _ in
@@ -363,8 +366,13 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         stack.addArrangedSubview(commitPositionPopUp)
         stack.addArrangedSubview(AppKitFactory.separator())
 
-        stack.addArrangedSubview(AppKitFactory.resourceButton("SubmodulesManage", tooltip: "Submodules", width: 32, target: self, action: #selector(placeholderToolbarButton(_:))))
-        stack.addArrangedSubview(AppKitFactory.resourceButton("WorkTree", tooltip: "Worktrees", width: 32, target: self, action: #selector(placeholderToolbarButton(_:))))
+        stack.addArrangedSubview(AppKitFactory.resourceButton("SubmodulesManage", tooltip: "Submodules", width: 32, target: self, action: #selector(manageSubmodulesToolbar)))
+        stack.addArrangedSubview(AppKitFactory.resourceButton("WorkTree", tooltip: "Worktrees", width: 32, target: self, action: #selector(manageWorktreesToolbar(_:))))
+        let worktreeDropdown = NSButton(title: "⌄", target: self, action: #selector(showWorktreesMenu(_:)))
+        worktreeDropdown.isBordered = false
+        worktreeDropdown.toolTip = "Switch worktree"
+        worktreeDropdown.widthAnchor.constraint(equalToConstant: 12).isActive = true
+        stack.addArrangedSubview(worktreeDropdown)
 
         workingDirectoryWidthConstraint = configureCompactPopUp(workingDirectoryPopUp, items: ["gitextensions"], width: 83, action: #selector(selectWorkingDirectory))
         workingDirectoryPopUp.toolTip = "Working directory"
@@ -890,6 +898,11 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             uiCommands.startBisect([commit])
         case .reflog:
             uiCommands.startReflog()
+        case .manageWorktrees:
+            uiCommands.startWorktreeManagement()
+        case .manageSubmodules: uiCommands.startSubmoduleManagement()
+        case .updateSubmodules: uiCommands.startSubmoduleAction(.update(path: nil))
+        case .synchronizeSubmodules: uiCommands.startSubmoduleAction(.synchronize(path: nil))
         case .solveMergeConflicts: uiCommands.startConflictResolution()
         case .cherryPick:
             if let commit = revisions.first(where: { $0.id == selectedCommitID && !$0.isArtificial }) {
@@ -939,7 +952,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         let previousRevisions = revisions
         let previousRepositoryID = repositoryIdentity?.currentRepository.id
         let sameRepository = previousRepositoryID == state.identity.currentRepository.id
-        let requestedSelection = preferredCommitID ?? (sameRepository ? selectedCommitID : nil)
+        let requestedSelection = preferredCommitID ?? openingSelection.first ?? (sameRepository ? selectedCommitID : nil)
         applyRepositoryState(state)
         startRevisionRead(
             state.revisionReadRequest,
@@ -972,6 +985,9 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         BrowserCommandAvailability.shared.canBisect = false
         BrowserCommandAvailability.shared.canReflog = !state.identity.currentRepository.isBare
             && repositoryModule is any RepositoryReflogDataSource
+        BrowserCommandAvailability.shared.canManageWorktrees = repositoryModule is any RepositoryWorktreeManagingDataSource
+        BrowserCommandAvailability.shared.canManageSubmodules = !state.identity.currentRepository.isBare
+            && repositoryModule is any RepositorySubmoduleManagingDataSource
         outlineController.apply(
             identity: state.identity,
             references: state.references,
@@ -1059,6 +1075,10 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
                     refreshedCommits: revisions
                 )
                 if let restored { revisionGridController.selectCommit(id: restored) }
+                if !openingSelection.isEmpty {
+                    revisionGridController.selectCommits(ids: openingSelection)
+                    openingSelection = []
+                }
             } catch is CancellationError {
                 return
             } catch {
@@ -1175,10 +1195,11 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             statusLabel.stringValue = "Selected \(stash.selector)"
         case .worktree(let worktree):
             statusLabel.stringValue = "Worktree: \(worktree.path)"
+            if let id = worktree.headID { revisionGridController.selectCommit(id: .object(id)) }
         case .remote(let remote):
             statusLabel.stringValue = "Remote \(remote.name): \(remote.fetchURL)"
         case .submodule(let submodule):
-            statusLabel.stringValue = "Submodule \(submodule.path): \(submodule.state.rawValue)"
+            statusLabel.stringValue = SubmoduleTreePresentation.toolTip(submodule).components(separatedBy: "\n").first ?? submodule.path
         case .group, .folder, .tagFolder:
             statusLabel.stringValue = node.title
         }
@@ -1471,7 +1492,57 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         statusLabel.stringValue = "\(title) — not implemented"
     }
 
+    @objc private func manageWorktreesToolbar(_ sender: NSButton) { uiCommands.startWorktreeManagement() }
+
+    @objc private func showWorktreesMenu(_ sender: NSButton) {
+        let menu = NSMenu(); menu.autoenablesItems = false
+        for worktree in repositoryNavigation?.worktrees ?? [] {
+            let item = NSMenuItem(title: worktree.displayName(worktree.name), action: #selector(openToolbarWorktree(_:)), keyEquivalent: "")
+            item.target = self; item.representedObject = worktree.path
+            item.state = worktree.isCurrent ? .on : .off; item.isEnabled = worktree.canOpen
+            menu.addItem(item)
+        }
+        menu.addItem(.separator())
+        for (title, selector) in [("Create worktree…", #selector(createToolbarWorktree)), ("Prune worktrees", #selector(pruneToolbarWorktrees)), ("Manage worktrees…", #selector(manageToolbarWorktrees))] {
+            let item = NSMenuItem(title: title, action: selector, keyEquivalent: ""); item.target = self; menu.addItem(item)
+        }
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.height), in: sender)
+    }
+    @objc private func openToolbarWorktree(_ sender: NSMenuItem) {
+        guard let path = sender.representedObject as? String, let worktree = repositoryNavigation?.worktrees.first(where: { $0.path == path }) else { return }
+        uiCommands.startOpenWorktree(worktree, confirm: false)
+    }
+    @objc private func createToolbarWorktree() { uiCommands.startCreateWorktree() }
+    @objc private func pruneToolbarWorktrees() { uiCommands.startPruneWorktrees() }
+    @objc private func manageToolbarWorktrees() { uiCommands.startWorktreeManagement() }
+    @objc private func manageSubmodulesToolbar() { uiCommands.startSubmoduleManagement() }
+
     private func performRepositoryCommand(_ identifier: String, node: RepositoryTreeNode) {
+        switch identifier {
+        case "repository.submodules.manage": uiCommands.startSubmoduleManagement(); return
+        case "repository.submodules.update": uiCommands.startSubmoduleAction(.update(path: nil)); return
+        case "repository.submodules.synchronize": uiCommands.startSubmoduleAction(.synchronize(path: nil)); return
+        case "repository.submodule.update":
+            if case .submodule(let item) = node.kind { uiCommands.startSubmoduleTreeUpdate(item) }; return
+        case "repository.submodule.open":
+            if case .submodule(let item) = node.kind { uiCommands.startOpenSubmodule(item) }; return
+        case "repository.submodule.openGE":
+            if case .submodule(let item) = node.kind { uiCommands.startOpenSubmodule(item, newWindow: true) }; return
+        case "repository.submodule.reset":
+            if case .submodule(let item) = node.kind { uiCommands.startSubmoduleChildAction(.reset, submodule: item) }; return
+        case "repository.submodule.stash":
+            if case .submodule(let item) = node.kind { uiCommands.startSubmoduleChildAction(.stash, submodule: item) }; return
+        case "repository.submodule.commit":
+            if case .submodule(let item) = node.kind { uiCommands.startSubmoduleChildAction(.commit, submodule: item) }; return
+        case "repository.worktrees.create": uiCommands.startCreateWorktree(); return
+        case "repository.worktrees.prune": uiCommands.startPruneWorktrees(); return
+        case "repository.worktrees.manage": uiCommands.startWorktreeManagement(); return
+        case "repository.worktree.open":
+            if case .worktree(let item) = node.kind { uiCommands.startOpenWorktree(item) }; return
+        case "repository.worktree.delete":
+            if case .worktree(let item) = node.kind { uiCommands.startDeleteWorktree(item) }; return
+        default: break
+        }
         switch (identifier, node.kind) {
         case ("repository.branch.checkout", .branch(let branch)):
             uiCommands.checkout(.local(branch), confirmDirectCheckout: true)

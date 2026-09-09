@@ -21,6 +21,8 @@ enum ContextMenuStateTests {
         testCurrentWorktreeCommands()
         testUnavailableFutureTreeCommands()
         testRepositoryTreeStructure()
+        testSubmoduleTreeStructure()
+        testSubmoduleNavigationPresentation()
         testRepositoryTreeVisibilityAndOrdering()
         testRepositoryTreeRefSorting()
         testStashTreeCommands()
@@ -71,6 +73,9 @@ enum ContextMenuStateTests {
         expect(!actions.canRunSelectedMergeTool, "conflicts: absent mergetool disables launch")
         expect(!actions.canInspectWorkingFile, "conflicts: version and working-file actions require one selection")
         expect(!actions.hasBaseVersion && !actions.hasRemoteVersion, "conflicts: multi-selection hides single-file stage actions")
+        let gitlink = RepositoryConflictVersion(objectID: testObjectID("gitlink"), mode: "160000", path: "child")
+        actions = ConflictResolverActionState(selectedConflicts: [.init(path: "child", base: gitlink, local: gitlink, remote: gitlink, kind: .bothModified)], conflictCount: 1, mergeToolConfiguration: nil)
+        expect(actions.canRunSelectedMergeTool && actions.hasOnlySubmodules, "gitlink resolver does not require a text mergetool")
     }
 
     private static func testSeparatorNormalization() {
@@ -447,17 +452,22 @@ enum ContextMenuStateTests {
             selectedHaveExpandableChildren: false,
             selectedHaveCollapsibleChildren: false
         ))
-        expect(menu.entry(id: "repository.worktree.open")?.isEnabled == false, "tree: unfinished worktree opening is not an enabled placeholder")
-        expect(menu.entry(id: "repository.worktree.delete")?.isEnabled == false, "tree: unfinished worktree deletion is not an enabled placeholder")
+        expect(menu.entry(id: "repository.worktree.open")?.isEnabled == true, "tree: linked worktree opens through GitUICommands")
+        expect(menu.entry(id: "repository.worktree.delete")?.isEnabled == true, "tree: linked worktree can be deleted with confirmation")
+        for kind in [RepositoryMenuNodeKind.worktree(isCurrent: false, pathExists: true, isMain: true), .worktree(isCurrent: false, pathExists: false)] {
+            let protected = RepositoryContextMenuBuilder.build(.init(focused: kind, selected: [kind], selectedHaveChildren: false, selectedHaveExpandableChildren: false, selectedHaveCollapsibleChildren: false))
+            expect(protected.entry(id: "repository.worktree.delete")?.isEnabled == false, "tree: main/missing worktrees cannot be deleted")
+        }
 
         menu = RepositoryContextMenuBuilder.build(.init(
-            focused: .submodule,
-            selected: [.submodule],
+            focused: .submodule(),
+            selected: [.submodule()],
             selectedHaveChildren: false,
             selectedHaveExpandableChildren: false,
             selectedHaveCollapsibleChildren: false
         ))
-        expect(menu.entry(id: "repository.submodule.open")?.isEnabled == false, "tree: unfinished submodule actions remain visible but disabled")
+        expect(menu.entry(id: "repository.submodule.open")?.isEnabled == true, "tree: upstream open remains available; missing/uninitialized paths report an error at launch")
+        expect(menu.entry(id: "repository.submodule.update")?.isEnabled == true, "tree: update initializes a submodule")
 
         menu = RepositoryContextMenuBuilder.build(.init(
             focused: .group(.branches),
@@ -512,6 +522,44 @@ enum ContextMenuStateTests {
             in: roots
         )
         expect(restored == ["branch:main", "tag:release/v1"], "tree: refresh restores surviving selections and drops stale refs")
+    }
+
+    private static func testSubmoduleTreeStructure() {
+        let paths = ["libraries/child/nested/leaf", "libraries/child", "Tags/other"]
+        let modules = paths.map { path in
+            Submodule(id: path, name: path, path: path, url: nil, commitID: nil, description: nil, state: .uninitialized)
+        }
+        let roots = RepositoryTreeBuilder.build(
+            references: RepositoryReferenceState(branches: [], tags: [], referencesByCommit: [:]),
+            navigation: RepositoryNavigationState(remotes: [], stashes: [], worktrees: [], submodules: modules),
+            preferences: RepositoryTreePreferences())
+        let root = roots.first { $0.id == "root:submodules" }
+        let folder = root?.children.first { $0.id == "submodule-folder:libraries" }
+        let child = folder?.children.first
+        expect(child?.id == "submodule:libraries/child", "submodule: configured slash paths create directory groups")
+        expect(child?.title == "child (not initialized)", "submodule: leaf shows basename, not duplicated parent path")
+        expect(child?.children.first?.children.first?.id == "submodule:libraries/child/nested/leaf", "submodule: nested repositories retain intermediate directory groups")
+        expect(RepositoryTreeStateResolver.survivingIDs(["submodule:libraries/child", "submodule:deleted"], in: roots) == ["submodule:libraries/child"], "submodule: refresh restores surviving identity")
+    }
+
+    private static func testSubmoduleNavigationPresentation() {
+        let item = SubmoduleTreeItem(repositoryURL: URL(fileURLWithPath: "/test/top/deps/child"), parentURL: URL(fileURLWithPath: "/test/top"),
+            path: "deps/child", localPath: "deps/child", isCurrent: true, isTop: false, isInitialized: true, branch: "main",
+            commitID: testObjectID("new"), recordedID: testObjectID("old"), commitState: .ahead,
+            addedCommits: 2, removedCommits: 0, isDirty: true)
+        expect(SubmoduleTreePresentation.title(item) == "child (main) (+2-0)", "submodule: upstream branch and count format")
+        expect(SubmoduleTreePresentation.icon(item) == "SubmoduleRevisionUpDirty", "submodule: dirty and ahead compose the upstream icon")
+        expect(SubmoduleTreePresentation.defaultCommand(item) == "repository.submodule.openGE", "submodule: current-node Return/double-click opens a new instance")
+        let selection: [RevisionID] = [.workingDirectory, .object(testObjectID("old"))]
+        expect(RepositoryOpeningSelection.parse(RepositoryOpeningSelection.arguments(selection)) == selection, "submodule: new-window selection preserves artificial and real revision identities")
+        expect(RepositoryOpeningSelection.parse(["--select-revision", "HEAD~2", "--select-revision"]).isEmpty, "submodule: opening selection rejects unresolved expressions and missing values")
+        expect(SubmoduleTreePresentation.toolTip(item).contains(testObjectID("old").string), "submodule: tooltip includes recorded gitlink identity")
+        let menu = RepositoryContextMenuBuilder.build(.init(focused: .submodule(isInitialized: true, isCurrent: true), selected: [.submodule(isInitialized: true, isCurrent: true)], selectedHaveChildren: true, selectedHaveExpandableChildren: true, selectedHaveCollapsibleChildren: false))
+        expect(menu.entry(id: "repository.submodule.open")?.isEnabled == false, "submodule: current node cannot switch to itself")
+        expect(menu.entry(id: "repository.submodule.openGE")?.isEnabled == true, "submodule: current node can open a new instance")
+        expect(menu.entry(id: "repository.submodules.manage")?.isEnabled == true && menu.entry(id: "repository.submodules.synchronize")?.isEnabled == true, "submodule: manage/sync belong to current repository")
+        let other = RepositoryContextMenuBuilder.build(.init(focused: .submodule(isInitialized: true), selected: [.submodule(isInitialized: true)], selectedHaveChildren: false, selectedHaveExpandableChildren: false, selectedHaveCollapsibleChildren: false))
+        expect(other.entry(id: "repository.submodule.open")?.isEnabled == true && other.entry(id: "repository.submodules.manage")?.isEnabled == false, "submodule: sibling opens but cannot manage the current repository through its node")
     }
 
     private static func testRepositoryTreeVisibilityAndOrdering() {

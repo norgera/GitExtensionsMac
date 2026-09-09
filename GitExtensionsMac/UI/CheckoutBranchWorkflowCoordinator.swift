@@ -15,6 +15,7 @@ final class CheckoutBranchWorkflowCoordinator {
     private let onConflicts: () -> Void
     private let onMerge: (String) -> Void
     private let onRebase: (Commit) -> Void
+    private let onCheckoutCompleted: (() -> Void)?
     private var task: Task<Void, Never>?
 
     init(
@@ -28,7 +29,8 @@ final class CheckoutBranchWorkflowCoordinator {
         onStatus: @escaping (String) -> Void,
         onConflicts: @escaping () -> Void,
         onMerge: @escaping (String) -> Void,
-        onRebase: @escaping (Commit) -> Void
+        onRebase: @escaping (Commit) -> Void,
+        onCheckoutCompleted: (() -> Void)? = nil
     ) {
         self.source = source
         self.stashSource = stashSource
@@ -41,6 +43,7 @@ final class CheckoutBranchWorkflowCoordinator {
         self.onConflicts = onConflicts
         self.onMerge = onMerge
         self.onRebase = onRebase
+        self.onCheckoutCompleted = onCheckoutCompleted
     }
 
     deinit { task?.cancel() }
@@ -125,6 +128,7 @@ final class CheckoutBranchWorkflowCoordinator {
                     await publish(selected: result.selectedCommitID)
                 }
                 present(result)
+                if case .completed = result.outcome { onCheckoutCompleted?() }
             } catch is CancellationError {
                 return
             } catch {
