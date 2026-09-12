@@ -16,6 +16,9 @@ final class GitUICommands {
     private var submoduleCommitWindowController: NSWindowController?
     private var submoduleSources: [String: any RepositoryBrowsingDataSource] = [:]
     private var reflogBranchWorkflowCoordinator: CheckoutBranchWorkflowCoordinator?
+    private var archiveWindows: [UUID: ArchiveWindowController] = [:]
+    private var patchWindows: [UUID: PatchWindowController] = [:]
+    private static var standalonePatchWindows: [UUID: PatchWindowController] = [:]
 
     init(
         repositoryModule: any RepositoryBrowsingDataSource,
@@ -42,6 +45,72 @@ final class GitUICommands {
     func notifyRepositoryChanged(preferredCommitID: RevisionID? = nil) {
         browser?.prepareNotifierRefresh(preferredCommitID: preferredCommitID)
         repositoryChangedNotifier.notify()
+    }
+
+    func startArchive(selected: [Commit]) {
+        guard let browser, let owner = browser.view.window,
+              let source = repositoryModule as? any RepositoryArchivingDataSource else { return }
+        guard (1...2).contains(selected.count), selected.allSatisfy({ !$0.isArtificial }) else {
+            Task { await MutationDialogs.showInformation("Select only one or two real revisions.", title: "Archive", window: owner) }
+            return
+        }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let request = try await repositoryModule.revisionReadRequest()
+                var history: [Commit] = []
+                for try await batch in await request.reader.read(request.context) { history += batch }
+                let id = UUID()
+                let controller = ArchiveWindowController(source: source,
+                    repositoryName: browser.repositoryIdentity?.currentRepository.name ?? "repository",
+                    history: history, selected: selected, closed: { [weak self] in self?.archiveWindows[id] = nil })
+                archiveWindows[id] = controller
+                controller.window?.setFrameOrigin(NSPoint(x: owner.frame.minX + 30, y: owner.frame.minY + 30))
+                controller.showWindow(nil); controller.window?.makeKeyAndOrderFront(nil)
+            } catch { await MutationDialogs.showError(error, title: "Archive", window: owner) }
+        }
+    }
+
+    static func startPatchViewer(owner: NSWindow?, file: URL? = nil) {
+        let id = UUID()
+        let controller = PatchWindowController(mode: .view, source: nil, revisions: [], selected: [], initialFile: file,
+            viewPatch: { file in startPatchViewer(owner: owner, file: file) }, changed: {}, conflicts: { _ in false },
+            closed: { standalonePatchWindows[id] = nil })
+        standalonePatchWindows[id] = controller
+        if let owner { controller.window?.setFrameOrigin(NSPoint(x: owner.frame.minX + 30, y: owner.frame.minY + 30)) }
+        controller.showWindow(nil)
+        controller.window?.makeKeyAndOrderFront(nil)
+    }
+
+    func startPatch(_ mode: PatchDialogMode, selected: [Commit] = [], history: [Commit]? = nil, file: URL? = nil) {
+        if mode == .view { Self.startPatchViewer(owner: browser?.view.window, file: file); return }
+        guard let browser, let owner = browser.view.window,
+              let source = repositoryModule as? any RepositoryPatchingDataSource,
+              browser.repositoryIdentity?.currentRepository.isBare == false else { return }
+        if mode == .format && history == nil {
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                do {
+                    let request = try await repositoryModule.revisionReadRequest()
+                    var commits: [Commit] = []
+                    for try await batch in await request.reader.read(request.context) { commits += batch }
+                    startPatch(mode, selected: selected, history: commits)
+                } catch { await MutationDialogs.showError(error, title: "Load patch revisions", window: owner) }
+            }
+            return
+        }
+        let id = UUID()
+        let controller = PatchWindowController(
+            mode: mode, source: source, revisions: history ?? browser.revisions, selected: selected.map(\.id),
+            currentBranch: browser.repositoryReferences?.branches.first(where: \.isCurrent)?.name,
+            initialFile: file, viewPatch: { [weak self] file in self?.startPatch(.view, file: file) },
+            changed: { [weak self, weak browser] in self?.notifyRepositoryChanged(preferredCommitID: browser?.selectedCommitID) },
+            conflicts: { window in await WorkflowManagementDialogs.resolveConflicts(source: source, window: window, offerCommit: false) },
+            closed: { [weak self] in self?.patchWindows[id] = nil })
+        patchWindows[id] = controller
+        controller.window?.setFrameOrigin(NSPoint(x: owner.frame.minX + 30, y: owner.frame.minY + 30))
+        controller.showWindow(nil)
+        controller.window?.makeKeyAndOrderFront(nil)
     }
 
     func startWorktreeManagement() {

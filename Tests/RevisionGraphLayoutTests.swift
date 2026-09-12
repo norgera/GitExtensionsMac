@@ -20,6 +20,17 @@ func testRevisionID(_ label: String) -> RevisionID { .object(testObjectID(label)
 @main
 private enum RevisionGraphLayoutTests {
     static func main() async {
+        if CommandLine.arguments.contains("--archive-only") {
+            ContextMenuStateTests.run()
+            do { try await GitArchiveTests.run() }
+            catch { fatalError("GitArchiveTests failed: \(error)") }
+            return
+        }
+        if CommandLine.arguments.contains("--patches-only") {
+            do { try await GitPatchTests.run() }
+            catch { fatalError("GitPatchTests failed: \(error)") }
+            return
+        }
         if CommandLine.arguments.contains("--file-viewer-only") {
             FileViewerTests.run()
             do {
@@ -214,6 +225,8 @@ private enum RevisionGraphLayoutTests {
             try await GitReflogTests.run()
             try await GitWorktreeTests.run()
             try await GitSubmoduleTests.run()
+            try await GitPatchTests.run()
+            try await GitArchiveTests.run()
             if let flagIndex = CommandLine.arguments.firstIndex(of: "--verify-mutations"),
                CommandLine.arguments.indices.contains(flagIndex + 1) {
                 try await GitRepositoryMutationTests.verifyDisposableClone(

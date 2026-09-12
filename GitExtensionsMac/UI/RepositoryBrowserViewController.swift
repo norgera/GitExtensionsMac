@@ -898,6 +898,12 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             uiCommands.startBisect([commit])
         case .reflog:
             uiCommands.startReflog()
+        case .formatPatch:
+            uiCommands.startPatch(.format, selected: revisions.filter { workflowRevisionSelection.contains($0.id) })
+        case .archiveRevision:
+            uiCommands.startArchive(selected: revisions.filter { workflowRevisionSelection.contains($0.id) })
+        case .applyPatch: uiCommands.startPatch(.apply)
+        case .viewPatch: uiCommands.startPatch(.view)
         case .manageWorktrees:
             uiCommands.startWorktreeManagement()
         case .manageSubmodules: uiCommands.startSubmoduleManagement()
@@ -985,6 +991,9 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         BrowserCommandAvailability.shared.canBisect = false
         BrowserCommandAvailability.shared.canReflog = !state.identity.currentRepository.isBare
             && repositoryModule is any RepositoryReflogDataSource
+        BrowserCommandAvailability.shared.canPatch = !state.identity.currentRepository.isBare
+            && repositoryModule is any RepositoryPatchingDataSource
+        BrowserCommandAvailability.shared.canArchive = repositoryModule is any RepositoryArchivingDataSource
         BrowserCommandAvailability.shared.canManageWorktrees = repositoryModule is any RepositoryWorktreeManagingDataSource
         BrowserCommandAvailability.shared.canManageSubmodules = !state.identity.currentRepository.isBare
             && repositoryModule is any RepositorySubmoduleManagingDataSource
@@ -1682,6 +1691,14 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
     }
 
     private func performRevisionCommand(_ identifier: String, selected: [Commit], focused: Commit) {
+        if identifier == "revision.commit.archive" {
+            uiCommands.startArchive(selected: selected)
+            return
+        }
+        if identifier == "revision.other.formatPatch" {
+            uiCommands.startPatch(.format, selected: selected)
+            return
+        }
         if identifier == "revision.other.reflog" {
             setShowsReflogReferences(!AppSettingsStore.shared.showReflogReferences)
             return

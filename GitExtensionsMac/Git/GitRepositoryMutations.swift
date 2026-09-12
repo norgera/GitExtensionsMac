@@ -1897,7 +1897,7 @@ extension GitRepositoryModule: RepositoryBrowserMutationDataSource, RepositorySt
         }
     }
 
-    private func parseApplyRebasePatches(directory: URL) -> [RepositoryRebasePatch] {
+    func parseApplyRebasePatches(directory: URL) -> [RepositoryRebasePatch] {
         let next = Int(readRebaseFile("next", directory: directory)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "") ?? 0
         let names = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
         return names.compactMap { name -> (Int, RepositoryRebasePatch)? in
@@ -2412,9 +2412,11 @@ extension GitRepositoryModule: RepositoryBrowserMutationDataSource, RepositorySt
             ),
             rebaseInProgress: FileManager.default.fileExists(
                 atPath: repository.gitDirectoryURL.appendingPathComponent("rebase-merge").path
-            ) || FileManager.default.fileExists(
+            ) || (FileManager.default.fileExists(
                 atPath: repository.gitDirectoryURL.appendingPathComponent("rebase-apply").path
-            )
+            ) && !FileManager.default.fileExists(
+                atPath: repository.gitDirectoryURL.appendingPathComponent("rebase-apply/applying").path
+            ))
         )
     }
 

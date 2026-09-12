@@ -326,7 +326,7 @@ private final class CherryPickViewController: NSViewController, NSTableViewDataS
 }
 
 @MainActor
-private enum CherryPickRevisionChooser {
+enum CherryPickRevisionChooser {
     static func present(history: [Commit], selectedCommitID: RevisionID, owner: NSWindow) async -> Commit? {
         let controller = CherryPickRevisionChooserViewController(
             history: history,

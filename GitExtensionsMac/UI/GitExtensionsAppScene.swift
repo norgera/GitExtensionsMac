@@ -146,7 +146,8 @@ private struct GitExtensionsMenuCommands: Commands {
                 .disabled(!availability.canDeleteTag)
             Divider()
             Button("Cherry pick…") { perform(.cherryPick) }
-            Button("Archive revision…") { perform(.unavailable("Archive revision")) }
+            Button("Archive revision…") { perform(.archiveRevision) }
+                .disabled(!availability.canArchive)
             Button("Checkout revision…") { perform(.checkoutRevision) }
                 .disabled(!availability.canCheckoutRevision)
             Button("Bisect…") { perform(.bisect) }
@@ -154,9 +155,11 @@ private struct GitExtensionsMenuCommands: Commands {
             Button("Show reflog…") { perform(.reflog) }
                 .disabled(!availability.canReflog)
             Divider()
-            Button("Format patch…") { perform(.unavailable("Format patch")) }
-            Button("Apply patch…") { perform(.unavailable("Apply patch")) }
-            Button("View patch file…") { perform(.unavailable("View patch file")) }
+            Button("Format patch…") { perform(.formatPatch) }
+                .disabled(!availability.canPatch)
+            Button("Apply patch…") { perform(.applyPatch) }
+                .disabled(!availability.canPatch)
+            Button("View patch file…") { perform(.viewPatch) }
         }
 
         CommandMenu("Repository hosts") {

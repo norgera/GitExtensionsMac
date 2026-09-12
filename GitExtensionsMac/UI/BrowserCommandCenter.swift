@@ -43,6 +43,10 @@ enum BrowserCommand: Equatable, Sendable {
     case cleanRepository
     case bisect
     case reflog
+    case formatPatch
+    case archiveRevision
+    case applyPatch
+    case viewPatch
     case manageWorktrees
     case manageSubmodules
     case updateSubmodules
@@ -99,6 +103,8 @@ final class BrowserCommandAvailability: ObservableObject {
     @Published var canClean = false
     @Published var canBisect = false
     @Published var canReflog = false
+    @Published var canPatch = false
+    @Published var canArchive = false
     @Published var canManageWorktrees = false
     @Published var canManageSubmodules = false
 

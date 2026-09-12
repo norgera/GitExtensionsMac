@@ -112,6 +112,9 @@ enum ContextMenuStateTests {
         expect(menu.entry(id: "revision.branch.resetCurrent")?.isEnabled == true, "revision: real commit can reset current branch")
         expect(menu.entry(id: "revision.branch.resetOther")?.isEnabled == true, "revision: real commit can reset another branch")
         expect(menu.entry(id: "revision.commit.revert")?.isEnabled == true, "revision: real commit can be reverted")
+        expect(menu.entry(id: "revision.other.formatPatch")?.isEnabled == true, "patch: real commit enables format launch")
+        expect(menu.entry(id: "revision.commit.archive")?.isEnabled == true, "archive: real revision launch")
+        expect(menu.entry(id: "revision.other.createPatch") == nil, "patch: no duplicate placeholder entry")
         expect(menu.entry(id: "revision.compare.selected")?.isEnabled == true, "revision: a single commit compares with its parent")
         expect(menu.entry(id: "revision.navigate.parent")?.isEnabled == true, "revision: parent navigation follows topology")
 
@@ -126,6 +129,8 @@ enum ContextMenuStateTests {
         expect(bareMenu.entry(id: "revision.branch.resetCurrent") == nil, "revision: bare repositories cannot reset current branch")
         expect(bareMenu.entry(id: "revision.branch.resetOther") == nil, "revision: bare repositories cannot reset another branch")
         expect(bareMenu.entry(id: "revision.commit.revert") == nil, "revision: bare repositories cannot revert commits")
+        expect(bareMenu.entry(id: "revision.other.formatPatch")?.isEnabled != true, "patch: bare repository format is unavailable")
+        expect(bareMenu.entry(id: "revision.commit.archive")?.isEnabled == true, "archive: bare repository supports export")
     }
 
     private static func testNonCurrentRevisionRefCommands() {
@@ -160,6 +165,9 @@ enum ContextMenuStateTests {
         expect(menu.entry(id: "revision.branch.rebase.selected")?.isEnabled == false, "revision: ordinary rebase requires one revision")
         expect(menu.entry(id: "revision.branch.rebase.advanced")?.isEnabled == true, "revision: advanced rebase accepts two real revisions")
         expect(menu.entry(id: "revision.compare.selected")?.isEnabled == true, "revision: selected revisions can be compared")
+        expect(menu.entry(id: "revision.commit.archive")?.isEnabled == true, "archive: two-revision differential launch")
+        let tooMany = RevisionContextMenuBuilder.build(.init(focusedCommit: first, selectedCommits: [first, second, commit("base")], history: [first, second], currentBranchName: "main"))
+        expect(tooMany.entry(id: "revision.commit.archive")?.isEnabled != true, "archive: more than two revisions are ineligible")
         expect(menu.entry(id: "revision.commit.edit")?.isEnabled == false, "revision: edit is disabled for multi-selection")
         expect(menu.entry(id: "revision.commit.cherryPick")?.isEnabled == true, "revision: real multi-selection can be cherry-picked")
         expect(menu.entry(id: "revision.commit.revert")?.isEnabled == true, "revision: real multi-selection can be reverted")
@@ -179,6 +187,8 @@ enum ContextMenuStateTests {
             "revision: artificial revisions cannot be cherry-picked"
         )
         expect(menu.entry(id: "revision.commit.revert")?.isEnabled == false, "revision: artificial revisions cannot be reverted")
+        expect(menu.entry(id: "revision.other.formatPatch")?.isEnabled != true, "patch: artificial revisions cannot be exported")
+        expect(menu.entry(id: "revision.commit.archive")?.isEnabled != true, "archive: artificial rows are not Git trees")
         expect(menu.entry(id: "revision.branch.merge") == nil, "revision: artificial revisions cannot be merged")
         expect(menu.entry(id: "revision.branch.create") == nil, "revision: artificial revisions cannot create branches")
         expect(menu.entry(id: "revision.branch.resetCurrent") == nil, "revision: artificial revisions cannot reset current branch")

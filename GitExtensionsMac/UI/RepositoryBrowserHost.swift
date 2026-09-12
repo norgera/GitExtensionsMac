@@ -104,6 +104,7 @@ final class ApplicationHostViewController: NSViewController {
         case .cloneRepository: presentCloneShell()
         case .initializeRepository: presentInitializeRepository()
         case .settings: presentSettings()
+        case .viewPatch: GitUICommands.startPatchViewer(owner: view.window)
         case .clearRecentRepositories:
             store.clearRecentRepositories()
             (activeController as? RepositoryStartupViewController)?.reloadRecents()
@@ -117,6 +118,8 @@ final class ApplicationHostViewController: NSViewController {
 
     private func showDashboard(error: Error? = nil) {
         openTask?.cancel()
+        BrowserCommandAvailability.shared.canPatch = false
+        BrowserCommandAvailability.shared.canArchive = false
         let controller = RepositoryStartupViewController(store: store)
         controller.onOpenRepository = { [weak self] in self?.presentOpenRepositoryPanel() }
         controller.onOpenRecentRepository = { [weak self] url in self?.openRepository(url) }

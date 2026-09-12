@@ -238,7 +238,8 @@ enum RevisionContextMenuBuilder {
                 )
             ]
         }
-        entries.append(command("revision.commit.archive", "Archive this commit…"))
+        entries.append(command("revision.commit.archive", "Archive this commit…",
+                               enabled: (1...2).contains(selected.count) && selected.allSatisfy { !$0.isArtificial }))
         if !context.isBareRepository {
             entries.append(submenu(
                 "revision.commit.advanced",
@@ -290,8 +291,7 @@ enum RevisionContextMenuBuilder {
             "revision.other",
             "Other actions",
             children: [
-                command("revision.other.createPatch", "Create patch…"),
-                command("revision.other.formatPatch", "Format patch…"),
+                command("revision.other.formatPatch", "Format patch…", enabled: !context.isBareRepository && selected.allSatisfy { !$0.isArtificial }),
                 command("revision.other.reflog", "Show reflog references"),
                 command("revision.other.object", "Show object information")
             ]
