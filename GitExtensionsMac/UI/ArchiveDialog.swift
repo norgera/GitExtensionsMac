@@ -75,7 +75,7 @@ private final class ArchiveViewController: NSViewController {
         stack.addArrangedSubview(NSTextField(labelWithString: "Filter files"))
         stack.addArrangedSubview(pathFilter)
         stack.addArrangedSubview(NSTextField(labelWithString: "Separate each new path by a new line"))
-        paths.isRichText = false; paths.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        paths.isRichText = false; paths.font = AppSettingsStore.shared.fontPreferences.font(.monospace, fallback: .monospacedSystemFont(ofSize: 12, weight: .regular))
         let pathScroll = NSScrollView(); pathScroll.documentView = paths; pathScroll.hasVerticalScroller = true
         pathScroll.borderType = .bezelBorder; stack.addArrangedSubview(pathScroll)
         pathScroll.heightAnchor.constraint(equalToConstant: 75).isActive = true
@@ -85,7 +85,7 @@ private final class ArchiveViewController: NSViewController {
         stack.addArrangedSubview(chooseComparison); stack.addArrangedSubview(comparisonSummary)
         comparisonSummary.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         revisionFilter.state = comparison == nil ? .off : .on
-        output.isEditable = false; output.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        output.isEditable = false; output.font = AppSettingsStore.shared.fontPreferences.font(.monospace, fallback: .monospacedSystemFont(ofSize: 11, weight: .regular))
         let transcript = NSScrollView(); transcript.documentView = output; transcript.hasVerticalScroller = true
         stack.addArrangedSubview(transcript)
         transcript.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true

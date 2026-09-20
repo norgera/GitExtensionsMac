@@ -14,6 +14,8 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
     private var pendingOpeningSelection: [RevisionID] = []
     private var graphReloadPending = false
     private var commits: [Commit] = []
+    private var repositoryStatus: RepositoryStatusSummary?
+    private var highlightedAuthorEmail: String?
     private var graphRows: [RevisionGraphLayout.Row] = []
     private var textFilter = ""
     private var branchFilter = ""
@@ -72,11 +74,7 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
             self?.handleQuickSearchKey(event) ?? false
         }
         tableView.handleNavigationKey = { [weak self] command in
-            if command == "revision.other.reflog" {
-                self?.performCommand(command, focusedCommitID: nil)
-            } else {
-                self?.performNavigation(command)
-            }
+            self?.performShortcut(command)
             return true
         }
 
@@ -93,7 +91,7 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
         scrollView.documentView = tableView
 
         quickSearchLabel.isHidden = true
-        quickSearchLabel.font = .boldSystemFont(ofSize: 11)
+        quickSearchLabel.font = AppSettingsStore.shared.applicationFont(size: 11, weight: .bold)
         quickSearchLabel.textColor = .controlTextColor
         quickSearchLabel.drawsBackground = true
         quickSearchLabel.backgroundColor = .controlBackgroundColor
@@ -200,6 +198,13 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
     }
 
     var visibleCommitCount: Int { commits.count }
+
+    func reloadAppearance() { tableView.reloadData() }
+
+    func applyStatus(_ status: RepositoryStatusSummary) {
+        repositoryStatus = status
+        tableView.reloadData()
+    }
 
     func setGraphConfiguration(mergeCommonParentLanes: Bool, straightenDiagonals: Bool) {
         let configuration = RevisionGraphLayout.Configuration(
@@ -309,7 +314,23 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
     func numberOfRows(in tableView: NSTableView) -> Int { commits.count }
 
     func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
-        GitExtensionsSelectionRowView()
+        let view = GitExtensionsSelectionRowView()
+        view.repositoryBackgroundColor = rowBackground(row)
+        return view
+    }
+
+    private func rowBackground(_ row: Int) -> NSColor {
+        let preferences = AppSettingsStore.shared.colorPreferences
+        if commits.indices.contains(row), !commits[row].isArtificial, preferences.highlightAuthored,
+           let email = highlightedAuthorEmail, !email.isEmpty, commits[row].authorEmail.caseInsensitiveCompare(email) == .orderedSame {
+            return ApplicationColors.color("AuthoredHighlight", fallback: NSColor.systemBlue.withAlphaComponent(0.08))
+        }
+        let base = ApplicationColors.color("PanelBackground", fallback: .controlBackgroundColor)
+        if preferences.alternateRows, row % 2 == 0 {
+            let dark = view.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            return base.blended(withFraction: dark ? 0.018 : 0.025, of: dark ? .white : .black) ?? base
+        }
+        return base
     }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
@@ -325,21 +346,22 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
         case "Message":
             let cell = (tableView.makeView(withIdentifier: identifier, owner: self) as? RevisionMessageCellView) ?? RevisionMessageCellView()
             cell.identifier = identifier
-            cell.configure(commit: commit, showsTags: showsTagReferences)
+            cell.configure(commit: commit, showsTags: showsTagReferences, isRelative: graphRows[row].isRelative)
+            cell.changeCounts = commit.kind == .index ? repositoryStatus?.index : repositoryStatus?.worktree
             return cell
         case "Author Name":
-            return textCell(identifier, value: commit.isArtificial ? "" : commit.authorName, font: .systemFont(ofSize: 11))
+            return textCell(identifier, value: commit.isArtificial ? "" : commit.authorName, font: AppSettingsStore.shared.applicationFont(size: 11), isRelative: graphRows[row].isRelative)
         case "Date":
             let date = commit.isArtificial ? "" : Self.relativeFormatter.localizedString(for: commit.commitDate, relativeTo: Date())
-            return textCell(identifier, value: date, font: .systemFont(ofSize: 11))
+            return textCell(identifier, value: date, font: AppSettingsStore.shared.applicationFont(size: 11), isRelative: graphRows[row].isRelative)
         case "Commit ID":
-            return textCell(identifier, value: commit.isArtificial ? "" : commit.shortID, font: .monospacedSystemFont(ofSize: 10.5, weight: .regular))
+            return textCell(identifier, value: commit.isArtificial ? "" : commit.shortID, font: AppSettingsStore.shared.fontPreferences.font(.monospace, fallback: .monospacedSystemFont(ofSize: 10.5, weight: .regular)), isRelative: graphRows[row].isRelative)
         default:
             return nil
         }
     }
 
-    private func textCell(_ identifier: NSUserInterfaceItemIdentifier, value: String, font: NSFont) -> NSTableCellView {
+    private func textCell(_ identifier: NSUserInterfaceItemIdentifier, value: String, font: NSFont, isRelative: Bool) -> NSTableCellView {
         let cell = (tableView.makeView(withIdentifier: identifier, owner: self) as? NSTableCellView) ?? {
             let view = NSTableCellView()
             view.identifier = identifier
@@ -357,11 +379,17 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
         }()
         cell.textField?.stringValue = value
         cell.textField?.font = font
+        cell.textField?.textColor = !isRelative && AppSettingsStore.shared.colorPreferences.nonRelativeTextGray
+            ? .secondaryLabelColor : ApplicationColors.color("WindowText", fallback: .labelColor)
         return cell
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
-        tableView.enumerateAvailableRowViews { rowView, _ in
+        if tableView.selectedRowIndexes.count <= 1 {
+            highlightedAuthorEmail = commits.indices.contains(tableView.selectedRow) ? commits[tableView.selectedRow].authorEmail : nil
+        }
+        tableView.enumerateAvailableRowViews { rowView, row in
+            (rowView as? GitExtensionsSelectionRowView)?.repositoryBackgroundColor = self.rowBackground(row)
             rowView.needsDisplay = true
             rowView.subviews.forEach { $0.needsDisplay = true }
         }
@@ -387,11 +415,6 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
     private func handleQuickSearchKey(_ event: NSEvent) -> Bool {
         let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
             .subtracting([.capsLock, .numericPad, .function])
-
-        if modifiers == .option, event.keyCode == 125 || event.keyCode == 126 {
-            showAdjacentQuickSearchResult(down: event.keyCode == 125)
-            return true
-        }
 
         if event.keyCode == 53 { // Escape
             guard !quickSearchLabel.isHidden else { return false }
@@ -499,7 +522,8 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
 
     private func restartQuickSearchTimer() {
         quickSearchTimer?.invalidate()
-        quickSearchTimer = Timer.scheduledTimer(withTimeInterval: 4, repeats: false) { [weak self] _ in
+        let interval = Double(AppSettingsStore.shared.browseDisplayPreferences.quickSearchTimeoutMilliseconds) / 1000
+        quickSearchTimer = Timer.scheduledTimer(withTimeInterval: max(0.001, interval), repeats: false) { [weak self] _ in
             self?.hideQuickSearch()
         }
     }
@@ -513,6 +537,22 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         let row = tableView.clickedRow >= 0 ? tableView.clickedRow : tableView.selectedRow
+        populateMenu(menu, row: row)
+    }
+
+    private func performShortcut(_ command: String) {
+        if command.hasPrefix("revision.navigate.") { performNavigation(command); return }
+        if command.hasPrefix("revision.search.") {
+            showAdjacentQuickSearchResult(down: command == "revision.search.next")
+            return
+        }
+        let menu = NSMenu()
+        populateMenu(menu, row: tableView.selectedRow)
+        guard let item = menuItem(withIdentifier: command, in: menu), item.isEnabled, item.action != nil else { return }
+        performCommand(command, focusedCommitID: nil)
+    }
+
+    private func populateMenu(_ menu: NSMenu, row: Int) {
         guard row >= 0, row < commits.count else {
             menu.removeAllItems()
             return
@@ -663,26 +703,7 @@ private final class RevisionTableView: NSTableView {
             return
         }
 
-        let navigationModifiers = modifiers.subtracting([.capsLock, .numericPad, .function])
-        let key = event.charactersIgnoringModifiers?.lowercased()
-        let navigationID: String?
-        if navigationModifiers == .control, key == "n" {
-            navigationID = "revision.navigate.child"
-        } else if navigationModifiers == .control, key == "p" {
-            navigationID = "revision.navigate.parent"
-        } else if navigationModifiers == .control, event.keyCode == 123 {
-            navigationID = "revision.navigate.firstParent"
-        } else if navigationModifiers == .control, event.keyCode == 124 {
-            navigationID = "revision.navigate.lastParent"
-        } else if navigationModifiers == [.control, .shift], key == "k" {
-            navigationID = "revision.navigate.mergeBase"
-        } else if navigationModifiers == [.control, .shift], key == "c" {
-            navigationID = "revision.navigate.current"
-        } else if navigationModifiers == [.control, .shift], key == "l" {
-            navigationID = "revision.other.reflog"
-        } else {
-            navigationID = nil
-        }
+        let navigationID = ApplicationHotkeys.shared.matching(event, category: "Revision grid")
         if let navigationID, handleNavigationKey?(navigationID) == true { return }
 
         if handleQuickSearchKey?(event) == true { return }
@@ -737,7 +758,7 @@ final class CommitGraphCellView: NSTableCellView {
         let nodeColor: NSColor
         if graphRow.commitKind != .revision {
             nodeColor = .tertiaryLabelColor
-        } else if !graphRow.isRelative {
+        } else if !graphRow.isRelative && AppSettingsStore.shared.colorPreferences.nonRelativeGraphGray {
             nodeColor = GitExtensionsPalette.nonRelativeGraph
         } else {
             nodeColor = GitExtensionsPalette.graph[graphRow.nodeColorIndex % GitExtensionsPalette.graph.count]
@@ -758,7 +779,7 @@ final class CommitGraphCellView: NSTableCellView {
         let color: NSColor
         if graphRow?.commitKind != .revision {
             color = .tertiaryLabelColor
-        } else if !edge.isRelative {
+        } else if !edge.isRelative && AppSettingsStore.shared.colorPreferences.nonRelativeGraphGray {
             color = GitExtensionsPalette.nonRelativeGraph
         } else {
             color = GitExtensionsPalette.graph[edge.colorIndex % GitExtensionsPalette.graph.count]
@@ -954,6 +975,7 @@ final class CommitGraphCellView: NSTableCellView {
 }
 
 final class RevisionMessageCellView: NSTableCellView {
+    var changeCounts: RevisionChangeCounts?
     private enum BadgeShape {
         case notchLeft
         case notchRight
@@ -990,14 +1012,16 @@ final class RevisionMessageCellView: NSTableCellView {
 
     private var commit: Commit?
     private var showsTags = true
+    private var isRelative = true
     private var badges: [Badge] = []
     private var hoveredBadge: Int?
     private var trackingAreaReference: NSTrackingArea?
     override var isFlipped: Bool { true }
 
-    func configure(commit: Commit, showsTags: Bool) {
+    func configure(commit: Commit, showsTags: Bool, isRelative: Bool) {
         self.commit = commit
         self.showsTags = showsTags
+        self.isRelative = isRelative
         hoveredBadge = nil
         toolTip = nil
         needsDisplay = true
@@ -1036,8 +1060,9 @@ final class RevisionMessageCellView: NSTableCellView {
         guard subjectX < bounds.maxX else { return }
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineBreakMode = .byTruncatingTail
-        let subjectColor: NSColor = backgroundStyle == .emphasized ? .alternateSelectedControlTextColor : .labelColor
-        let font = NSFont.systemFont(ofSize: 11)
+        let subjectColor: NSColor = backgroundStyle == .emphasized ? .alternateSelectedControlTextColor
+            : (!isRelative && AppSettingsStore.shared.colorPreferences.nonRelativeTextGray ? .secondaryLabelColor : ApplicationColors.color("WindowText", fallback: .labelColor))
+        let font = AppSettingsStore.shared.applicationFont(size: 11)
         let height = ceil(font.boundingRectForFont.height)
         let rect = NSRect(x: subjectX, y: bounds.midY - height / 2, width: bounds.maxX - subjectX - 2, height: height)
         (commit.subject as NSString).draw(
@@ -1049,7 +1074,7 @@ final class RevisionMessageCellView: NSTableCellView {
 
     private func drawArtificialRevision(_ commit: Commit) {
         badges = []
-        let font = NSFont.systemFont(ofSize: 11)
+        let font = AppSettingsStore.shared.applicationFont(size: 11)
         let textSize = (commit.subject as NSString).size(withAttributes: [.font: font])
         let commonTextWidth = max(
             ("Working directory" as NSString).size(withAttributes: [.font: font]).width,
@@ -1075,11 +1100,27 @@ final class RevisionMessageCellView: NSTableCellView {
             withAttributes: [.font: font, .foregroundColor: textColor]
         )
 
-        let statusX = frame.minX + ceil(commonTextWidth) + 12
-        let indicatorRect = NSRect(x: statusX, y: frame.midY - 6, width: 12, height: 12)
-        if indicatorRect.maxX <= bounds.maxX,
-           let image = AppKitFactory.resourceImage("RepoStateClean", accessibilityDescription: "Clean") {
-            image.draw(in: indicatorRect, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+        guard AppSettingsStore.shared.browseDisplayPreferences.showArtificialRevisionCounts else { return }
+        var statusX = frame.minX + ceil(commonTextWidth) + 12
+        var groups: [(String, Int, String)] = []
+        if let counts = changeCounts {
+            groups = [("FileStatusModified", counts.changed.count, "changed files"),
+                      ("FileStatusAdded", counts.added.count, "new files"),
+                      ("FileStatusRemoved", counts.deleted.count, "deleted files"),
+                      ("SubmoduleRevisionDown", counts.submodulesChanged.count, "changed submodules"),
+                      ("SubmoduleDirty", counts.submodulesDirty.count, "dirty submodules")].filter { $0.1 > 0 }
+            if groups.isEmpty { groups = [("RepoStateClean", 0, "Clean")] }
+        } else { groups = [("RepoStateUnknown", 0, "Status unknown")] }
+        for (icon, count, label) in groups {
+            let rect = NSRect(x: statusX, y: frame.midY - 6, width: 12, height: 12)
+            guard rect.maxX <= bounds.maxX else { break }
+            AppKitFactory.resourceImage(icon, accessibilityDescription: label)?.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+            statusX += 16
+            if count > 0 {
+                let text = String(count) as NSString
+                text.draw(at: NSPoint(x: statusX, y: frame.midY - height / 2), withAttributes: [.font: font, .foregroundColor: textColor])
+                statusX += ceil(text.size(withAttributes: [.font: font]).width) + 5
+            }
         }
     }
 
@@ -1150,7 +1191,7 @@ final class RevisionMessageCellView: NSTableCellView {
 
     private func makeBadge(reference: RevisionReference, name: String, shape: BadgeShape, offset: CGFloat) -> Badge {
         let isHEAD = reference.kind == .head || reference.kind == .currentBranch
-        let font = isHEAD ? NSFont.boldSystemFont(ofSize: 11) : NSFont.systemFont(ofSize: 11)
+        let font = isHEAD ? AppSettingsStore.shared.applicationFont(size: 11, weight: .bold) : AppSettingsStore.shared.applicationFont(size: 11)
         let textSize = (name as NSString).size(withAttributes: [.font: font])
         let backgroundHeight = ceil(textSize.height) + 4 - 1
         let pointWidth = floor(backgroundHeight / 2)
@@ -1179,7 +1220,10 @@ final class RevisionMessageCellView: NSTableCellView {
     private func draw(badge: Badge, highlighted: Bool) {
         guard badge.frame.width > 0, badge.frame.height > 0 else { return }
         let path = badgePath(frame: badge.frame, shape: badge.shape, pointWidth: badge.pointWidth)
-        if backgroundStyle == .emphasized {
+        if AppSettingsStore.shared.colorPreferences.fillRefLabels {
+            badge.color.withAlphaComponent(0.23).setFill()
+            path.fill()
+        } else if backgroundStyle == .emphasized {
             NSColor.textBackgroundColor.setFill()
             path.fill()
         }
@@ -1314,8 +1358,22 @@ final class RevisionMessageCellView: NSTableCellView {
     }
 }
 
-private enum GitExtensionsPalette {
-    static let graph: [NSColor] = [
+@MainActor private enum GitExtensionsPalette {
+    private static var graphGeneration = -1
+    private static var cachedGraph: [NSColor] = []
+    static var graph: [NSColor] {
+        if graphGeneration == ApplicationColors.generation { return cachedGraph }
+        var colors = defaultGraph.enumerated().map { index, color in
+            ApplicationColors.color("GraphBranch\(index + 1)", fallback: color)
+        }.filter { $0.alphaComponent > 0 }
+        let eighth = ApplicationColors.color("GraphBranch8", fallback: .clear)
+        if eighth.alphaComponent > 0 { colors.append(eighth) }
+        if colors.isEmpty { colors = [defaultGraph[0]] }
+        cachedGraph = AppSettingsStore.shared.colorPreferences.multicolorBranches ? colors : [colors[0]]
+        graphGeneration = ApplicationColors.generation
+        return cachedGraph
+    }
+    private static let defaultGraph: [NSColor] = [
         dynamic(light: 0xF064A0, dark: 0xDB5B93),
         dynamic(light: 0x78B4E6, dark: 0x6FA7D4),
         dynamic(light: 0x24C221, dark: 0x1DA31B),
@@ -1325,14 +1383,14 @@ private enum GitExtensionsPalette {
         dynamic(light: 0xE7B00F, dark: 0xCA9B0D)
     ]
 
-    static let nonRelativeGraph = dynamic(light: 0xD3D3D3, dark: 0x707070)
+    static var nonRelativeGraph: NSColor { ApplicationColors.color("GraphNonRelativeBranch", fallback: dynamic(light: 0xD3D3D3, dark: 0x707070)) }
 
     static func referenceColor(for kind: RevisionReference.Kind) -> NSColor {
         switch kind {
-        case .head, .currentBranch, .localBranch: dynamic(light: 0x008000, dark: 0x7FE28A)
-        case .remoteBranch: dynamic(light: 0x8B0009, dark: 0xFD9797)
-        case .tag: dynamic(light: 0x00008B, dark: 0x40BAF7)
-        case .stash: dynamic(light: 0x808080, dark: 0xCFB3B3)
+        case .head, .currentBranch, .localBranch: ApplicationColors.color("Branch", fallback: dynamic(light: 0x008000, dark: 0x7FE28A))
+        case .remoteBranch: ApplicationColors.color("RemoteBranch", fallback: dynamic(light: 0x8B0009, dark: 0xFD9797))
+        case .tag: ApplicationColors.color("Tag", fallback: dynamic(light: 0x00008B, dark: 0x40BAF7))
+        case .stash: ApplicationColors.color("OtherTag", fallback: dynamic(light: 0x808080, dark: 0xCFB3B3))
         }
     }
 

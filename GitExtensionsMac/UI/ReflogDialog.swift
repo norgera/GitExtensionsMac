@@ -101,7 +101,7 @@ private final class ReflogViewController: NSViewController, NSWindowDelegate, NS
         let root = NSView()
         warning.textColor = .systemRed
         warning.alignment = .center
-        warning.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        warning.font = AppSettingsStore.shared.applicationFont(size: NSFont.smallSystemFontSize)
         warning.maximumNumberOfLines = 2
         warning.isHidden = true
 
@@ -299,7 +299,7 @@ private final class ReflogViewController: NSViewController, NSWindowDelegate, NS
         button.target = self
         button.action = action
         button.isBordered = false
-        button.font = .systemFont(ofSize: NSFont.systemFontSize)
+        button.font = AppSettingsStore.shared.applicationFont(size: NSFont.systemFontSize)
         button.contentTintColor = .linkColor
         button.setButtonType(.momentaryChange)
     }
@@ -309,7 +309,7 @@ private final class ReflogViewController: NSViewController, NSWindowDelegate, NS
         table.delegate = self
         table.usesAlternatingRowBackgroundColors = true
         table.allowsMultipleSelection = false
-        table.rowHeight = 24
+        table.rowHeight = AppSettingsStore.shared.applicationRowHeight(minimum: 24)
         table.headerView?.frame.size.height = 30
         table.addTableColumn(column("sha", title: "SHA-1", width: 285))
         table.addTableColumn(column("ref", title: "Ref", width: 170))

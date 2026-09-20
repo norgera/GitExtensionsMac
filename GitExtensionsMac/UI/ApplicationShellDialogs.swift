@@ -42,9 +42,9 @@ final class RepositoryStartupViewController: NSViewController, NSTableViewDataSo
         let left = NSView()
         left.translatesAutoresizingMaskIntoConstraints = false
         let logo = NSTextField(labelWithString: "Git Extensions")
-        logo.font = .boldSystemFont(ofSize: 25)
+        logo.font = AppSettingsStore.shared.applicationFont(size: 25, weight: .bold)
         let startTitle = NSTextField(labelWithString: "Start")
-        startTitle.font = .boldSystemFont(ofSize: 16)
+        startTitle.font = AppSettingsStore.shared.applicationFont(size: 16, weight: .bold)
         let open = commandButton("Open repository…", action: #selector(openRepository))
         open.keyEquivalent = "o"
         open.keyEquivalentModifierMask = .command
@@ -60,7 +60,7 @@ final class RepositoryStartupViewController: NSViewController, NSTableViewDataSo
         left.addSubview(leftStack)
 
         let recentTitle = NSTextField(labelWithString: "Recent repositories")
-        recentTitle.font = .boldSystemFont(ofSize: 18)
+        recentTitle.font = AppSettingsStore.shared.applicationFont(size: 18, weight: .bold)
         searchField.placeholderString = "Search recent repositories"
         searchField.controlSize = .small
         searchField.delegate = self
@@ -139,7 +139,7 @@ final class RepositoryStartupViewController: NSViewController, NSTableViewDataSo
         let cell = NSTableCellView()
         let value = isName ? URL(fileURLWithPath: repository.path).lastPathComponent : repository.path
         let label = NSTextField(labelWithString: value)
-        label.font = .systemFont(ofSize: 12)
+        label.font = AppSettingsStore.shared.applicationFont(size: 12)
         label.lineBreakMode = .byTruncatingMiddle
         label.translatesAutoresizingMaskIntoConstraints = false
         cell.addSubview(label)
@@ -156,7 +156,7 @@ final class RepositoryStartupViewController: NSViewController, NSTableViewDataSo
     private func commandButton(_ title: String, action: Selector) -> NSButton {
         let button = NSButton(title: title, target: self, action: action)
         button.isBordered = false
-        button.font = .systemFont(ofSize: 14)
+        button.font = AppSettingsStore.shared.applicationFont(size: 14)
         button.alignment = .left
         return button
     }
@@ -221,8 +221,8 @@ struct RepositoryNetworkRequest: Hashable, Sendable {
 
 @MainActor
 enum ApplicationShellDialogs {
-    static func presentSettings(from window: NSWindow) async {
-        let controller = SettingsViewController(store: .shared)
+    static func presentSettings(from window: NSWindow, source: (any RepositorySettingsDataSource)? = nil, repositoryChanged: @escaping () -> Void = {}) async {
+        let controller = SettingsViewController(store: .shared, source: source, repositoryChanged: repositoryChanged)
         let panel = NSPanel(contentViewController: controller)
         panel.title = "Settings"
         panel.styleMask = [.titled, .closable, .resizable]
@@ -441,7 +441,7 @@ private final class NetworkDialogViewController: NSViewController, NSWindowDeleg
         helpToggle.setButtonType(.momentaryPushIn)
         updateHelpToggleTitle()
 
-        helpNotice.font = .systemFont(ofSize: 12)
+        helpNotice.font = AppSettingsStore.shared.applicationFont(size: 12)
         helpNotice.lineBreakMode = .byTruncatingTail
         helpImageView.imageScaling = .scaleProportionallyUpOrDown
         helpImageView.imageAlignment = .alignTopLeft
@@ -479,7 +479,7 @@ private final class NetworkDialogViewController: NSViewController, NSWindowDeleg
         helpToggle.attributedTitle = NSAttributedString(
             string: isHelpExpanded ? "Hide help" : "Show help",
             attributes: [
-                .font: NSFont.systemFont(ofSize: 12),
+                .font: AppSettingsStore.shared.applicationFont(size: 12),
                 .foregroundColor: NSColor.linkColor,
                 .underlineStyle: NSUnderlineStyle.single.rawValue
             ]
@@ -593,7 +593,7 @@ private final class NetworkDialogViewController: NSViewController, NSWindowDeleg
         let autoStash = NSButton(checkboxWithTitle: "Auto stash", target: nil, action: nil)
         let status = NSTextField(labelWithString: "Network execution is not implemented")
         status.textColor = .secondaryLabelColor
-        status.font = .systemFont(ofSize: 10.5)
+        status.font = AppSettingsStore.shared.applicationFont(size: 10.5)
         status.lineBreakMode = .byTruncatingTail
         status.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         let execute = NSButton(title: kind.rawValue, target: nil, action: nil)
@@ -950,10 +950,41 @@ private final class SettingsViewController: NSViewController, NSOutlineViewDataS
     var onClose: ((NSApplication.ModalResponse) -> Void)?
 
     private let store: AppSettingsStore
+    private let source: (any RepositorySettingsDataSource)?
+    private let repositoryChanged: () -> Void
+    private var viewerDraft: FileViewerPreferences
+    private var viewerRememberDraft: FileViewerRememberPreferences
+    private var fontDraft: ApplicationFontPreferences
+    private var browseDisplayDraft: BrowseDisplayPreferences
+    private var editingFontRole: ApplicationFontRole?
+    private var pullDraft: PullPreferences
+    private var creationDraft: RepositoryCreationPreferences
+    private var checkoutDraft: CheckoutBranchPreferences
+    private var treeDraft: RepositoryTreePreferences
+    private var tagDraft: TagPreferences
+    private var configScope: GitSettingsScope = .effective
+    private var configValues: [GitSettingsScope: [String: [String]]] = [:]
+    private var configEdits: [GitSettingsScope: [String: String]] = [:]
+    private var loadingConfig = false
+    private var currentCategoryID = ""
+    private var saving = false
     private var draft: AppPreferences
     private var pushDraft: PushPreferences
     private var commitDraft: CommitPreferences
     private var stashDraft: StashPreferences
+    private var mergeDraft: MergePreferences
+    private var distributedSettings: DistributedSettings?
+    private var distributedScope: DistributedSettingsScope = .effective
+    private var distributedEdits: [DistributedSettingsScope: [String: String]] = [:]
+    private var loadingDistributed = false
+    private var revisionLinksDraft: [DistributedSettingsScope: [RevisionLinkDefinition]] = [:]
+    private var revisionLinksChanged: Set<DistributedSettingsScope> = []
+    private var selectedRevisionLink = 0
+    private var encodingDraft: [RepositoryTextEncoding]?
+    private var hotkeyDraft: [String: ApplicationKeyChord]?
+    private var hotkeyCategory = "Browse"
+    private var hotkeyCommand = "openRepository"
+    private var colorDraft: ApplicationColorPreferences?
     private lazy var roots: [SettingsNode] = [
         SettingsNode("application", "Git Extensions", [
             SettingsNode("general", "General"),
@@ -962,23 +993,19 @@ private final class SettingsViewController: NSViewController, NSOutlineViewDataS
                 SettingsNode("fonts", "Fonts"), SettingsNode("console", "Console style")
             ]),
             SettingsNode("revision_links", "Revision links"),
-            SettingsNode("build_server", "Build server integration"),
-            SettingsNode("scripts", "Scripts"),
             SettingsNode("hotkeys", "Hotkeys"),
             SettingsNode("advanced", "Advanced", [SettingsNode("confirmations", "Confirmations")]),
             SettingsNode("detailed", "Detailed", [
                 SettingsNode("browse", "Browse repository window"),
                 SettingsNode("commit", "Commit dialog"),
-                SettingsNode("diff", "Diff viewer"),
-                SettingsNode("blame", "Blame viewer")
+                SettingsNode("diff", "Diff viewer")
             ]),
             SettingsNode("ssh", "SSH")
         ]),
         SettingsNode("git", "Git", [
             SettingsNode("git_paths", "Paths"), SettingsNode("git_config", "Config"),
             SettingsNode("git_advanced", "Advanced")
-        ]),
-        SettingsNode("plugins", "Plugins")
+        ])
     ]
     private var visibleRoots: [SettingsNode] = []
     private let outlineView = NSOutlineView()
@@ -988,12 +1015,24 @@ private final class SettingsViewController: NSViewController, NSOutlineViewDataS
     private var didSetInitialDivider = false
     private var didClose = false
 
-    init(store: AppSettingsStore) {
+    init(store: AppSettingsStore, source: (any RepositorySettingsDataSource)?, repositoryChanged: @escaping () -> Void) {
         self.store = store
+        self.source = source
+        self.repositoryChanged = repositoryChanged
+        viewerDraft = store.fileViewerPreferences
+        viewerRememberDraft = store.fileViewerRemember
+        fontDraft = store.fontPreferences
+        browseDisplayDraft = store.browseDisplayPreferences
+        pullDraft = store.pullPreferences
+        creationDraft = store.repositoryCreationPreferences
+        checkoutDraft = store.checkoutBranchPreferences
+        treeDraft = store.repositoryTreePreferences
+        tagDraft = store.tagPreferences
         draft = store.preferences
         pushDraft = store.pushPreferences
         commitDraft = store.commitPreferences
         stashDraft = store.stashPreferences
+        mergeDraft = store.mergePreferences
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -1006,7 +1045,7 @@ private final class SettingsViewController: NSViewController, NSOutlineViewDataS
         outlineView.addTableColumn(column)
         outlineView.outlineTableColumn = column
         outlineView.headerView = nil
-        outlineView.rowHeight = 23
+        outlineView.rowHeight = store.applicationRowHeight(minimum: 23)
         outlineView.indentationPerLevel = 17
         outlineView.delegate = self
         outlineView.dataSource = self
@@ -1034,12 +1073,22 @@ private final class SettingsViewController: NSViewController, NSOutlineViewDataS
         content.orientation = .vertical
         content.alignment = .leading
         content.spacing = 10
+        let document = TopAlignedDocumentView()
+        document.translatesAutoresizingMaskIntoConstraints = false
+        document.addSubview(content)
         let contentScroll = NSScrollView()
-        contentScroll.documentView = content
+        contentScroll.documentView = document
         contentScroll.hasVerticalScroller = true
         contentScroll.borderType = .bezelBorder
         content.translatesAutoresizingMaskIntoConstraints = false
         content.widthAnchor.constraint(greaterThanOrEqualToConstant: 480).isActive = true
+        NSLayoutConstraint.activate([
+            document.widthAnchor.constraint(equalTo: contentScroll.contentView.widthAnchor),
+            content.leadingAnchor.constraint(equalTo: document.leadingAnchor),
+            content.trailingAnchor.constraint(equalTo: document.trailingAnchor),
+            content.topAnchor.constraint(equalTo: document.topAnchor),
+            content.bottomAnchor.constraint(equalTo: document.bottomAnchor)
+        ])
 
         settingsSplit.isVertical = true
         settingsSplit.dividerStyle = .thin
@@ -1101,7 +1150,7 @@ private final class SettingsViewController: NSViewController, NSOutlineViewDataS
         guard let node = item as? SettingsNode else { return nil }
         let cell = NSTableCellView()
         let label = NSTextField(labelWithString: node.title)
-        label.font = node.id == "application" || node.id == "git" || node.id == "plugins" ? .boldSystemFont(ofSize: 12) : .systemFont(ofSize: 12)
+        label.font = store.applicationFont(size: 12, weight: node.id == "application" || node.id == "git" || node.id == "plugins" ? .bold : .regular)
         label.translatesAutoresizingMaskIntoConstraints = false
         cell.addSubview(label)
         NSLayoutConstraint.activate([label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 7), label.centerYAnchor.constraint(equalTo: cell.centerYAnchor)])
@@ -1127,10 +1176,11 @@ private final class SettingsViewController: NSViewController, NSOutlineViewDataS
     }
 
     private func showCategory(_ node: SettingsNode) {
+        currentCategoryID = node.id
         content.arrangedSubviews.forEach { content.removeArrangedSubview($0); $0.removeFromSuperview() }
         panel?.title = "Settings - \(node.title)"
         let heading = NSTextField(labelWithString: node.title)
-        heading.font = .boldSystemFont(ofSize: 16)
+        heading.font = AppSettingsStore.shared.applicationFont(size: 16, weight: .bold)
         content.addArrangedSubview(heading)
         switch node.id {
         case "general", "application":
@@ -1139,41 +1189,149 @@ private final class SettingsViewController: NSViewController, NSOutlineViewDataS
             source.spacing = 10
             (source.arrangedSubviews.last as? NSButton)?.state = .on
             content.addArrangedSubview(source)
+            let submoduleStatus = toggle("Show submodules status in browse menu", value: browseDisplayDraft.showSubmoduleStatus) { self.browseDisplayDraft.showSubmoduleStatus = $0 }
+            func updateSubmoduleStatus() {
+                submoduleStatus.isEnabled = self.browseDisplayDraft.showChangedFilesOnCommitButton || self.browseDisplayDraft.showArtificialRevisionCounts
+                if !submoduleStatus.isEnabled {
+                    submoduleStatus.state = .off
+                    self.browseDisplayDraft.showSubmoduleStatus = false
+                }
+            }
+            updateSubmoduleStatus()
             content.addArrangedSubview(settingsGroup("Performance", [
-                disabledToggle("Show number of changed files on commit button", true),
-                disabledToggle("Show number of changed files for artificial commits", true),
-                disabledToggle("Show submodules status in browse menu", false),
+                toggle("Show number of changed files on commit button", value: browseDisplayDraft.showChangedFilesOnCommitButton) { self.browseDisplayDraft.showChangedFilesOnCommitButton = $0; updateSubmoduleStatus() },
+                toggle("Show number of changed files for artificial commits", value: browseDisplayDraft.showArtificialRevisionCounts) { self.browseDisplayDraft.showArtificialRevisionCounts = $0; updateSubmoduleStatus() },
+                submoduleStatus,
                 toggle("Show stash count on status bar in browse window", value: stashDraft.showStashCount) { self.stashDraft.showStashCount = $0 },
-                disabledToggle("Show ahead and behind information on status bar in browse window", true),
-                disabledToggle("Check for uncommitted changes in checkout branch dialog", true)
+                toggle("Show ahead and behind information on status bar in browse window", value: browseDisplayDraft.showAheadBehind) { self.browseDisplayDraft.showAheadBehind = $0 },
+                toggle("Check for uncommitted changes in checkout branch dialog", value: checkoutDraft.checkForUncommittedChanges) { self.checkoutDraft.checkForUncommittedChanges = $0 }
             ]))
             content.addArrangedSubview(settingsGroup("Behaviour", [
-                disabledToggle("Close Process dialog when process succeeds", false),
+                toggle("Close Process dialog when process succeeds", value: pullDraft.closeProcessOnSuccess) { self.pullDraft.closeProcessOnSuccess = $0 },
                 disabledToggle("Show console window when executing git process", false),
-                disabledToggle("Use histogram diff algorithm", false),
-                disabledToggle("Include untracked files in autostash", false),
+                toggle("Use histogram diff algorithm", value: viewerDraft.usesHistogram) { self.viewerDraft.usesHistogram = $0 },
+                toggle("Include untracked files in autostash", value: pullDraft.includeUntrackedInAutoStash) { self.pullDraft.includeUntrackedInAutoStash = $0 },
                 toggle("Open last working directory on startup", value: draft.reopenLastRepository) { self.draft.reopenLastRepository = $0 }
             ]))
-        case "git_paths", "git_config", "git":
+            content.addArrangedSubview(stepper("Revision grid quick-search timeout (milliseconds):", value: browseDisplayDraft.quickSearchTimeoutMilliseconds, range: 100...1_000_000) { self.browseDisplayDraft.quickSearchTimeoutMilliseconds = $0 })
+            content.addArrangedSubview(stepper("Maximum revisions (0 = unlimited):", value: browseDisplayDraft.maximumRevisionCount, range: 0...Int(Int32.max)) { self.browseDisplayDraft.maximumRevisionCount = $0 })
+            content.addArrangedSubview(pathField("Default clone destination:", value: creationDraft.cloneDestinationPath) { self.creationDraft.cloneDestinationPath = $0 })
+            let pullActions: [(String, PullActionPreference)] = [
+                ("Open pull dialog", .openDialog), ("Pull - merge", .merge), ("Pull - rebase", .rebase),
+                ("Fetch", .fetch), ("Fetch all", .fetchAll), ("Fetch and prune all", .fetchPruneAll)
+            ]
+            content.addArrangedSubview(popup("Default Pull button action:", values: pullActions.map(\.0), selected: pullActions.first { $0.1 == pullDraft.defaultAction }!.0) { title in
+                self.pullDraft.defaultAction = pullActions.first { $0.0 == title }!.1
+            })
+            content.addArrangedSubview(popup("Update submodules on checkout:", values: ["Ask", "Yes", "No"], selected: checkoutDraft.updateSubmodulesOnCheckout.map { $0 ? "Yes" : "No" } ?? "Ask") { title in
+                self.checkoutDraft.updateSubmodulesOnCheckout = title == "Ask" ? nil : title == "Yes"
+            })
+        case "git_paths", "git":
             content.addArrangedSubview(pathField("Git executable:", value: draft.gitExecutablePath) { self.draft.gitExecutablePath = $0 })
             content.addArrangedSubview(note("The configured executable is used for newly opened repositories."))
-        case "appearance", "colors", "fonts", "console", "sorting":
+        case "git_config", "git_advanced":
+            showGitConfiguration(advanced: node.id == "git_advanced")
+        case "sorting":
+            content.addArrangedSubview(popup("Order refs by:", values: RepositoryTreeSortBy.allCases.map(\.title), selected: treeDraft.sortBy.title) { value in
+                self.treeDraft.sortBy = RepositoryTreeSortBy.allCases.first { $0.title == value } ?? .gitDefault
+            })
+            content.addArrangedSubview(popup("Sort direction:", values: RepositoryTreeSortOrder.allCases.map(\.rawValue), selected: treeDraft.sortOrder.rawValue) { self.treeDraft.sortOrder = RepositoryTreeSortOrder(rawValue: $0) ?? .ascending })
+        case "fonts":
+            content.addArrangedSubview(note("Fonts (restart required). Native macOS fonts replace Windows-specific font families."))
+            content.addArrangedSubview(toggle("Show end-of-line markers as glyph instead of \\r\\n etc.", value: fontDraft.showEolMarkerAsGlyph) { self.fontDraft.showEolMarkerAsGlyph = $0 })
+            for role in ApplicationFontRole.allCases {
+                let fallback = role == .application ? NSFont.systemFont(ofSize: 11) : NSFont.monospacedSystemFont(ofSize: role == .commit ? 12 : 11, weight: .regular)
+                let font = fontDraft.font(role, fallback: fallback)
+                let button = CallbackButton(title: "\(font.displayName ?? font.fontName), \(Int(font.pointSize))", target: nil, action: #selector(CallbackButton.invoke))
+                button.font = font
+                button.target = button
+                button.callback = { [weak self] in
+                    guard let self else { return }
+                    self.editingFontRole = role
+                    NSFontManager.shared.target = self
+                    NSFontManager.shared.setSelectedFont(font, isMultiple: false)
+                    NSFontManager.shared.orderFrontFontPanel(self)
+                }
+                content.addArrangedSubview(formRow(role.title + ":", button))
+            }
+        case "appearance", "console":
             content.addArrangedSubview(popup("Theme:", values: ApplicationTheme.allCases.map(\.rawValue), selected: draft.theme.rawValue) { value in
                 self.draft.theme = ApplicationTheme(rawValue: value) ?? .system
             })
+        case "colors":
+            if colorDraft == nil { colorDraft = store.colorPreferences }
+            let themes = ["Native system colors"] + ApplicationThemeReader.availableThemes()
+            content.addArrangedSubview(popup("Theme:", values: themes, selected: colorDraft!.themeFile.isEmpty ? themes[0] : colorDraft!.themeFile) { value in
+                self.colorDraft?.themeFile = value == themes[0] ? "" : value
+                if value == "invariant.css" || value == "light+.css" { self.draft.theme = .light }
+                if value == "dark.css" || value == "dark+.css" { self.draft.theme = .dark }
+            })
+            content.addArrangedSubview(toggle("Colorblind variation", value: colorDraft!.colorblind) { self.colorDraft?.colorblind = $0 })
+            content.addArrangedSubview(toggle("Multicolor branches", value: colorDraft!.multicolorBranches) { self.colorDraft?.multicolorBranches = $0 })
+            content.addArrangedSubview(toggle("Draw non-relative graph branches gray", value: colorDraft!.nonRelativeGraphGray) { self.colorDraft?.nonRelativeGraphGray = $0 })
+            content.addArrangedSubview(toggle("Fill ref labels", value: colorDraft!.fillRefLabels) { self.colorDraft?.fillRefLabels = $0 })
+            content.addArrangedSubview(toggle("Draw alternate row background", value: colorDraft!.alternateRows) { self.colorDraft?.alternateRows = $0 })
+            content.addArrangedSubview(toggle("Highlight authored revisions", value: colorDraft!.highlightAuthored) { self.colorDraft?.highlightAuthored = $0 })
+            content.addArrangedSubview(toggle("Draw non-relative revision text gray", value: colorDraft!.nonRelativeTextGray) { self.colorDraft?.nonRelativeTextGray = $0 })
+            for (title, url) in [("Open application themes folder", ApplicationThemeReader.bundledDirectory), ("Open user themes folder", ApplicationThemeReader.userDirectory)] {
+                let button = CallbackButton(title: title, target: nil, action: #selector(CallbackButton.invoke))
+                button.target = button
+                button.callback = { [weak self] in
+                    do {
+                        if url == ApplicationThemeReader.userDirectory { try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true) }
+                        NSWorkspace.shared.open(url)
+                    } catch {
+                        if let panel = self?.panel { Task { await MutationDialogs.showError(error, title: "Themes", window: panel) } }
+                    }
+                }
+                content.addArrangedSubview(button)
+            }
+            content.addArrangedSubview(note("Custom themes use upstream application-color CSS files in the user themes folder. Reopen this page after adding a file. AppKit retains ownership of system chrome."))
         case "browse":
+            content.addArrangedSubview(toggle("Show tags in revision grid", value: tagDraft.showTagsInRevisionGrid) { self.tagDraft.showTagsInRevisionGrid = $0 })
+            for root in RepositoryTreeRoot.allCases {
+                content.addArrangedSubview(toggle("Show \(root.title) in repository tree", value: treeDraft.visibleRoots.contains(root)) { visible in
+                    if visible { self.treeDraft.visibleRoots.insert(root) } else { self.treeDraft.visibleRoots.remove(root) }
+                    if root == .tags { self.tagDraft.showTagsInRepositoryTree = visible }
+                    if root == .stashes { self.stashDraft.showStashesInRepositoryTree = visible }
+                })
+            }
             content.addArrangedSubview(toggle("Merge common-parent lanes", value: draft.mergeCommonParentLanes) { self.draft.mergeCommonParentLanes = $0 })
             content.addArrangedSubview(toggle("Straighten graph diagonals", value: draft.straightenGraphDiagonals) { self.draft.straightenGraphDiagonals = $0 })
             content.addArrangedSubview(stepper("Maximum recent repositories:", value: draft.maximumRecentRepositories, range: 1...100) { self.draft.maximumRecentRepositories = $0 })
         case "detailed":
-            content.addArrangedSubview(toggle("Get remote branches directly from remote", value: pushDraft.loadRemoteBranchesDirectly) { self.pushDraft.loadRemoteBranchesDirectly = $0 })
-            content.addArrangedSubview(toggle("Merge common-parent lanes", value: draft.mergeCommonParentLanes) { self.draft.mergeCommonParentLanes = $0 })
-            content.addArrangedSubview(toggle("Straighten graph diagonals", value: draft.straightenGraphDiagonals) { self.draft.straightenGraphDiagonals = $0 })
-            content.addArrangedSubview(stepper("Maximum recent repositories:", value: draft.maximumRecentRepositories, range: 1...100) { self.draft.maximumRecentRepositories = $0 })
+            showDetailedSettings()
+            let graphControls = [
+                toggle("Merge common-parent lanes", value: draft.mergeCommonParentLanes) { self.draft.mergeCommonParentLanes = $0 },
+                toggle("Straighten graph diagonals", value: draft.straightenGraphDiagonals) { self.draft.straightenGraphDiagonals = $0 }
+            ]
+            graphControls.forEach { $0.isEnabled = distributedScope == .global; content.addArrangedSubview($0) }
         case "diff":
-            content.addArrangedSubview(stepper("Context lines:", value: draft.diffContextLines, range: 0...20) { self.draft.diffContextLines = $0 })
-            content.addArrangedSubview(toggle("Ignore whitespace", value: draft.ignoreWhitespace) { self.draft.ignoreWhitespace = $0 })
-            content.addArrangedSubview(note("Diff options are persisted; backend application is tracked for a later parity pass."))
+            content.addArrangedSubview(settingsGroup("Remember viewer preferences", [
+                toggle("Remember the Ignore whitespaces preference", value: viewerRememberDraft.whitespace) { self.viewerRememberDraft.whitespace = $0 },
+                toggle("Remember the Show entire file preference", value: viewerRememberDraft.entireFile) { self.viewerRememberDraft.entireFile = $0 },
+                toggle("Remember the Show nonprinting characters preference", value: viewerRememberDraft.nonPrinting) { self.viewerRememberDraft.nonPrinting = $0 },
+                toggle("Remember the Number of context lines preference", value: viewerRememberDraft.contextLines) { self.viewerRememberDraft.contextLines = $0 },
+                toggle("Remember syntax highlighting", value: viewerRememberDraft.syntaxHighlighting) { self.viewerRememberDraft.syntaxHighlighting = $0 }
+            ]))
+            let saveDefaults = CallbackButton(title: "Save current view settings as default", target: nil, action: #selector(CallbackButton.invoke))
+            saveDefaults.target = saveDefaults
+            saveDefaults.callback = { [weak self] in
+                guard let self else { return }
+                self.store.saveFileViewerPreferences(self.store.fileViewerPreferences)
+                self.draft.diffContextLines = self.store.preferences.diffContextLines
+                self.draft.ignoreWhitespace = self.store.preferences.ignoreWhitespace
+            }
+            content.addArrangedSubview(saveDefaults)
+            content.addArrangedSubview(stepper("Context lines:", value: viewerDraft.contextLines, range: 0...100) { self.viewerDraft.contextLines = $0 })
+            content.addArrangedSubview(popup("Whitespace:", values: DiffWhitespaceMode.allCases.map(\.rawValue), selected: viewerDraft.whitespace.rawValue) { self.viewerDraft.whitespace = DiffWhitespaceMode(rawValue: $0) ?? .none })
+            content.addArrangedSubview(toggle("Show entire file", value: viewerDraft.showsEntireFile) { self.viewerDraft.showsEntireFile = $0 })
+            content.addArrangedSubview(toggle("Treat all files as text", value: viewerDraft.treatsAllFilesAsText) { self.viewerDraft.treatsAllFilesAsText = $0 })
+            content.addArrangedSubview(toggle("Show non-printing characters", value: viewerDraft.showsNonPrintingCharacters) { self.viewerDraft.showsNonPrintingCharacters = $0 })
+            content.addArrangedSubview(toggle("Syntax highlighting", value: viewerDraft.showsSyntaxHighlighting) { self.viewerDraft.showsSyntaxHighlighting = $0 })
+            let encodings = store.viewerEncodings(including: viewerDraft.textEncoding)
+            content.addArrangedSubview(popup("Text encoding:", values: encodings.map(\.title), selected: viewerDraft.textEncoding.title) { title in self.viewerDraft.textEncoding = encodings.first { $0.title == title } ?? .automatic })
+            content.addArrangedSubview(note("Apply changes the current viewer preferences. Runtime choices persist for future sessions only with Save current view settings as default; remembered context lines are persisted automatically."))
         case "commit":
             content.addArrangedSubview(settingsGroup("Commit defaults", [
                 toggle("Sign-off commit by default", value: draft.defaultSignOff) { self.draft.defaultSignOff = $0 },
@@ -1194,20 +1352,39 @@ private final class SettingsViewController: NSViewController, NSOutlineViewDataS
                 toggle("Show Reset unstaged changes", value: commitDraft.showResetUnstaged) { self.commitDraft.showResetUnstaged = $0 },
                 toggle("Show Reset all changes", value: commitDraft.showResetAll) { self.commitDraft.showResetAll = $0 }
             ]))
-        case "git_advanced":
-            content.addArrangedSubview(toggle("Auto stash", value: draft.autoStashDuringRebase) { self.draft.autoStashDuringRebase = $0 })
+        case "encodings":
+            if encodingDraft == nil { encodingDraft = store.includedTextEncodings }
+            content.addArrangedSubview(note("Select encodings offered by viewers and Git Config. Unicode and ASCII remain available. Apply saves the list; Cancel preserves the previous list."))
+            for encoding in RepositoryTextEncoding.allCases where encoding != .automatic {
+                let control = toggle("\(encoding.title) (\(encoding.ianaName))", value: encodingDraft!.contains(encoding)) { included in
+                    if included { self.encodingDraft?.append(encoding) }
+                    else { self.encodingDraft?.removeAll { $0 == encoding } }
+                }
+                control.isEnabled = !AppSettingsStore.requiredTextEncodings.contains(encoding)
+                content.addArrangedSubview(control)
+            }
+        case "revision_links":
+            showRevisionLinks()
+            if distributedScope == .effective {
+                func disable(_ view: NSView) {
+                    (view as? NSControl)?.isEnabled = false
+                    view.subviews.forEach(disable)
+                }
+                content.arrangedSubviews.dropFirst().forEach(disable)
+            }
         case "hotkeys":
-            content.addArrangedSubview(note("Keyboard shortcut editing is not implemented. Current application shortcuts remain visible in menus."))
+            showHotkeys()
         case "ssh":
-            content.addArrangedSubview(pathField("External diff tool:", value: draft.externalDiffToolPath) { self.draft.externalDiffToolPath = $0 })
-            content.addArrangedSubview(pathField("External merge tool:", value: draft.externalMergeToolPath) { self.draft.externalMergeToolPath = $0 })
-            content.addArrangedSubview(note("External tool execution is not implemented."))
+            content.addArrangedSubview(note("Git uses the configured SSH executable, credential helpers and the macOS SSH agent. Configure Git tools and credentials under Git → Config. PuTTY/Pageant controls are Windows-only."))
         case "advanced":
             content.addArrangedSubview(toggle("Always show advanced options", value: pushDraft.showAdvancedOptions) { self.pushDraft.showAdvancedOptions = $0 })
             content.addArrangedSubview(pathField("Signing key:", value: draft.signingKey) { self.draft.signingKey = $0 })
             content.addArrangedSubview(note("The Commit window can use Git's configured signing behavior, disable signing, sign with the default key, or pass this key explicitly."))
         case "confirmations":
             content.addArrangedSubview(settingsGroup("Confirm actions — Branches", [
+                toggle("Fetch and prune all", value: pullDraft.confirmFetchAndPruneAll) { self.pullDraft.confirmFetchAndPruneAll = $0 },
+                toggle("Delete an unmerged branch", value: !checkoutDraft.dontConfirmDeleteUnmerged) { self.checkoutDraft.dontConfirmDeleteUnmerged = !$0 },
+                toggle("Check out a branch directly", value: checkoutDraft.confirmDirectCheckout) { self.checkoutDraft.confirmDirectCheckout = $0 },
                 toggle("Push a new branch for the remote", value: pushDraft.confirmNewBranch) { self.pushDraft.confirmNewBranch = $0 },
                 toggle("Add a tracking reference for newly pushed branch", value: pushDraft.confirmAddTrackingReference) { self.pushDraft.confirmAddTrackingReference = $0 }
             ]))
@@ -1216,10 +1393,7 @@ private final class SettingsViewController: NSViewController, NSOutlineViewDataS
                 toggle("Commit while HEAD is detached", value: commitDraft.confirmDetachedHead) { self.commitDraft.confirmDetachedHead = $0 },
                 toggle("Use force-with-lease when pushing an amended commit", value: commitDraft.forceWithLeaseAfterAmend) { self.commitDraft.forceWithLeaseAfterAmend = $0 }
             ]))
-        case "scripts":
-            content.addArrangedSubview(pathField("Shell:", value: draft.shellPath) { self.draft.shellPath = $0 })
-            content.addArrangedSubview(pathField("Editor:", value: draft.editorPath) { self.draft.editorPath = $0 })
-            content.addArrangedSubview(note("Shell and editor execution are not implemented."))
+            content.addArrangedSubview(toggle("Confirm stash drop", value: !stashDraft.dontConfirmDrop) { self.stashDraft.dontConfirmDrop = !$0 })
         default:
             content.addArrangedSubview(note("This Git Extensions settings page is present for navigation parity. Its options are not implemented yet."))
         }
@@ -1232,6 +1406,328 @@ private final class SettingsViewController: NSViewController, NSOutlineViewDataS
         button.isEnabled = false
         button.toolTip = "Not implemented yet"
         return button
+    }
+
+    private func showGitConfiguration(advanced: Bool) {
+        let scopes = GitSettingsScope.allCases.filter { source != nil || $0 != .local }
+        content.addArrangedSubview(popup("Settings source:", values: scopes.map(\.rawValue), selected: configScope.rawValue) { value in
+            self.configScope = GitSettingsScope(rawValue: value) ?? .effective
+            self.showCategory(SettingsNode(advanced ? "git_advanced" : "git_config", advanced ? "Advanced" : "Config"))
+        })
+        guard let loaded = configValues[configScope] else {
+            content.addArrangedSubview(note("Loading Git configuration…"))
+            guard !loadingConfig else { return }
+            loadingConfig = true
+            let scope = configScope
+            Task {
+                do {
+                    if let source { configValues[scope] = try await source.loadGitSettings(scope) }
+                    else { configValues[scope] = try await GitSettingsConfiguration.loadGlobal(scope, executableURL: URL(fileURLWithPath: (draft.gitExecutablePath as NSString).expandingTildeInPath)) }
+                    loadingConfig = false
+                    if currentCategoryID == "git_config" || currentCategoryID == "git_advanced" {
+                        showCategory(SettingsNode(currentCategoryID, currentCategoryID == "git_advanced" ? "Advanced" : "Config"))
+                    }
+                } catch {
+                    loadingConfig = false
+                    if currentCategoryID == "git_config" || currentCategoryID == "git_advanced" {
+                        content.addArrangedSubview(note(error.localizedDescription))
+                    }
+                }
+            }
+            return
+        }
+        let scope = configScope
+        let readOnly = scope == .effective || scope == .system
+        func value(_ key: String) -> String { configEdits[scope]?[key] ?? loaded[key]?.last ?? "" }
+        @discardableResult func field(_ key: String, _ label: String, browse: Bool = false) -> CallbackTextField {
+            let control = CallbackTextField(string: value(key))
+            control.widthAnchor.constraint(equalToConstant: 370).isActive = true
+            control.delegate = control
+            control.isEnabled = !readOnly && (loaded[key]?.count ?? 0) <= 1
+            control.callback = { [weak self, weak control] in
+                guard let self, let control else { return }
+                self.configEdits[scope, default: [:]][key] = control.stringValue
+            }
+            content.addArrangedSubview(formRow(label, control))
+            if browse {
+                let button = CallbackButton(title: "Browse…", target: nil, action: #selector(CallbackButton.invoke))
+                button.target = button
+                button.isEnabled = control.isEnabled
+                button.callback = { [weak self, weak control] in
+                    guard let self, let control, let owner = self.panel else { return }
+                    let picker = NSOpenPanel()
+                    picker.canChooseDirectories = false
+                    picker.allowsMultipleSelection = false
+                    picker.beginSheetModal(for: owner) { result in
+                        guard result == .OK, let url = picker.url else { return }
+                        control.stringValue = url.path
+                        control.callback?()
+                    }
+                }
+                content.addArrangedSubview(button)
+            }
+            if (loaded[key]?.count ?? 0) > 1 { content.addArrangedSubview(note("\(key) has multiple values; preserved without collapsing them.")) }
+            return control
+        }
+        func choice(_ key: String, _ label: String, _ options: [String]) {
+            let raw = value(key)
+            let isEmptyBoolean = raw.isEmpty && loaded[key] != nil && configEdits[scope]?[key] == nil && options.contains("false")
+            let current = isEmptyBoolean ? "false" : (raw.isEmpty ? "Not set" : raw)
+            let row = popup(label, values: ["Not set"] + options + (raw.isEmpty || options.contains(raw) ? [] : [raw]), selected: current) { [weak self] selected in
+                self?.configEdits[scope, default: [:]][key] = selected == "Not set" ? "" : selected
+            }
+            (row as? NSStackView)?.arrangedSubviews.compactMap { $0 as? NSControl }.forEach { $0.isEnabled = !readOnly }
+            content.addArrangedSubview(row)
+        }
+        content.addArrangedSubview(note(readOnly ? "Effective and System values are read-only. Select Global or Local to edit." : "Blank / Not set removes this scope's override. Other scopes and unrelated keys are preserved."))
+        if advanced {
+            for key in ["pull.rebase", "fetch.prune", "merge.autostash", "rebase.autostash", "rebase.autosquash", "rebase.updaterefs", "rerere.enabled", "rerere.autoupdate"] {
+                choice(key, key + ":", ["true", "false"])
+            }
+        } else {
+            field("user.name", "User name:"); field("user.email", "Email:")
+            field("core.editor", "Editor:"); field("commit.template", "Commit template:", browse: true)
+            if scope != .effective { field("credential.helper", "Credential helper:") }
+            choice("core.autocrlf", "Line endings:", ["false", "input", "true"])
+            for kind in ["diff", "merge"] {
+                let root = "\(kind).guitool"
+                let toolField = field(root, kind == "diff" ? "Diff tool:" : "Merge tool:")
+                if kind == "merge", scope == .effective, value(root).isEmpty { toolField.stringValue = value("merge.tool") }
+                let known = popup("Known tools:", values: ["Choose…"] + GitSettingsTools.names, selected: "Choose…") { selected in
+                    guard selected != "Choose…" else { return }
+                    self.configEdits[scope, default: [:]][root] = selected
+                    self.showCategory(SettingsNode("git_config", "Config"))
+                }
+                (known as? NSStackView)?.arrangedSubviews.compactMap { $0 as? NSControl }.forEach { $0.isEnabled = !readOnly }
+                content.addArrangedSubview(known)
+                let tool = toolField.stringValue
+                if !tool.isEmpty {
+                    let pathField = field("\(kind)tool.\(tool).path", "Tool path:", browse: true)
+                    let commandField = field("\(kind)tool.\(tool).cmd", "Tool command:")
+                    let suggest = CallbackButton(title: "Suggest", target: nil, action: #selector(CallbackButton.invoke))
+                    suggest.target = suggest
+                    suggest.isEnabled = !readOnly && GitSettingsTools.names.contains(tool.lowercased()) && commandField.isEnabled
+                    suggest.callback = { [weak commandField, weak pathField] in
+                        guard let commandField, let pathField,
+                              let command = GitSettingsTools.suggestedCommand(tool: tool, path: pathField.stringValue, merge: kind == "merge") else { return }
+                        commandField.stringValue = command
+                        commandField.callback?()
+                    }
+                    let previous = pathField.callback
+                    pathField.callback = { [weak suggest] in previous?(); if suggest?.isEnabled == true { suggest?.callback?() } }
+                    content.addArrangedSubview(suggest)
+                }
+            }
+            choice("i18n.filesencoding", "Files content encoding:", (encodingDraft ?? store.includedTextEncodings).map(\.ianaName))
+            let configure = CallbackButton(title: "Configure available encodings…", target: nil, action: #selector(CallbackButton.invoke))
+            configure.target = configure
+            configure.isEnabled = !readOnly
+            configure.callback = { [weak self] in self?.showCategory(SettingsNode("encodings", "Available encodings")) }
+            content.addArrangedSubview(configure)
+            content.addArrangedSubview(note("After changing a tool name, Apply to load its path and command. Existing unused tool definitions are retained."))
+        }
+    }
+
+    private func showHotkeys() {
+        if hotkeyDraft == nil { hotkeyDraft = store.hotkeyOverrides }
+        content.addArrangedSubview(popup("Control:", values: ["Browse", "Revision grid", "Commit", "File viewer"], selected: hotkeyCategory) { value in
+            self.hotkeyCategory = value
+            self.showCategory(SettingsNode("hotkeys", "Hotkeys"))
+        })
+        let commands = ApplicationHotkeys.definitions.filter { $0.category == hotkeyCategory }
+        if !commands.contains(where: { $0.id == hotkeyCommand }) { hotkeyCommand = commands[0].id }
+        content.addArrangedSubview(popup("Command:", values: commands.map(\.title), selected: commands.first { $0.id == hotkeyCommand }!.title) { value in
+            self.hotkeyCommand = commands.first { $0.title == value }!.id
+            self.showCategory(SettingsNode("hotkeys", "Hotkeys"))
+        })
+        let id = hotkeyCommand
+        let recorder = SettingsHotkeyRecorder(frame: .zero)
+        recorder.title = ApplicationHotkeys.chord(id, overrides: hotkeyDraft!).title
+        recorder.widthAnchor.constraint(equalToConstant: 280).isActive = true
+        recorder.onRecord = { [weak self] chord in self?.hotkeyDraft?[id] = chord }
+        content.addArrangedSubview(formRow("Shortcut:", recorder))
+        content.addArrangedSubview(note("Click the shortcut field and press the desired keys. Assignments are specific to the selected control; Apply saves them."))
+        for (title, reset) in [("Clear shortcut", false), ("Reset all to defaults", true)] {
+            let button = CallbackButton(title: title, target: nil, action: #selector(CallbackButton.invoke))
+            button.target = button
+            button.callback = { [weak self] in
+                guard let self else { return }
+                if reset { hotkeyDraft = [:] } else { hotkeyDraft?[id] = .init("") }
+                showCategory(SettingsNode("hotkeys", "Hotkeys"))
+            }
+            content.addArrangedSubview(button)
+        }
+    }
+
+    private func showRevisionLinks() {
+        if let source, distributedSettings == nil {
+            content.addArrangedSubview(note("Loading application settings scopes…"))
+            guard !loadingDistributed else { return }
+            loadingDistributed = true
+            Task {
+                defer { loadingDistributed = false }
+                do {
+                    distributedSettings = try await DistributedSettings.loadLocations(from: source)
+                    if currentCategoryID == "revision_links" { showCategory(SettingsNode("revision_links", "Revision links")) }
+                } catch { content.addArrangedSubview(note(error.localizedDescription)) }
+            }
+            return
+        }
+        if source == nil { distributedScope = .global }
+        let scopes = source == nil ? [DistributedSettingsScope.global] : DistributedSettingsScope.allCases
+        content.addArrangedSubview(popup("Settings source:", values: scopes.map(\.rawValue), selected: distributedScope.rawValue) { value in
+            self.distributedScope = DistributedSettingsScope(rawValue: value) ?? .effective
+            self.selectedRevisionLink = 0
+            self.showCategory(SettingsNode("revision_links", "Revision links"))
+        })
+        do {
+            for scope in [DistributedSettingsScope.local, .distributed, .global] where revisionLinksDraft[scope] == nil {
+                let xml = scope == .global ? store.revisionLinksXML : try distributedSettings?.values(scope, global: [:])[RevisionLinkDefinition.settingKey]
+                revisionLinksDraft[scope] = try RevisionLinkDefinition.decode(xml)
+            }
+        } catch {
+            content.addArrangedSubview(note("Cannot read revision links: \(error.localizedDescription). Existing definitions will not be overwritten."))
+            return
+        }
+        let visibleScopes: [DistributedSettingsScope] = distributedScope == .effective ? [.local, .distributed, .global] : [distributedScope]
+        let entries = visibleScopes.flatMap { scope in
+            (revisionLinksDraft[scope] ?? []).indices.map { (scope, $0) }
+        }
+        func refresh() { showCategory(SettingsNode("revision_links", "Revision links")) }
+        func button(_ title: String, _ action: @escaping () -> Void) -> NSButton {
+            let button = CallbackButton(title: title, target: nil, action: #selector(CallbackButton.invoke))
+            button.target = button; button.callback = action
+            return button
+        }
+        content.addArrangedSubview(button("Add", { [weak self] in
+            guard let self else { return }
+            var scope = distributedScope
+            if scope == .effective {
+                scope = .global
+                if revisionLinksDraft[.global]?.contains(where: { $0.name == "<new>" }) == true { scope = .distributed }
+                if scope == .distributed && revisionLinksDraft[.distributed]?.contains(where: { $0.name == "<new>" }) == true { scope = .local }
+            }
+            guard revisionLinksDraft[scope]?.contains(where: { $0.name == "<new>" }) != true else { NSSound.beep(); return }
+            revisionLinksDraft[scope, default: []].append(RevisionLinkDefinition())
+            revisionLinksChanged.insert(scope)
+            selectedRevisionLink = visibleScopes.prefix(while: { $0 != scope }).reduce(0) { $0 + (self.revisionLinksDraft[$1]?.count ?? 0) } + (revisionLinksDraft[scope]?.count ?? 1) - 1
+            refresh()
+        }))
+        guard !entries.isEmpty else { content.addArrangedSubview(note("No revision links configured.")); return }
+        selectedRevisionLink = min(max(0, selectedRevisionLink), entries.count - 1)
+        let titles = entries.enumerated().map { index, entry in
+            "\(index + 1). \(revisionLinksDraft[entry.0]![entry.1].name) [\(entry.0.rawValue)]"
+        }
+        content.addArrangedSubview(popup("Link definitions:", values: titles, selected: titles[selectedRevisionLink]) { value in
+            self.selectedRevisionLink = titles.firstIndex(of: value) ?? 0
+            refresh()
+        })
+        let (scope, index) = entries[selectedRevisionLink]
+        let definition = revisionLinksDraft[scope]![index]
+        func edit(_ change: (inout RevisionLinkDefinition) -> Void) {
+            change(&revisionLinksDraft[scope]![index]); revisionLinksChanged.insert(scope)
+        }
+        content.addArrangedSubview(button("Remove", { [weak self] in
+            self?.revisionLinksDraft[scope]?.remove(at: index)
+            self?.revisionLinksChanged.insert(scope)
+            refresh()
+        }))
+        content.addArrangedSubview(pathField("Name:", value: definition.name) { value in edit { $0.name = value } })
+        content.addArrangedSubview(toggle("Enabled", value: definition.enabled) { value in edit { $0.enabled = value } })
+        content.addArrangedSubview(pathField("Search pattern:", value: definition.searchPattern) { value in edit { $0.searchPattern = value } })
+        content.addArrangedSubview(pathField("Nested search pattern:", value: definition.nestedSearchPattern) { value in edit { $0.nestedSearchPattern = value } })
+        for part in ["Message", "LocalBranches", "RemoteBranches"] {
+            content.addArrangedSubview(toggle("Search in \(part)", value: definition.searchInParts.contains(part)) { value in
+                edit { if value { $0.searchInParts.insert(part) } else { $0.searchInParts.remove(part) } }
+            })
+        }
+        content.addArrangedSubview(pathField("Use remotes matching:", value: definition.useRemotesPattern) { value in edit { $0.useRemotesPattern = value } })
+        content.addArrangedSubview(toggle("Use only first matching remote", value: definition.useOnlyFirstRemote) { value in edit { $0.useOnlyFirstRemote = value } })
+        content.addArrangedSubview(pathField("Remote search pattern:", value: definition.remoteSearchPattern) { value in edit { $0.remoteSearchPattern = value } })
+        for part in ["URL", "PushURL"] {
+            content.addArrangedSubview(toggle("Search remote \(part)", value: definition.remoteSearchInParts.contains(part)) { value in
+                edit { if value { $0.remoteSearchInParts.insert(part) } else { $0.remoteSearchInParts.remove(part) } }
+            })
+        }
+        for (formatIndex, format) in definition.formats.enumerated() {
+            content.addArrangedSubview(pathField("Link caption:", value: format.caption) { value in edit { $0.formats[formatIndex].caption = value } })
+            content.addArrangedSubview(pathField("Link format:", value: format.format) { value in edit { $0.formats[formatIndex].format = value } })
+            content.addArrangedSubview(button("Remove link format", { edit { $0.formats.remove(at: formatIndex) }; refresh() }))
+        }
+        content.addArrangedSubview(button("Add link format", { edit { $0.formats.append(.init(caption: "", format: "")) }; refresh() }))
+        content.addArrangedSubview(note("Capture groups use {0}, {1}, …; remote groups precede revision groups. %COMMIT_HASH% inserts the resolved commit ID. Effective shows definitions from all scopes read-only; select a writable scope to edit."))
+    }
+
+    private func showDetailedSettings() {
+        if let source, distributedSettings == nil {
+            content.addArrangedSubview(note("Loading application settings scopes…"))
+            guard !loadingDistributed else { return }
+            loadingDistributed = true
+            Task {
+                defer { loadingDistributed = false }
+                do {
+                    distributedSettings = try await DistributedSettings.loadLocations(from: source)
+                    if currentCategoryID == "detailed" { showCategory(SettingsNode("detailed", "Detailed")) }
+                } catch {
+                    if currentCategoryID == "detailed" { content.addArrangedSubview(note(error.localizedDescription)) }
+                }
+            }
+            return
+        }
+        if source == nil { distributedScope = .global }
+        let scopes = source == nil ? [DistributedSettingsScope.global] : DistributedSettingsScope.allCases
+        content.addArrangedSubview(popup("Settings source:", values: scopes.map(\.rawValue), selected: distributedScope.rawValue) { value in
+            self.distributedScope = DistributedSettingsScope(rawValue: value) ?? .effective
+            self.showCategory(SettingsNode("detailed", "Detailed"))
+        })
+        let global = [DistributedSettings.remoteBranches: String(pushDraft.loadRemoteBranchesDirectly),
+                      DistributedSettings.mergeLog: String(mergeDraft.addLogMessages),
+                      DistributedSettings.mergeLogCount: String(mergeDraft.logMessagesCount)]
+        do {
+            func pending(_ scope: DistributedSettingsScope) throws -> [String: String] {
+                var values = try distributedSettings?.values(scope, global: global) ?? global
+                for (key, value) in distributedEdits[scope] ?? [:] { values[key] = value.isEmpty ? nil : value }
+                return values
+            }
+            let values: [String: String]
+            if distributedScope == .effective {
+                values = try pending(.global).merging(pending(.distributed), uniquingKeysWith: { _, new in new })
+                    .merging(pending(.local), uniquingKeysWith: { _, new in new })
+            } else { values = try pending(distributedScope) }
+            let scope = distributedScope
+            for (key, label) in [(DistributedSettings.remoteBranches, "Get remote branches directly from remote"), (DistributedSettings.mergeLog, "Add merge log messages")] {
+                let value = distributedEdits[scope]?[key] ?? values[key] ?? ""
+                let row = popup(label + ":", values: ["Not set", "true", "false"], selected: value.isEmpty ? "Not set" : value.lowercased()) { value in
+                    let value = value == "Not set" ? "" : value
+                    self.distributedEdits[scope, default: [:]][key] = value
+                    if scope == .global {
+                        if key == DistributedSettings.remoteBranches { self.pushDraft.loadRemoteBranchesDirectly = value == "true" }
+                        else { self.mergeDraft.addLogMessages = value == "true" }
+                    }
+                }
+                (row as? NSStackView)?.arrangedSubviews.compactMap { $0 as? NSControl }.forEach { $0.isEnabled = scope != .effective }
+                content.addArrangedSubview(row)
+            }
+            let key = DistributedSettings.mergeLogCount
+            let row = pathField("Merge log messages count:", value: distributedEdits[scope]?[key] ?? values[key] ?? "") { value in
+                self.distributedEdits[scope, default: [:]][key] = value
+                if scope == .global, let count = Int(value) { self.mergeDraft.logMessagesCount = count }
+            }
+            if let field = (row as? NSStackView)?.arrangedSubviews.compactMap({ $0 as? CallbackTextField }).first {
+                let changed = field.callback
+                field.callback = { [weak field] in
+                    changed?()
+                    guard let field else { return }
+                    let valid = field.stringValue.isEmpty || DistributedSettings.normalizedMergeLogCount(field.stringValue) != nil
+                    field.drawsBackground = true
+                    field.backgroundColor = valid ? .textBackgroundColor : .systemRed
+                    field.toolTip = valid ? nil : "Invalid number: applying will remove this override."
+                }
+            }
+            (row as? NSStackView)?.arrangedSubviews.compactMap { $0 as? NSControl }.forEach { $0.isEnabled = scope != .effective }
+            content.addArrangedSubview(row)
+            content.addArrangedSubview(note("Local overrides are private to this repository. Distributed overrides are stored in the working directory's GitExtensions.settings file and may be versioned. Effective settings are read-only."))
+        } catch { content.addArrangedSubview(note(error.localizedDescription)) }
     }
 
     private func settingsGroup(_ title: String, _ views: [NSView]) -> NSBox {
@@ -1276,14 +1772,26 @@ private final class SettingsViewController: NSViewController, NSOutlineViewDataS
     }
 
     private func stepper(_ title: String, value: Int, range: ClosedRange<Int>, changed: @escaping (Int) -> Void) -> NSView {
-        let field = NSTextField(string: String(value))
-        field.isEditable = false
+        let field = CallbackTextField(string: String(value))
+        field.delegate = field
+        let formatter = NumberFormatter()
+        formatter.allowsFloats = false
+        formatter.minimum = NSNumber(value: range.lowerBound)
+        formatter.maximum = NSNumber(value: range.upperBound)
+        field.formatter = formatter
         field.alignment = .right
-        field.widthAnchor.constraint(equalToConstant: 45).isActive = true
+        let fieldWidth = field.widthAnchor.constraint(equalToConstant: 100)
+        fieldWidth.priority = .defaultHigh
+        fieldWidth.isActive = true
         let step = CallbackStepper()
         step.minValue = Double(range.lowerBound)
         step.maxValue = Double(range.upperBound)
         step.integerValue = value
+        field.callback = {
+            guard let number = Int(field.stringValue), range.contains(number) else { return }
+            step.integerValue = number
+            changed(number)
+        }
         step.callback = { field.integerValue = step.integerValue; changed(step.integerValue) }
         step.target = step
         step.action = #selector(CallbackStepper.invoke)
@@ -1293,7 +1801,10 @@ private final class SettingsViewController: NSViewController, NSOutlineViewDataS
 
     private func pathField(_ title: String, value: String, changed: @escaping (String) -> Void) -> NSView {
         let field = CallbackTextField(string: value)
-        field.widthAnchor.constraint(equalToConstant: 370).isActive = true
+        field.delegate = field
+        let fieldWidth = field.widthAnchor.constraint(equalToConstant: 370)
+        fieldWidth.priority = .defaultHigh
+        fieldWidth.isActive = true
         field.callback = { changed(field.stringValue) }
         field.target = field
         field.action = #selector(CallbackTextField.invoke)
@@ -1302,8 +1813,10 @@ private final class SettingsViewController: NSViewController, NSOutlineViewDataS
 
     private func formRow(_ title: String, _ control: NSView) -> NSView {
         let label = NSTextField(labelWithString: title)
-        label.alignment = .right
-        label.widthAnchor.constraint(equalToConstant: 170).isActive = true
+        label.alignment = .left
+        let labelWidth = label.widthAnchor.constraint(equalToConstant: 300)
+        labelWidth.priority = .defaultHigh
+        labelWidth.isActive = true
         let row = NSStackView(views: [label, control])
         row.orientation = .horizontal
         row.alignment = .centerY
@@ -1320,28 +1833,118 @@ private final class SettingsViewController: NSViewController, NSOutlineViewDataS
     }
 
     @objc private func applySettings() {
-        guard validate() else { return }
-        store.save(draft)
-        store.savePushPreferences(pushDraft)
-        store.saveCommitPreferences(commitDraft)
-        store.saveStashPreferences(stashDraft)
+        saveSettings(closeAfter: false)
+    }
+    @objc func changeFont(_ sender: NSFontManager) {
+        guard let role = editingFontRole else { return }
+        let fallback = role == .application ? NSFont.systemFont(ofSize: 11) : NSFont.monospacedSystemFont(ofSize: role == .commit ? 12 : 11, weight: .regular)
+        let selected = sender.convert(fontDraft.font(role, fallback: fallback))
+        guard role != .code || selected.isFixedPitch else { NSSound.beep(); return }
+        fontDraft.fonts[role] = StoredApplicationFont(selected)
+        showCategory(SettingsNode("fonts", "Fonts"))
     }
     @objc private func saveAndClose() {
-        guard validate() else { return }
-        store.save(draft)
-        store.savePushPreferences(pushDraft)
-        store.saveCommitPreferences(commitDraft)
-        store.saveStashPreferences(stashDraft)
-        finish(.OK)
+        saveSettings(closeAfter: true)
     }
-    @objc private func cancel() { finish(.cancel) }
+    private func saveSettings(closeAfter: Bool) {
+        guard panel?.makeFirstResponder(nil) != false else { return }
+        guard !saving, validate() else { return }
+        saving = true
+        func controls(in view: NSView) -> [NSControl] {
+            (view as? NSControl).map { [$0] } ?? view.subviews.flatMap { controls(in: $0) }
+        }
+        let enabledControls = controls(in: view).filter(\.isEnabled)
+        enabledControls.forEach { $0.isEnabled = false }
+        let edits = configEdits
+        Task {
+            defer { enabledControls.forEach { $0.isEnabled = true } }
+            var changed = false
+            do {
+                for scope in revisionLinksChanged where scope != .global {
+                    let xml = RevisionLinkDefinition.encode(revisionLinksDraft[scope] ?? [])
+                    if let distributedSettings {
+                        let url = scope == .local ? distributedSettings.localURL : distributedSettings.distributedURL
+                        changed = try DistributedSettings.write([RevisionLinkDefinition.settingKey: xml], to: url) || changed
+                    }
+                }
+                if let distributedSettings {
+                    for (scope, url) in [(DistributedSettingsScope.local, distributedSettings.localURL), (.distributed, distributedSettings.distributedURL)] {
+                        let edits = distributedEdits[scope] ?? [:]
+                        if !edits.isEmpty {
+                            changed = try DistributedSettings.write(edits.mapValues { $0.isEmpty ? nil : $0 }, to: url) || changed
+                        }
+                    }
+                }
+                for scope in GitSettingsScope.allCases {
+                    for (key, value) in (edits[scope] ?? [:]).sorted(by: { $0.key < $1.key }) {
+                        let existing = configValues[scope]?[key]
+                        if value.isEmpty { guard existing != nil else { continue } }
+                        else { guard value != existing?.last else { continue } }
+                        if let source { try await source.saveGitSetting(key, value: value.isEmpty ? nil : value, scope: scope) }
+                        else { try await GitSettingsConfiguration.saveGlobal(key, value: value.isEmpty ? nil : value, scope: scope, executableURL: URL(fileURLWithPath: (draft.gitExecutablePath as NSString).expandingTildeInPath)) }
+                        changed = true
+                        configValues[scope]?[key] = value.isEmpty ? nil : [value]
+                    }
+                }
+                store.saveFileViewerRemember(viewerRememberDraft)
+                if let colorDraft { store.colorPreferences = colorDraft }
+                if let hotkeyDraft { store.hotkeyOverrides = hotkeyDraft }
+                if let encodingDraft { store.includedTextEncodings = encodingDraft }
+                if revisionLinksChanged.contains(.global) {
+                    store.revisionLinksXML = RevisionLinkDefinition.encode(revisionLinksDraft[.global] ?? [])
+                }
+                revisionLinksChanged = []
+                store.saveFontPreferences(fontDraft)
+                store.saveBrowseDisplayPreferences(browseDisplayDraft)
+                store.applyFileViewerPreferences(viewerDraft)
+                store.savePushPreferences(pushDraft); store.saveCommitPreferences(commitDraft)
+                store.saveStashPreferences(stashDraft); store.savePullPreferences(pullDraft)
+                store.saveRepositoryCreationPreferences(creationDraft)
+                store.saveMergePreferences(mergeDraft)
+                store.saveCheckoutBranchPreferences(checkoutDraft)
+                store.saveRepositoryTreePreferences(treeDraft); store.saveTagPreferences(tagDraft)
+                store.save(draft)
+                configEdits = [:]; configValues = [:]
+                distributedEdits = [:]
+                saving = false
+                if changed { repositoryChanged() }
+                if closeAfter { finish(.OK) }
+                else if let node = outlineView.item(atRow: outlineView.selectedRow) as? SettingsNode { showCategory(node) }
+            } catch {
+                saving = false
+                if changed { repositoryChanged() }
+                if let panel { await MutationDialogs.showError(error, title: "Settings", window: panel) }
+            }
+        }
+    }
+    @objc private func cancel() { if !saving { finish(.cancel) } }
+    func windowShouldClose(_ sender: NSWindow) -> Bool { !saving }
     func windowWillClose(_ notification: Notification) { finish(.cancel) }
     private func finish(_ response: NSApplication.ModalResponse) {
         guard !didClose else { return }
         didClose = true
+        if editingFontRole != nil {
+            NSFontManager.shared.target = nil
+            NSFontPanel.shared.orderOut(nil)
+        }
         onClose?(response)
     }
     private func validate() -> Bool {
+        if let colorDraft, !colorDraft.themeFile.isEmpty {
+            do { _ = try ApplicationThemeReader.load(colorDraft.themeFile, colorblind: colorDraft.colorblind) }
+            catch {
+                let alert = NSAlert(); alert.messageText = "Cannot load theme"; alert.informativeText = error.localizedDescription
+                if let panel { alert.beginSheetModal(for: panel) }
+                return false
+            }
+        }
+        for scope in Array(distributedEdits.keys) {
+            if let value = distributedEdits[scope]?[DistributedSettings.mergeLogCount] {
+                let normalized = DistributedSettings.normalizedMergeLogCount(value)
+                distributedEdits[scope]?[DistributedSettings.mergeLogCount] = normalized ?? ""
+                if scope == .global { mergeDraft.logMessagesCount = normalized.flatMap(Int.init) ?? 20 }
+            }
+        }
         let path = (draft.gitExecutablePath as NSString).expandingTildeInPath
         guard FileManager.default.isExecutableFile(atPath: path) else {
             let alert = NSAlert()
@@ -1359,4 +1962,9 @@ private final class SettingsViewController: NSViewController, NSOutlineViewDataS
 private final class CallbackButton: NSButton { var callback: (() -> Void)?; @objc func invoke() { callback?() } }
 private final class CallbackPopUpButton: NSPopUpButton { var callback: (() -> Void)?; @objc func invoke() { callback?() } }
 private final class CallbackStepper: NSStepper { var callback: (() -> Void)?; @objc func invoke() { callback?() } }
-private final class CallbackTextField: NSTextField { var callback: (() -> Void)?; @objc func invoke() { callback?() } }
+private final class CallbackTextField: NSTextField, NSTextFieldDelegate {
+    var callback: (() -> Void)?
+    @objc func invoke() { callback?() }
+    func controlTextDidChange(_ notification: Notification) { callback?() }
+    func controlTextDidEndEditing(_ notification: Notification) { callback?() }
+}

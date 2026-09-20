@@ -546,8 +546,8 @@ private final class RepositoryCreationProcessViewController: NSViewController, N
         let root = NSView()
         progress.style = .bar; progress.controlSize = .small; progress.isIndeterminate = true; progress.minValue = 0; progress.maxValue = 100
         progress.widthAnchor.constraint(equalToConstant: 92).isActive = true
-        status.font = .boldSystemFont(ofSize: 12)
-        outputView.isEditable = false; outputView.isSelectable = true; outputView.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        status.font = AppSettingsStore.shared.applicationFont(size: 12, weight: .bold)
+        outputView.isEditable = false; outputView.isSelectable = true; outputView.font = AppSettingsStore.shared.fontPreferences.font(.monospace, fallback: .monospacedSystemFont(ofSize: 11, weight: .regular))
         outputView.textContainerInset = NSSize(width: 6, height: 6); outputView.isVerticallyResizable = true; outputView.isHorizontallyResizable = true
         outputView.autoresizingMask = [.width, .height]
         outputView.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
@@ -601,7 +601,7 @@ private final class RepositoryCreationProcessViewController: NSViewController, N
         }
     }
     private func appendText(_ value: String, color: NSColor) {
-        outputView.textStorage?.append(NSAttributedString(string: value, attributes: [.font: NSFont.monospacedSystemFont(ofSize: 11, weight: .regular), .foregroundColor: color]))
+        outputView.textStorage?.append(NSAttributedString(string: value, attributes: [.font: AppSettingsStore.shared.fontPreferences.font(.monospace, fallback: .monospacedSystemFont(ofSize: 11, weight: .regular)), .foregroundColor: color]))
         outputView.scrollToEndOfDocument(nil)
     }
     override func cancelOperation(_ sender: Any?) { task != nil ? abort() : close() }

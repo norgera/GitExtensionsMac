@@ -43,6 +43,7 @@ package struct GitExtensionsAppScene: Scene {
 
 private struct GitExtensionsMenuCommands: Commands {
     @ObservedObject private var availability = BrowserCommandAvailability.shared
+    @ObservedObject private var hotkeys = ApplicationHotkeys.shared
 
     private func perform(_ command: BrowserCommand) {
         BrowserCommandCenter.perform(command)
@@ -51,9 +52,11 @@ private struct GitExtensionsMenuCommands: Commands {
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
             Button("New repository…") { perform(.initializeRepository) }
+                .keyboardShortcut(hotkeys.shortcut("initializeRepository"))
             Button("Open repository…") { perform(.openRepository) }
-                .keyboardShortcut("o", modifiers: .command)
+                .keyboardShortcut(hotkeys.shortcut("openRepository"))
             Button("Clone repository…") { perform(.cloneRepository) }
+                .keyboardShortcut(hotkeys.shortcut("cloneRepository"))
 
             Menu("Recent repositories") {
                 ForEach(AppSettingsStore.shared.recentRepositories.prefix(10), id: \.path) { repository in
@@ -67,7 +70,7 @@ private struct GitExtensionsMenuCommands: Commands {
 
             Divider()
             Button("Close (go to Dashboard)") { perform(.closeToDashboard) }
-                .keyboardShortcut("w", modifiers: [.command, .shift])
+                .keyboardShortcut(hotkeys.shortcut("closeToDashboard"))
         }
 
         CommandMenu("Dashboard") {
@@ -77,13 +80,15 @@ private struct GitExtensionsMenuCommands: Commands {
 
         CommandMenu("Repository") {
             Button("Refresh") { perform(.refresh) }
-                .keyboardShortcut("r", modifiers: .command)
+                .keyboardShortcut(hotkeys.shortcut("refresh"))
             Button("File Explorer") { perform(.unavailable("File Explorer")) }
                 .keyboardShortcut("o", modifiers: [.command, .shift])
             Divider()
             Button("Remote repositories…") { perform(.remoteRepositories) }
+                .keyboardShortcut(hotkeys.shortcut("remoteRepositories"))
             Divider()
             Button("Manage submodules…") { perform(.manageSubmodules) }
+                .keyboardShortcut(hotkeys.shortcut("manageSubmodules"))
                 .disabled(!availability.canManageSubmodules)
             Button("Update all submodules") { perform(.updateSubmodules) }
                 .disabled(!availability.canManageSubmodules)
@@ -91,6 +96,7 @@ private struct GitExtensionsMenuCommands: Commands {
                 .disabled(!availability.canManageSubmodules)
             Divider()
             Button("Manage worktrees…") { perform(.manageWorktrees) }
+                .keyboardShortcut(hotkeys.shortcut("manageWorktrees"))
                 .disabled(!availability.canManageWorktrees)
             Divider()
             Button("Edit .gitignore") { perform(.unavailable("Edit .gitignore")) }
@@ -110,56 +116,74 @@ private struct GitExtensionsMenuCommands: Commands {
 
         CommandGroup(after: .sidebar) {
             Button("Show/hide tags in revision grid") { perform(.toggleRevisionTags) }
-                .keyboardShortcut("t", modifiers: [.control, .option])
+                .keyboardShortcut(hotkeys.shortcut("toggleRevisionTags"))
         }
 
         CommandMenu("Commands") {
             Button("Commit…") { perform(.commit) }
-                .keyboardShortcut(.return, modifiers: [.command, .shift])
+                .keyboardShortcut(hotkeys.shortcut("commit"))
             Button("Undo last commit…") { perform(.unavailable("Undo last commit")) }
             Button("Pull/Fetch…") { perform(.pullFetch) }
+                .keyboardShortcut(hotkeys.shortcut("pullFetch"))
             Button("Push…") { perform(.push) }
+                .keyboardShortcut(hotkeys.shortcut("push"))
             Divider()
             Button("Manage stashes…") { perform(.manageStashes) }
+                .keyboardShortcut(hotkeys.shortcut("manageStashes"))
             Button("Reset changes…") { perform(.resetChanges) }
+                .keyboardShortcut(hotkeys.shortcut("resetChanges"))
                 .disabled(!availability.canReset)
             Button("Clean working directory…") { perform(.cleanRepository) }
+                .keyboardShortcut(hotkeys.shortcut("cleanRepository"))
                 .disabled(!availability.canClean)
             Divider()
             Button("Create branch…") { perform(.createBranch) }
-                .keyboardShortcut("b", modifiers: .control)
+                .keyboardShortcut(hotkeys.shortcut("createBranch"))
                 .disabled(!availability.canCreateBranch)
             Button("Delete branch…") { perform(.deleteBranch) }
+                .keyboardShortcut(hotkeys.shortcut("deleteBranch"))
                 .disabled(!availability.canDeleteBranch)
             Button("Checkout branch…") { perform(.checkoutBranch) }
-                .keyboardShortcut(".", modifiers: .control)
+                .keyboardShortcut(hotkeys.shortcut("checkoutBranch"))
                 .disabled(!availability.canCheckoutBranch)
             Button("Merge branches…") { perform(.mergeBranches) }
-                .keyboardShortcut("m", modifiers: .control)
+                .keyboardShortcut(hotkeys.shortcut("mergeBranches"))
                 .disabled(!availability.canMerge)
             Button("Rebase…") { perform(.rebase) }
+                .keyboardShortcut(hotkeys.shortcut("rebase"))
             Button("Solve merge conflicts…") { perform(.solveMergeConflicts) }
+                .keyboardShortcut(hotkeys.shortcut("solveMergeConflicts"))
             Divider()
             Button("Create tag…") { perform(.createTag) }
+                .keyboardShortcut(hotkeys.shortcut("createTag"))
                 .disabled(!availability.canCreateTag)
             Button("Delete tag…") { perform(.deleteTag) }
+                .keyboardShortcut(hotkeys.shortcut("deleteTag"))
                 .disabled(!availability.canDeleteTag)
             Divider()
             Button("Cherry pick…") { perform(.cherryPick) }
+                .keyboardShortcut(hotkeys.shortcut("cherryPick"))
             Button("Archive revision…") { perform(.archiveRevision) }
+                .keyboardShortcut(hotkeys.shortcut("archiveRevision"))
                 .disabled(!availability.canArchive)
             Button("Checkout revision…") { perform(.checkoutRevision) }
+                .keyboardShortcut(hotkeys.shortcut("checkoutRevision"))
                 .disabled(!availability.canCheckoutRevision)
             Button("Bisect…") { perform(.bisect) }
+                .keyboardShortcut(hotkeys.shortcut("bisect"))
                 .disabled(!availability.canBisect)
             Button("Show reflog…") { perform(.reflog) }
+                .keyboardShortcut(hotkeys.shortcut("reflog"))
                 .disabled(!availability.canReflog)
             Divider()
             Button("Format patch…") { perform(.formatPatch) }
+                .keyboardShortcut(hotkeys.shortcut("formatPatch"))
                 .disabled(!availability.canPatch)
             Button("Apply patch…") { perform(.applyPatch) }
+                .keyboardShortcut(hotkeys.shortcut("applyPatch"))
                 .disabled(!availability.canPatch)
             Button("View patch file…") { perform(.viewPatch) }
+                .keyboardShortcut(hotkeys.shortcut("viewPatch"))
         }
 
         CommandMenu("Repository hosts") {
@@ -177,7 +201,7 @@ private struct GitExtensionsMenuCommands: Commands {
         CommandMenu("Tools") {
             Button("Git command log") { perform(.unavailable("Git command log")) }
             Button("Settings…") { perform(.settings) }
-                .keyboardShortcut(",", modifiers: .command)
+                .keyboardShortcut(hotkeys.shortcut("settings"))
             Divider()
             Button("Translation") { perform(.unavailable("Translation")) }
             Button("Check for updates") { perform(.unavailable("Check for updates")) }

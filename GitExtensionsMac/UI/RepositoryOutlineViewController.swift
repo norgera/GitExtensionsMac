@@ -43,6 +43,10 @@ final class RepositoryTreeNode: NSObject {
 }
 
 enum SubmoduleTreePresentation {
+    static func menuTitle(_ item: SubmoduleTreeItem, showsStatus: Bool) -> String {
+        if showsStatus { return title(item) }
+        return item.repositoryURL.lastPathComponent + (item.branch.map { " (\($0))" } ?? "")
+    }
     static func defaultCommand(_ item: SubmoduleTreeItem) -> String {
         item.isCurrent ? "repository.submodule.openGE" : "repository.submodule.open"
     }
@@ -547,8 +551,22 @@ enum RepositoryTreeStateResolver {
 
 private final class RepositoryOutlineView: NSOutlineView {
     var onReturn: (() -> Void)?
+    var onShortcut: ((String) -> Void)?
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if window?.firstResponder === self,
+           let command = ApplicationHotkeys.shared.matching(event, category: "Repository tree") {
+            onShortcut?(command)
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
 
     override func keyDown(with event: NSEvent) {
+        if let command = ApplicationHotkeys.shared.matching(event, category: "Repository tree") {
+            onShortcut?(command)
+            return
+        }
         if event.keyCode == 36 || event.keyCode == 76 {
             onReturn?()
         } else {
@@ -610,7 +628,7 @@ final class RepositoryOutlineViewController: NSViewController, NSOutlineViewData
 
         searchField.placeholderString = "Search"
         searchField.controlSize = .small
-        searchField.font = .systemFont(ofSize: 11)
+        searchField.font = AppSettingsStore.shared.applicationFont(size: 11)
         searchField.bezelStyle = .squareBezel
         searchField.delegate = self
         searchField.translatesAutoresizingMaskIntoConstraints = false
@@ -621,7 +639,7 @@ final class RepositoryOutlineViewController: NSViewController, NSOutlineViewData
         outlineView.addTableColumn(column)
         outlineView.outlineTableColumn = column
         outlineView.headerView = nil
-        outlineView.rowHeight = 18
+        outlineView.rowHeight = AppSettingsStore.shared.applicationRowHeight(minimum: 18)
         outlineView.indentationPerLevel = 19
         outlineView.style = .plain
         outlineView.focusRingType = .none
@@ -635,6 +653,7 @@ final class RepositoryOutlineViewController: NSViewController, NSOutlineViewData
         outlineView.delegate = self
         outlineView.dataSource = self
         outlineView.onReturn = { [weak self] in self?.openSelectedNodeFromKeyboard() }
+        outlineView.onShortcut = { [weak self] in self?.performShortcut($0) }
 
         let contextMenu = NSMenu()
         contextMenu.delegate = self
@@ -926,25 +945,25 @@ final class RepositoryOutlineViewController: NSViewController, NSOutlineViewData
 
         switch node.kind {
         case .branch(let branch) where branch.isCurrent:
-            cell.textField?.font = .boldSystemFont(ofSize: 11)
+            cell.textField?.font = AppSettingsStore.shared.applicationFont(size: 11, weight: .bold)
             cell.textField?.textColor = .labelColor
         case .worktree(let worktree) where worktree.isCurrent:
-            cell.textField?.font = .boldSystemFont(ofSize: 11)
+            cell.textField?.font = AppSettingsStore.shared.applicationFont(size: 11, weight: .bold)
             cell.textField?.textColor = .labelColor
         case .submodule(let item) where item.isCurrent:
-            cell.textField?.font = .boldSystemFont(ofSize: 11)
+            cell.textField?.font = AppSettingsStore.shared.applicationFont(size: 11, weight: .bold)
             cell.textField?.textColor = .labelColor
         case .branch, .remoteBranch, .tag, .stash where !node.isRevisionVisible:
-            cell.textField?.font = .systemFont(ofSize: 11)
+            cell.textField?.font = AppSettingsStore.shared.applicationFont(size: 11)
             cell.textField?.textColor = .tertiaryLabelColor
         case .remote(let remote) where remote.isDisabled:
-            cell.textField?.font = .systemFont(ofSize: 11)
+            cell.textField?.font = AppSettingsStore.shared.applicationFont(size: 11)
             cell.textField?.textColor = .secondaryLabelColor
         case .worktree(let worktree) where worktree.isDeleted:
-            cell.textField?.font = .systemFont(ofSize: 11)
+            cell.textField?.font = AppSettingsStore.shared.applicationFont(size: 11)
             cell.textField?.textColor = .secondaryLabelColor
         default:
-            cell.textField?.font = .systemFont(ofSize: 11)
+            cell.textField?.font = AppSettingsStore.shared.applicationFont(size: 11)
             cell.textField?.textColor = .labelColor
         }
         return cell
@@ -989,6 +1008,30 @@ final class RepositoryOutlineViewController: NSViewController, NSOutlineViewData
         if !outlineView.selectedRowIndexes.contains(outlineView.clickedRow) {
             outlineView.selectRowIndexes(IndexSet(integer: outlineView.clickedRow), byExtendingSelection: false)
         }
+
+        populateMenu(menu, focused: node)
+    }
+
+    private func performShortcut(_ command: String) {
+        if command == "tree.search" { view.window?.makeFirstResponder(searchField); return }
+        guard let node = outlineView.item(atRow: outlineView.selectedRow) as? RepositoryTreeNode else { return }
+        let menu = NSMenu()
+        populateMenu(menu, focused: node)
+        let ids: Set<String> = command == "tree.rename" ? ["repository.branch.rename"] : [
+            "repository.branch.delete", "repository.remoteBranch.delete", "repository.tag.delete",
+            "repository.stash.drop", "repository.worktree.delete", "repository.folder.deleteAll"
+        ]
+        func find(_ menu: NSMenu) -> NSMenuItem? {
+            for item in menu.items where item.isEnabled {
+                if let id = item.identifier?.rawValue, ids.contains(id), item.action != nil { return item }
+                if let submenu = item.submenu, let match = find(submenu) { return match }
+            }
+            return nil
+        }
+        if let item = find(menu) { performMenuCommand(item) }
+    }
+
+    private func populateMenu(_ menu: NSMenu, focused node: RepositoryTreeNode) {
 
         let selectedNodes = outlineView.selectedRowIndexes.compactMap { index in
             outlineView.item(atRow: index) as? RepositoryTreeNode

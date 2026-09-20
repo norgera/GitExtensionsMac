@@ -71,6 +71,15 @@ final class GitUICommands {
         }
     }
 
+    func startSettings() {
+        guard let owner = browser?.view.window else { return }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await ApplicationShellDialogs.presentSettings(from: owner, source: repositoryModule as? any RepositorySettingsDataSource,
+                repositoryChanged: { [weak self] in self?.notifyRepositoryChanged() })
+        }
+    }
+
     static func startPatchViewer(owner: NSWindow?, file: URL? = nil) {
         let id = UUID()
         let controller = PatchWindowController(mode: .view, source: nil, revisions: [], selected: [], initialFile: file,
@@ -190,8 +199,8 @@ final class GitUICommands {
             NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: configuration) { _, error in
                 if let error { Task { @MainActor in self.browser?.showPlaceholderStatus(error.localizedDescription) } }
             }
-        } else if selection.isEmpty { browser?.onApplicationCommand?(.openRecentRepository(url)) }
-        else { browser?.onApplicationCommand?(.openRepositoryAtRevisions(url, selection)) }
+        } else if selection.isEmpty { _ = browser?.onApplicationCommand?(.openRecentRepository(url)) }
+        else { _ = browser?.onApplicationCommand?(.openRepositoryAtRevisions(url, selection)) }
     }
 
     func startSubmoduleTreeUpdate(_ item: SubmoduleTreeItem) {
@@ -585,13 +594,25 @@ final class GitUICommands {
         }
         guard let window = browser.view.window,
               let source = repositoryModule as? any RepositoryMergingDataSource else { return }
-        browser.mergeWindowController = browser.presentMergeDialog(
-            source: source,
-            context: context,
-            initialTarget: initialTarget,
-            previousSelection: browser.selectedCommitID,
-            owner: window
-        )
+        Task { @MainActor [weak browser] in
+            guard let browser else { return }
+            do {
+                var distributed: DistributedSettings?
+                if let settingsSource = source as? any RepositorySettingsDataSource {
+                    distributed = try await DistributedSettings.loadLocations(from: settingsSource)
+                    _ = try distributed?.mergePreferences(AppSettingsStore.shared)
+                }
+                if let existing = browser.mergeWindowController {
+                    existing.window?.makeKeyAndOrderFront(nil)
+                    return
+                }
+                browser.mergeWindowController = browser.presentMergeDialog(
+                    source: source, context: context, initialTarget: initialTarget,
+                    distributedSettings: distributed,
+                    previousSelection: browser.selectedCommitID, owner: window
+                )
+            } catch { await MutationDialogs.showError(error, title: "Merge settings", window: window) }
+        }
     }
 
     func startCherryPick(_ selectedCommits: [Commit]) {

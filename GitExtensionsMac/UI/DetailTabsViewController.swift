@@ -88,8 +88,12 @@ final class DetailTabsViewController: NSViewController {
     }
 
     @objc private func changeTab(_ sender: DetailTabButton) {
-        guard sender.tag != selectedIndex else { return }
-        showController(at: sender.tag)
+        selectTab(at: sender.tag)
+    }
+
+    func selectTab(at index: Int) {
+        guard index != selectedIndex, controllers.indices.contains(index) else { return }
+        showController(at: index)
         onSelectionChanged?(selectedIndex)
     }
 
@@ -116,7 +120,7 @@ final class DetailTabsViewController: NSViewController {
     }
 
     private static func tabWidth(for title: String, showsIcon: Bool) -> CGFloat {
-        let textWidth = (title as NSString).size(withAttributes: [.font: NSFont.systemFont(ofSize: 11)]).width
+        let textWidth = (title as NSString).size(withAttributes: [.font: AppSettingsStore.shared.applicationFont(size: 11)]).width
         let iconAndGap: CGFloat = showsIcon ? 20 : 0
         return max(44, ceil(textWidth) + iconAndGap + 14)
     }
@@ -165,7 +169,7 @@ private final class DetailTabButton: NSButton {
         border.stroke()
 
         let attributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 11),
+            .font: AppSettingsStore.shared.applicationFont(size: 11),
             .foregroundColor: NSColor.labelColor
         ]
         let size = title.size(withAttributes: attributes)

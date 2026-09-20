@@ -59,6 +59,7 @@ private final class PushDialogViewController: NSViewController,
     private let onManageRemotes: (String?, String?) -> Void
     private let onRepositoryChanged: (RevisionID?) -> Void
     private let settings = AppSettingsStore.shared
+    private var remoteBranchesDirectly: Bool?
     private var pushState: RepositoryPushState?
     private var didClose = false
     private var didBecomeKeyOnce = false
@@ -350,7 +351,7 @@ private final class PushDialogViewController: NSViewController,
         pushButton.imagePosition = .imageLeading
         pushButton.keyEquivalent = "\r"
         statusLabel.textColor = .secondaryLabelColor
-        statusLabel.font = .systemFont(ofSize: 10.5)
+        statusLabel.font = AppSettingsStore.shared.applicationFont(size: 10.5)
         statusLabel.lineBreakMode = .byTruncatingTail
         statusLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         let spacer = NSView()
@@ -387,6 +388,10 @@ private final class PushDialogViewController: NSViewController,
                 async let repositoryState = source.loadRepositoryState()
                 let state = try await loadedPushState
                 let refreshedContext = try await repositoryState.networkContext
+                if let settingsSource = source as? any RepositorySettingsDataSource {
+                    let locations = try await DistributedSettings.loadLocations(from: settingsSource)
+                    remoteBranchesDirectly = try locations.values(.effective, global: DistributedSettings.globalValues(settings))[DistributedSettings.remoteBranches]?.lowercased() == "true"
+                }
                 guard !Task.isCancelled else { return }
                 context = refreshedContext
                 pushState = state
@@ -497,7 +502,7 @@ private final class PushDialogViewController: NSViewController,
         guard let state = pushState else { return }
         let remoteName = remoteCombo.stringValue
         let cached = state.remoteBranches.filter { $0.remote == remoteName }
-        if !settings.pushPreferences.loadRemoteBranchesDirectly {
+        if !(remoteBranchesDirectly ?? settings.pushPreferences.loadRemoteBranchesDirectly) {
             buildMultipleRows(remoteNames: cached.map(\.name), cached: cached)
             return
         }
@@ -1221,8 +1226,8 @@ private final class RemoteBranchDeleteViewController: NSViewController, NSWindow
         deleteButton.isEnabled = false
         deleteButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 75).isActive = true
         status.textColor = .secondaryLabelColor
-        status.font = .systemFont(ofSize: 10.5)
-        trackingCandidates.font = .systemFont(ofSize: 11)
+        status.font = AppSettingsStore.shared.applicationFont(size: 10.5)
+        trackingCandidates.font = AppSettingsStore.shared.applicationFont(size: 11)
         trackingCandidates.textColor = .secondaryLabelColor
 
         let label = NSTextField(labelWithString: "Select branches")
@@ -1550,10 +1555,10 @@ private final class PushProcessViewController: NSViewController, NSWindowDelegat
         progress.minValue = 0
         progress.maxValue = 100
         progress.widthAnchor.constraint(equalToConstant: 92).isActive = true
-        status.font = .boldSystemFont(ofSize: 12)
+        status.font = AppSettingsStore.shared.applicationFont(size: 12, weight: .bold)
         outputView.isEditable = false
         outputView.isSelectable = true
-        outputView.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        outputView.font = AppSettingsStore.shared.fontPreferences.font(.monospace, fallback: .monospacedSystemFont(ofSize: 11, weight: .regular))
         outputView.textContainerInset = NSSize(width: 6, height: 6)
         outputView.frame = NSRect(x: 0, y: 0, width: 676, height: 330)
         outputView.minSize = .zero
@@ -1648,7 +1653,7 @@ private final class PushProcessViewController: NSViewController, NSWindowDelegat
     private func appendText(_ value: String, color: NSColor) {
         outputView.textStorage?.append(NSAttributedString(
             string: value,
-            attributes: [.font: NSFont.monospacedSystemFont(ofSize: 11, weight: .regular), .foregroundColor: color]
+            attributes: [.font: AppSettingsStore.shared.fontPreferences.font(.monospace, fallback: .monospacedSystemFont(ofSize: 11, weight: .regular)), .foregroundColor: color]
         ))
         outputView.scrollToEndOfDocument(nil)
     }

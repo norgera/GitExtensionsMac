@@ -1312,7 +1312,8 @@ extension GitRepositoryModule: RepositoryBrowserMutationDataSource, RepositorySt
             in: repository.rootURL
         )
         guard result.succeeded else { throw commandError(from: result) }
-        return FileContentDecoder.decode(result.standardOutput, path: path, requestedEncoding: encoding)
+        let configured = encoding == .automatic ? try await configuredFileEncoding() : nil
+        return FileContentDecoder.decode(result.standardOutput, path: path, requestedEncoding: encoding, configuredEncoding: configured)
     }
 
     package func conflictWorkingTreeURL(path: String) async throws -> URL {

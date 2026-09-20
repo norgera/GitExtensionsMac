@@ -60,7 +60,7 @@ enum TagDialogs {
         signingKey.widthAnchor.constraint(equalToConstant: 160).isActive = true
 
         let message = NSTextView(frame: NSRect(x: 0, y: 0, width: 330, height: 92))
-        message.font = .systemFont(ofSize: 12)
+        message.font = AppSettingsStore.shared.applicationFont(size: 12)
         message.isRichText = false
         message.isAutomaticQuoteSubstitutionEnabled = false
         message.isAutomaticDashSubstitutionEnabled = false
@@ -207,7 +207,7 @@ enum TagDialogs {
 
     private static func label(_ value: String) -> NSTextField {
         let label = NSTextField(labelWithString: value)
-        label.font = .systemFont(ofSize: 12)
+        label.font = AppSettingsStore.shared.applicationFont(size: 12)
         return label
     }
 

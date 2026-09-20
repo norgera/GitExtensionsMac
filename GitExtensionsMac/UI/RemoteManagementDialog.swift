@@ -165,7 +165,7 @@ private final class RemoteManagementViewController: NSViewController, NSWindowDe
         tabs.tabViewItem(at: 1).label = "Default pull behavior (fetch && merge)"
         tabs.tabViewItem(at: 1).view = makeTrackingPage()
         status.textColor = .secondaryLabelColor
-        status.font = .systemFont(ofSize: 10.5)
+        status.font = AppSettingsStore.shared.applicationFont(size: 10.5)
         status.lineBreakMode = .byTruncatingMiddle
         status.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(tabs)
@@ -729,11 +729,11 @@ private final class RemoteManagementViewController: NSViewController, NSWindowDe
         let label: NSTextField
         if let group = item as? GroupNode {
             label = NSTextField(labelWithString: group.title)
-            label.font = .systemFont(ofSize: 11, weight: .semibold)
+            label.font = AppSettingsStore.shared.applicationFont(size: 11, weight: .semibold)
             label.textColor = .secondaryLabelColor
         } else if let remote = item as? RepositoryRemoteConfiguration {
             label = NSTextField(labelWithString: remote.name)
-            label.font = .systemFont(ofSize: 12)
+            label.font = AppSettingsStore.shared.applicationFont(size: 12)
             label.textColor = remote.isDisabled ? .tertiaryLabelColor : .labelColor
         } else { return nil }
         label.translatesAutoresizingMaskIntoConstraints = false

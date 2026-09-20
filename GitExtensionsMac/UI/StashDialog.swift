@@ -194,7 +194,7 @@ private final class StashViewController: RetainingSplitViewController, NSWindowD
     private func configureLeadingView() {
         let root = NSView()
         let showLabel = NSTextField(labelWithString: "Show:")
-        showLabel.font = .systemFont(ofSize: 12)
+        showLabel.font = AppSettingsStore.shared.applicationFont(size: 12)
         selector.target = self
         selector.action = #selector(selectionChanged)
         selector.controlSize = .small
@@ -210,8 +210,8 @@ private final class StashViewController: RetainingSplitViewController, NSWindowD
         filesView.translatesAutoresizingMaskIntoConstraints = false
 
         let messageLabel = NSTextField(labelWithString: "Message:")
-        messageLabel.font = .systemFont(ofSize: 12)
-        messageView.font = .systemFont(ofSize: 12)
+        messageLabel.font = AppSettingsStore.shared.applicationFont(size: 12)
+        messageView.font = AppSettingsStore.shared.applicationFont(size: 12)
         messageView.isRichText = false
         messageView.isAutomaticQuoteSubstitutionEnabled = false
         messageView.isAutomaticDashSubstitutionEnabled = false
@@ -245,7 +245,7 @@ private final class StashViewController: RetainingSplitViewController, NSWindowD
             $0.heightAnchor.constraint(equalToConstant: 28).isActive = true
         }
 
-        status.font = .systemFont(ofSize: 11)
+        status.font = AppSettingsStore.shared.applicationFont(size: 11)
         status.textColor = .secondaryLabelColor
         status.lineBreakMode = .byTruncatingTail
         progress.style = .spinning
@@ -613,14 +613,11 @@ private final class StashViewController: RetainingSplitViewController, NSWindowD
                 finish()
                 return nil
             }
-            if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command {
-                let key = event.charactersIgnoringModifiers?.lowercased()
-                if key == "n" { changeSelectedStash(by: -1); return nil }
-                if key == "p" { changeSelectedStash(by: 1); return nil }
-            }
-            if event.keyCode == 96 {
-                refreshWorkingDirectoryIfSelected()
-                return nil
+            switch ApplicationHotkeys.shared.matching(event, category: "Stash") {
+            case "stash.next": changeSelectedStash(by: -1); return nil
+            case "stash.previous": changeSelectedStash(by: 1); return nil
+            case "stash.refresh": refreshWorkingDirectoryIfSelected(); return nil
+            default: break
             }
             return event
         }

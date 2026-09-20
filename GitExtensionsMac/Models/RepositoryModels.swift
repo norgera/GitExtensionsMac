@@ -1,4 +1,5 @@
 import Foundation
+import CoreFoundation
 
 package enum ObjectIDError: LocalizedError, Sendable {
     case invalid(String)
@@ -559,6 +560,7 @@ package enum DiffWhitespaceMode: String, CaseIterable, Hashable, Sendable, Codab
 }
 
 package struct FileDiffOptions: Hashable, Sendable {
+    package var usesHistogram: Bool
     package var whitespace: DiffWhitespaceMode
     package var contextLines: Int
     package var showsEntireFile: Bool
@@ -568,16 +570,18 @@ package struct FileDiffOptions: Hashable, Sendable {
         whitespace: DiffWhitespaceMode = .none,
         contextLines: Int = 3,
         showsEntireFile: Bool = false,
-        treatsAllFilesAsText: Bool = false
+        treatsAllFilesAsText: Bool = false,
+        usesHistogram: Bool = false
     ) {
         self.whitespace = whitespace
         self.contextLines = max(0, contextLines)
         self.showsEntireFile = showsEntireFile
         self.treatsAllFilesAsText = treatsAllFilesAsText
+        self.usesHistogram = usesHistogram
     }
 
     package var gitArguments: [String] {
-        var arguments: [String] = []
+        var arguments: [String] = usesHistogram ? ["--histogram"] : []
         switch whitespace {
         case .none: break
         case .endOfLine: arguments.append("--ignore-space-at-eol")
@@ -594,13 +598,66 @@ package struct FileDiffOptions: Hashable, Sendable {
     }
 }
 
-package enum RepositoryTextEncoding: String, CaseIterable, Hashable, Sendable, Codable {
-    case automatic
-    case utf8
-    case utf16LittleEndian
-    case utf16BigEndian
-    case westernISO88591
-    case windows1252
+package struct RepositoryTextEncoding: RawRepresentable, CaseIterable, Hashable, Sendable, Codable {
+    package let rawValue: String
+    private init(_ rawValue: String) { self.rawValue = rawValue }
+    package static let automatic = Self("automatic")
+    package static let utf8 = Self("utf8")
+    package static let utf16LittleEndian = Self("utf16LittleEndian")
+    package static let utf16BigEndian = Self("utf16BigEndian")
+    package static let westernISO88591 = Self("westernISO88591")
+    package static let windows1252 = Self("windows1252")
+
+    package init?(rawValue: String) {
+        if Self.legacy.contains(where: { $0.rawValue == rawValue }) { self.init(rawValue); return }
+        guard let encoding = Self(ianaName: rawValue) else { return nil }
+        self = encoding
+    }
+    package init?(ianaName: String) {
+        let value = ianaName.lowercased()
+        let aliases: [String: Self] = ["utf8": .utf8, "utf-8": .utf8, "utf-16": .utf16LittleEndian,
+                                     "utf-16le": .utf16LittleEndian, "utf16le": .utf16LittleEndian,
+                                     "utf-16be": .utf16BigEndian, "utf16be": .utf16BigEndian,
+                                     "iso-8859-1": .westernISO88591, "latin1": .westernISO88591,
+                                     "windows-1252": .windows1252, "cp1252": .windows1252]
+        if let known = aliases[value] { self = known; return }
+        let cf = CFStringConvertIANACharSetNameToEncoding(value as CFString)
+        guard cf != kCFStringEncodingInvalidId, cf != CFStringEncoding(CFStringEncodings.UTF7.rawValue),
+              let name = CFStringConvertEncodingToIANACharSetName(cf) else { return nil }
+        self.init((name as String).lowercased())
+    }
+    private static let legacy: [Self] = [.automatic, .utf8, .utf16LittleEndian, .utf16BigEndian, .westernISO88591, .windows1252]
+    package static var allCases: [Self] {
+        var values = legacy
+        for encoding in String.availableStringEncodings {
+            let cf = CFStringConvertNSStringEncodingToEncoding(encoding.rawValue)
+            if let name = CFStringConvertEncodingToIANACharSetName(cf), let item = Self(ianaName: name as String), !values.contains(item) { values.append(item) }
+        }
+        return values
+    }
+    package var foundationEncoding: String.Encoding {
+        switch self {
+        case .automatic, .utf8: return .utf8
+        case .utf16LittleEndian: return .utf16LittleEndian
+        case .utf16BigEndian: return .utf16BigEndian
+        case .westernISO88591: return .isoLatin1
+        case .windows1252: return .windowsCP1252
+        default: return String.Encoding(rawValue: CFStringConvertEncodingToNSStringEncoding(CFStringConvertIANACharSetNameToEncoding(rawValue as CFString)))
+        }
+    }
+    package var ianaName: String {
+        let cf = CFStringConvertNSStringEncodingToEncoding(foundationEncoding.rawValue)
+        return (CFStringConvertEncodingToIANACharSetName(cf) as String?)?.lowercased() ?? rawValue
+    }
+    package init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        let value = try container.decode(String.self)
+        guard let encoding = Self(rawValue: value) else { throw DecodingError.dataCorruptedError(in: container, debugDescription: "Unsupported text encoding") }
+        self = encoding
+    }
+    package func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer(); try container.encode(rawValue)
+    }
 
     package var title: String {
         switch self {
@@ -610,6 +667,7 @@ package enum RepositoryTextEncoding: String, CaseIterable, Hashable, Sendable, C
         case .utf16BigEndian: "Unicode (UTF-16 BE)"
         case .westernISO88591: "Western (ISO Latin 1)"
         case .windows1252: "Western (Windows Latin 1)"
+        default: String.localizedName(of: foundationEncoding)
         }
     }
 }
@@ -936,11 +994,24 @@ package struct RepositoryNavigationState: Sendable {
     }
 }
 
+package struct RevisionChangeCounts: Sendable, Equatable {
+    package var changed: [String] = []
+    package var added: [String] = []
+    package var deleted: [String] = []
+    package var submodulesChanged: [String] = []
+    package var submodulesDirty: [String] = []
+    package init() {}
+}
+
 package struct RepositoryStatusSummary: Sendable {
     package let workingDirectoryChangeCount: Int
+    package let worktree: RevisionChangeCounts?
+    package let index: RevisionChangeCounts?
 
-    package init(workingDirectoryChangeCount: Int) {
+    package init(workingDirectoryChangeCount: Int, worktree: RevisionChangeCounts? = nil, index: RevisionChangeCounts? = nil) {
         self.workingDirectoryChangeCount = workingDirectoryChangeCount
+        self.worktree = worktree
+        self.index = index
     }
 }
 

@@ -153,7 +153,7 @@ private final class ResetCurrentBranchViewController: NSViewController, NSWindow
         let root = NSView()
         let branch = branchName ?? "detached HEAD"
         let heading = NSTextField(labelWithString: "Reset branch ‘\(branch)’ to revision:")
-        heading.font = .boldSystemFont(ofSize: NSFont.systemFontSize)
+        heading.font = AppSettingsStore.shared.applicationFont(size: NSFont.systemFontSize, weight: .bold)
         summary.apply(target)
         let modes = [soft, mixed, keep, merge, hard]
         for mode in modes {

@@ -30,6 +30,29 @@ package struct GitStatusRecord: Sendable {
     package let worktreeStatus: Character
     package let isUntracked: Bool
     package let isConflict: Bool
+    package var submoduleStatus: String = "N..."
+}
+
+extension GitStatusRecord {
+    package static func revisionChangeCounts(_ records: [GitStatusRecord], staged: Bool) -> RevisionChangeCounts {
+        var result = RevisionChangeCounts()
+        for record in records {
+            let status = staged ? record.indexStatus : record.worktreeStatus
+            guard status != "." && status != " " else { continue }
+            if record.submoduleStatus.hasPrefix("S") {
+                let flags = Array(record.submoduleStatus)
+                if staged || (flags.count > 1 && flags[1] == "C") { result.submodulesChanged.append(record.path) }
+                if !staged && flags.dropFirst(2).contains(where: { $0 != "." }) { result.submodulesDirty.append(record.path) }
+            } else if status == "A" || record.isUntracked {
+                result.added.append(record.path)
+            } else if status == "D" {
+                result.deleted.append(record.path)
+            } else {
+                result.changed.append(record.path)
+            }
+        }
+        return result
+    }
 }
 
 package struct GitChangedPath: Sendable {
@@ -173,7 +196,8 @@ package enum GitOutputParser {
                 indexStatus: xy.first ?? ".",
                 worktreeStatus: xy.last ?? ".",
                 isUntracked: false,
-                isConflict: kind == "u"
+                isConflict: kind == "u",
+                submoduleStatus: String(parts[2])
             ))
         }
         return result

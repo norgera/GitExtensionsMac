@@ -134,7 +134,7 @@ private final class PatchViewController: NSViewController, NSTableViewDataSource
             viewer.view.heightAnchor.constraint(greaterThanOrEqualToConstant: 100).isActive = true
         }
         if mode == .apply {
-            transcript.isEditable = false; transcript.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+            transcript.isEditable = false; transcript.font = AppSettingsStore.shared.fontPreferences.font(.monospace, fallback: .monospacedSystemFont(ofSize: 11, weight: .regular))
             let output = NSScrollView(); output.documentView = transcript; output.hasVerticalScroller = true
             stack.addArrangedSubview(output)
             output.heightAnchor.constraint(equalToConstant: 70).isActive = true
@@ -374,7 +374,7 @@ private final class PatchViewController: NSViewController, NSTableViewDataSource
             do {
                 let result = try await action { [weak self] event in
                     Task { @MainActor in self?.transcript.textStorage?.append(NSAttributedString(string: event.text,
-                        attributes: [.foregroundColor: NSColor.textColor, .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)])) }
+                        attributes: [.foregroundColor: NSColor.textColor, .font: AppSettingsStore.shared.fontPreferences.font(.monospace, fallback: .monospacedSystemFont(ofSize: 11, weight: .regular))])) }
                 }
                 patchState = result.state
                 refreshSeries()

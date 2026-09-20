@@ -118,8 +118,10 @@ final class ApplicationHostViewController: NSViewController {
 
     private func showDashboard(error: Error? = nil) {
         openTask?.cancel()
-        BrowserCommandAvailability.shared.canPatch = false
-        BrowserCommandAvailability.shared.canArchive = false
+        DispatchQueue.main.async {
+            BrowserCommandAvailability.shared.canPatch = false
+            BrowserCommandAvailability.shared.canArchive = false
+        }
         let controller = RepositoryStartupViewController(store: store)
         controller.onOpenRepository = { [weak self] in self?.presentOpenRepositoryPanel() }
         controller.onOpenRecentRepository = { [weak self] url in self?.openRepository(url) }
@@ -140,7 +142,7 @@ final class ApplicationHostViewController: NSViewController {
             case .closeToDashboard: self.showDashboard()
             case .cloneRepository: self.presentCloneShell()
             case .initializeRepository: self.presentInitializeRepository()
-            case .settings: self.presentSettings()
+            case .settings: return false // Browser supplies its existing module's Settings capability.
             case .clearRecentRepositories:
                 self.store.clearRecentRepositories()
             case .openRecentRepository(let url):

@@ -72,7 +72,7 @@ private final class SubmoduleProcessViewController: NSViewController, NSWindowDe
     required init?(coder: NSCoder) { nil }
     override func loadView() {
         let root = NSView()
-        output.isEditable = false; output.isSelectable = true; output.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        output.isEditable = false; output.isSelectable = true; output.font = AppSettingsStore.shared.fontPreferences.font(.monospace, fallback: .monospacedSystemFont(ofSize: 11, weight: .regular))
         output.isHorizontallyResizable = true; output.isVerticallyResizable = true
         output.textContainer?.widthTracksTextView = false
         output.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
@@ -100,7 +100,7 @@ private final class SubmoduleProcessViewController: NSViewController, NSWindowDe
                 result = try await operation { [weak self] event in
                     Task { @MainActor in
                         guard let self, !self.finished else { return }
-                        self.output.textStorage?.append(NSAttributedString(string: event.text, attributes: [.foregroundColor: event.stream == .standardError ? NSColor.systemRed : NSColor.textColor, .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)]))
+                        self.output.textStorage?.append(NSAttributedString(string: event.text, attributes: [.foregroundColor: event.stream == .standardError ? NSColor.systemRed : NSColor.textColor, .font: AppSettingsStore.shared.fontPreferences.font(.monospace, fallback: .monospacedSystemFont(ofSize: 11, weight: .regular))]))
                         self.output.scrollToEndOfDocument(nil)
                     }
                 }
@@ -149,7 +149,7 @@ private final class SubmoduleConflictViewController: NSViewController, NSWindowD
     required init?(coder: NSCoder) { nil }
     override func loadView() {
         let root = NSView()
-        details.isSelectable = true; details.maximumNumberOfLines = 0; details.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        details.isSelectable = true; details.maximumNumberOfLines = 0; details.font = AppSettingsStore.shared.fontPreferences.font(.monospace, fallback: .monospacedSystemFont(ofSize: 12, weight: .regular))
         let open = NSButton(title: "Open submodule", target: self, action: #selector(openRepository))
         let refresh = NSButton(title: "Refresh", target: self, action: #selector(reload))
         let close = NSButton(title: "Close", target: self, action: #selector(closeForm)); close.keyEquivalent = "\u{1b}"

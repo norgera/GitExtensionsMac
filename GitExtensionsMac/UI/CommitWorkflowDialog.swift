@@ -2,7 +2,7 @@ import GitExtensionsCore
 import GitCommands
 import AppKit
 
-private enum CommitKeyboardShortcut {
+private enum CommitKeyboardShortcut: String {
     case unstaged
     case diff
     case staged
@@ -44,41 +44,10 @@ private final class CommitRootView: NSView {
     var onShortcut: ((CommitKeyboardShortcut) -> Bool)?
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        let key = event.charactersIgnoringModifiers?.lowercased() ?? ""
-        let shortcut: CommitKeyboardShortcut?
-        if modifiers.contains(.command) {
-            switch (key, modifiers.contains(.shift)) {
-            case ("1", _): shortcut = .unstaged
-            case ("2", _): shortcut = .diff
-            case ("3", _): shortcut = .staged
-            case ("4", _): shortcut = .message
-            case ("s", _): shortcut = .stageAll
-            case ("f", false): shortcut = .filter
-            case ("r", false): shortcut = .refresh
-            case ("b", false): shortcut = .createBranch
-            case ("n", false): shortcut = .nextFile
-            case ("p", false): shortcut = .previousFile
-            case ("t", true): shortcut = .conventionalScope
-            case ("t", false): shortcut = .conventionalType
-            default: shortcut = nil
-            }
-        } else if modifiers.contains(.option) {
-            switch event.keyCode {
-            case 124, 125: shortcut = .nextFile
-            case 123, 126: shortcut = .previousFile
-            default: shortcut = nil
-            }
-        } else if modifiers.isEmpty {
-            if event.keyCode == 96 {
-                shortcut = .refresh
-            } else {
-                shortcut = key == "c" ? .addSelectionToMessage : nil
-            }
-        } else {
-            shortcut = nil
-        }
-        if let shortcut, onShortcut?(shortcut) == true { return true }
+        if let viewer = window?.firstResponder as? FileViewerTableView, viewer.performConfiguredShortcut(event) { return true }
+        let configured = ApplicationHotkeys.shared.matching(event, category: "Commit")
+            .flatMap { CommitKeyboardShortcut(rawValue: String($0.dropFirst("commit.".count).split(separator: ".")[0])) }
+        if let action = configured, onShortcut?(action) == true { return true }
         return super.performKeyEquivalent(with: event)
     }
 }
@@ -94,6 +63,7 @@ enum CommitWorkflowDialog {
         draft: CommitDialogDraft?,
         owner: NSWindow,
         onManageRemotes: ((String?, String?) -> Void)? = nil,
+        onDifftool: ((Commit, ChangedFile) -> Void)? = nil,
         onRepositoryChanged: @escaping (RevisionID?) -> Void,
         onClose: @escaping () -> Void
     ) -> NSWindowController {
@@ -105,6 +75,7 @@ enum CommitWorkflowDialog {
             head: head,
             draft: draft,
             onManageRemotes: onManageRemotes,
+            onDifftool: onDifftool,
             onRepositoryChanged: onRepositoryChanged
         )
         let commitWindow = NSWindow(contentViewController: controller)
@@ -152,6 +123,7 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
     private let head: Commit?
     private let draft: CommitDialogDraft?
     private let onManageRemotes: ((String?, String?) -> Void)?
+    private let onDifftool: ((Commit, ChangedFile) -> Void)?
     private let onRepositoryChanged: (RevisionID?) -> Void
     private let settings = AppSettingsStore.shared
     private let unstagedTable = NSOutlineView()
@@ -237,6 +209,7 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
         head: Commit?,
         draft: CommitDialogDraft?,
         onManageRemotes: ((String?, String?) -> Void)?,
+        onDifftool: ((Commit, ChangedFile) -> Void)?,
         onRepositoryChanged: @escaping (RevisionID?) -> Void
     ) {
         self.source = source
@@ -246,6 +219,7 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
         self.head = head
         self.draft = draft
         self.onManageRemotes = onManageRemotes
+        self.onDifftool = onDifftool
         self.onRepositoryChanged = onRepositoryChanged
         self.showOnlyMyMessages = AppSettingsStore.shared.commitPreferences.showOnlyMyMessages
         let filePreferences = AppSettingsStore.shared.fileStatusListPreferences
@@ -277,6 +251,14 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
             let table = !unstagedTable.selectedRowIndexes.isEmpty ? unstagedTable : stagedTable
             loadSelectedDiff(from: table)
         }
+        if onDifftool != nil {
+            commitDiffView.onDifftool = { [weak self] file, direction in
+                guard let self, let context = repositoryContext,
+                      let commit = RevisionCommitBuilder.artificialRevisions(headID: context.headID)
+                        .first(where: { $0.kind == (direction == .stage ? .workingDirectory : .index) }) else { return }
+                onDifftool?(commit, file)
+            }
+        }
         let left = makeFilePane()
         let right = makeMessagePane()
         mainSplit.isVertical = true
@@ -286,7 +268,7 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
         mainSplit.translatesAutoresizingMaskIntoConstraints = false
         left.widthAnchor.constraint(greaterThanOrEqualToConstant: 80).isActive = true
 
-        status.font = .systemFont(ofSize: 11)
+        status.font = AppSettingsStore.shared.applicationFont(size: 11)
         status.textColor = .secondaryLabelColor
         status.lineBreakMode = .byTruncatingTail
         status.translatesAutoresizingMaskIntoConstraints = false
@@ -358,7 +340,7 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
 
     private func makeMessagePane() -> NSView {
         messageView.isRichText = false
-        messageView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        messageView.font = AppSettingsStore.shared.commitFont
         messageView.delegate = self
         messageView.isAutomaticTextCompletionEnabled = true
         let messageScroll = NSScrollView()
@@ -813,7 +795,7 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
 
     private func toolbar(title: String, buttons: [NSButton]) -> NSView {
         let label = NSTextField(labelWithString: title)
-        label.font = .boldSystemFont(ofSize: 12)
+        label.font = AppSettingsStore.shared.applicationFont(size: 12, weight: .bold)
         let spacer = NSView()
         spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
         let stack = NSStackView(views: [label, spacer] + buttons)
@@ -1009,7 +991,7 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
                 button.title = isStage ? "Stage" : "Unstage"
                 button.imagePosition = .imageLeading
                 button.imageHugsTitle = true
-                button.font = .systemFont(ofSize: 12)
+                button.font = AppSettingsStore.shared.applicationFont(size: 12)
                 button.widthAnchor.constraint(greaterThanOrEqualToConstant: isStage ? 70 : 82).isActive = true
             }
         }
@@ -2346,13 +2328,14 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
 
 @MainActor
 private final class CommitDiffView: NSView, NSTableViewDataSource, NSTableViewDelegate {
-    private let tableView = NSTableView()
+    private let tableView = FileViewerTableView()
     private let trackingView = DiffTrackingView()
-    private let hoverToolbar = DiffViewerToolbar(preferences: AppSettingsStore.shared.fileViewerPreferences)
+    private let hoverToolbar = DiffViewerToolbar(preferences: AppSettingsStore.shared.preferencesForNewFileViewer())
     private var presentations: [DiffLinePresentation] = []
     private var gutterMetrics = DiffGutterMetrics.empty
     private var caretRow = -1
-    private var preferences = AppSettingsStore.shared.fileViewerPreferences
+    private var searchQuery = ""
+    private var preferences = AppSettingsStore.shared.preferencesForNewFileViewer()
     private var file: ChangedFile?
     private var diff: FileDiff?
     private var direction: RepositoryHunkDirection = .stage
@@ -2361,6 +2344,7 @@ private final class CommitDiffView: NSView, NSTableViewDataSource, NSTableViewDe
     var onApplyLines: ((Set<String>, RepositoryHunkDirection) -> Void)?
     var onAddSelectedText: ((String) -> Void)?
     var onOptionsChanged: (() -> Void)?
+    var onDifftool: ((ChangedFile, RepositoryHunkDirection) -> Void)?
     var focusView: NSView { tableView }
     var diffOptions: FileDiffOptions { preferences.diffOptions }
 
@@ -2373,13 +2357,44 @@ private final class CommitDiffView: NSView, NSTableViewDataSource, NSTableViewDe
             self?.performToolbarAction(action, state: state)
         }
 
+        NotificationCenter.default.addObserver(self, selector: #selector(viewerPreferencesChanged), name: .fileViewerSettingsApplied, object: AppSettingsStore.shared)
+        tableView.onShortcut = { [weak self] shortcut in
+            guard let self, !presentations.isEmpty else { return false }
+            switch shortcut {
+            case .stageLines:
+                guard patchingAllowed, direction == .stage else { return false }
+                applyLines()
+            case .unstageLines:
+                guard patchingAllowed, direction == .unstage else { return false }
+                applyLines()
+            case .find, .findNext, .findPrevious, .goToLine:
+                if shortcut == .findNext, searchQuery.isEmpty, let file, let onDifftool {
+                    onDifftool(file, direction)
+                    return true
+                }
+                let lines = presentations.map(\.line)
+                let destination: Int?
+                switch shortcut {
+                case .find: destination = FileViewerNavigationDialogs.find(lines: lines, after: caretRow, query: &searchQuery)
+                case .goToLine: destination = FileViewerNavigationDialogs.goToLine(lines: lines)
+                default: destination = FileViewerNavigationDialogs.matchingRow(lines: lines, query: searchQuery, after: caretRow, forward: shortcut == .findNext)
+                }
+                if let destination {
+                    caretRow = destination
+                    tableView.selectRowIndexes(IndexSet(integer: destination), byExtendingSelection: false)
+                    tableView.scrollRowToVisible(destination)
+                }
+            default: performToolbarAction(shortcut.title, state: preferences.showsSyntaxHighlighting ? .off : .on)
+            }
+            return true
+        }
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("CommitDiff"))
         column.resizingMask = .autoresizingMask
         tableView.addTableColumn(column)
         tableView.headerView = nil
-        tableView.rowHeight = BrowserMetrics.diffRowHeight
+        tableView.rowHeight = AppSettingsStore.shared.diffLineHeight
         tableView.intercellSpacing = .zero
-        tableView.backgroundColor = .textBackgroundColor
+        tableView.backgroundColor = ApplicationColors.color("EditorBackground", fallback: .textBackgroundColor)
         tableView.selectionHighlightStyle = .regular
         tableView.allowsMultipleSelection = true
         tableView.usesAlternatingRowBackgroundColors = false
@@ -2431,7 +2446,7 @@ private final class CommitDiffView: NSView, NSTableViewDataSource, NSTableViewDe
         self.direction = direction
         patchingAllowed = true
         presentations = DiffLinePresentation.build(from: diff?.lines ?? [])
-        gutterMetrics = DiffGutterMetrics(lines: diff?.lines ?? [])
+        gutterMetrics = DiffGutterMetrics(lines: diff?.lines ?? [], font: AppSettingsStore.shared.diffGutterFont)
         caretRow = -1
         hoverToolbar.toolTip = "\(file.path) — \(file.changeType.description), +\(file.additions) −\(file.deletions)"
         tableView.reloadData()
@@ -2555,9 +2570,18 @@ private final class CommitDiffView: NSView, NSTableViewDataSource, NSTableViewDe
     }
 
     private func persistPreferences(reloadDiff: Bool) {
-        AppSettingsStore.shared.saveFileViewerPreferences(preferences)
+        AppSettingsStore.shared.updateFileViewerPreferences(preferences)
         hoverToolbar.apply(preferences: preferences)
         if reloadDiff { onOptionsChanged?() }
+    }
+
+    @objc private func viewerPreferencesChanged() {
+        let updated = AppSettingsStore.shared.fileViewerPreferences
+        let reload = updated.diffOptions != preferences.diffOptions
+        preferences = updated
+        hoverToolbar.apply(preferences: preferences)
+        reloadRenderedLines()
+        if reload { onOptionsChanged?() }
     }
 
     private func navigateToChange(forward: Bool) {
@@ -2578,6 +2602,8 @@ private final class CommitDiffView: NSView, NSTableViewDataSource, NSTableViewDe
     }
 
     private func reloadRenderedLines() {
+        tableView.backgroundColor = ApplicationColors.color("EditorBackground", fallback: .textBackgroundColor)
+        gutterMetrics = DiffGutterMetrics(lines: diff?.lines ?? [], font: AppSettingsStore.shared.diffGutterFont)
         let selection = tableView.selectedRowIndexes
         tableView.reloadData()
         tableView.selectRowIndexes(selection, byExtendingSelection: false)
@@ -2635,7 +2661,7 @@ private final class CommitTemplateSettingsViewController: NSViewController, NSWi
         let selector = row(label: "Template:", controls: [slots, nameField])
 
         textView.isRichText = false
-        textView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        textView.font = AppSettingsStore.shared.fontPreferences.font(.monospace, fallback: .monospacedSystemFont(ofSize: 12, weight: .regular))
         textView.isVerticallyResizable = true
         textView.isHorizontallyResizable = true
         textView.autoresizingMask = [.width, .height]

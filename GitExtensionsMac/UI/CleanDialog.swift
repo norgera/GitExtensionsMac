@@ -122,7 +122,7 @@ private final class CleanViewController: NSViewController, NSWindowDelegate {
         buttons.spacing = 8
 
         configureEditor(output, editable: false)
-        output.font = .monospacedSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
+        output.font = AppSettingsStore.shared.fontPreferences.font(.monospace, fallback: .monospacedSystemFont(ofSize: NSFont.systemFontSize, weight: .regular))
         output.isHorizontallyResizable = true
         output.textContainer?.widthTracksTextView = false
         output.textContainer?.containerSize.width = .greatestFiniteMagnitude
@@ -328,7 +328,7 @@ private final class CleanViewController: NSViewController, NSWindowDelegate {
         editor.isRichText = false
         editor.isAutomaticQuoteSubstitutionEnabled = false
         editor.isAutomaticDashSubstitutionEnabled = false
-        editor.font = .systemFont(ofSize: NSFont.systemFontSize)
+        editor.font = AppSettingsStore.shared.applicationFont(size: NSFont.systemFontSize)
     }
 }
 

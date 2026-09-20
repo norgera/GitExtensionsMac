@@ -236,7 +236,7 @@ private final class ManageWorktreesViewController: NSViewController, NSTableView
         default: item.headID?.string ?? ""
         }
         let cell = NSTextField(labelWithString: value); cell.toolTip = value; cell.lineBreakMode = .byTruncatingMiddle
-        if tableColumn?.identifier.rawValue == "sha" { cell.font = .monospacedSystemFont(ofSize: NSFont.systemFontSize, weight: .regular) }
+        if tableColumn?.identifier.rawValue == "sha" { cell.font = AppSettingsStore.shared.fontPreferences.font(.monospace, fallback: .monospacedSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)) }
         if item.isDeleted { cell.attributedStringValue = NSAttributedString(string: value, attributes: [.strikethroughStyle: NSUnderlineStyle.single.rawValue, .foregroundColor: NSColor.secondaryLabelColor]) }
         return cell
     }

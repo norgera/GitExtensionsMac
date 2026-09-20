@@ -15,6 +15,7 @@ enum FileViewerTests {
 
     private static func testDiffArguments() {
         expect(FileDiffOptions().gitArguments.isEmpty, "default diff options preserve the normal Git arguments")
+        expect(FileDiffOptions(whitespace: .changes, usesHistogram: true).gitArguments == ["--histogram", "--ignore-space-change"], "histogram precedes additional diff options")
         expect(
             FileDiffOptions(whitespace: .endOfLine, contextLines: 5, treatsAllFilesAsText: true).gitArguments
                 == ["--ignore-space-at-eol", "--unified=5", "--text"],

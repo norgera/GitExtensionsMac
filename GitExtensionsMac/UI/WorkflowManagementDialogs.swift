@@ -235,7 +235,7 @@ private final class RebaseManagerViewController: NSViewController, NSTableViewDa
     override func loadView() {
         let root = NSView()
         configureIdleOptions()
-        heading.font = .boldSystemFont(ofSize: 13)
+        heading.font = AppSettingsStore.shared.applicationFont(size: 13, weight: .bold)
         for (id, title, width) in [
             ("Status", "Status", 82.0), ("Action", "Action", 72.0), ("Subject", "Subject", 330.0),
             ("Author", "Author", 130.0), ("Date", "Date", 150.0), ("Hash", "Commit hash", 92.0)
@@ -360,7 +360,7 @@ private final class RebaseManagerViewController: NSViewController, NSTableViewDa
         helpImage.isHidden = !helpExpanded
         helpToggle.attributedTitle = NSAttributedString(
             string: helpExpanded ? "Hide help" : "Show help",
-            attributes: [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor.linkColor, .underlineStyle: NSUnderlineStyle.single.rawValue]
+            attributes: [.font: AppSettingsStore.shared.applicationFont(size: 12), .foregroundColor: NSColor.linkColor, .underlineStyle: NSUnderlineStyle.single.rawValue]
         )
         helpToggle.toolTip = helpExpanded ? "Hide help" : "Show help"
         helpToggle.setAccessibilityLabel(helpExpanded ? "Hide help" : "Show help")
@@ -392,7 +392,7 @@ private final class RebaseManagerViewController: NSViewController, NSTableViewDa
         default: patch.subject
         }
         let cell = NSTableCellView(); let label = NSTextField(labelWithString: value)
-        label.font = .systemFont(ofSize: 12); label.lineBreakMode = .byTruncatingTail; label.translatesAutoresizingMaskIntoConstraints = false
+        label.font = AppSettingsStore.shared.applicationFont(size: 12); label.lineBreakMode = .byTruncatingTail; label.translatesAutoresizingMaskIntoConstraints = false
         if patch.status == .applying { label.textColor = .systemOrange }
         cell.addSubview(label)
         NSLayoutConstraint.activate([label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 5), label.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -5), label.centerYAnchor.constraint(equalTo: cell.centerYAnchor)])
@@ -653,8 +653,18 @@ private final class RebaseManagerViewController: NSViewController, NSTableViewDa
 
 private final class ConflictTableView: NSTableView {
     var onReturn: (() -> Void)?
+    var onShortcut: ((String) -> Bool)?
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if window?.firstResponder === self,
+           let command = ApplicationHotkeys.shared.matching(event, category: "Conflict resolver"),
+           onShortcut?(command) == true { return true }
+        return super.performKeyEquivalent(with: event)
+    }
 
     override func keyDown(with event: NSEvent) {
+        if let command = ApplicationHotkeys.shared.matching(event, category: "Conflict resolver"),
+           onShortcut?(command) == true { return }
         if event.keyCode == 36 || event.keyCode == 76 {
             onReturn?()
         } else {
@@ -751,7 +761,7 @@ private final class ConflictResolverViewController: NSViewController, NSTableVie
     override func loadView() {
         let root = NSView()
         let title = NSTextField(labelWithString: "Unresolved merge conflicts")
-        title.font = .boldSystemFont(ofSize: 15)
+        title.font = AppSettingsStore.shared.applicationFont(size: 15, weight: .bold)
         let fileColumn = NSTableColumn(identifier: .init("File")); fileColumn.title = "Filename"; fileColumn.width = 390
         let statusColumn = NSTableColumn(identifier: .init("Status")); statusColumn.title = "Conflict"; statusColumn.width = 150
         table.addTableColumn(fileColumn)
@@ -764,6 +774,18 @@ private final class ConflictResolverViewController: NSViewController, NSTableVie
         table.doubleAction = #selector(openMergeTool)
         table.target = self
         table.onReturn = { [weak self] in self?.openMergeTool() }
+        table.onShortcut = { [weak self] command in
+            guard let self else { return false }
+            switch command {
+            case "conflict.base": chooseBaseButton.performClick(nil)
+            case "conflict.local": chooseLocalButton.performClick(nil)
+            case "conflict.remote": chooseRemoteButton.performClick(nil)
+            case "conflict.merge": mergeToolButton.performClick(nil)
+            case "conflict.rescan": self.rescan()
+            default: return false
+            }
+            return true
+        }
         let contextMenu = NSMenu()
         contextMenu.delegate = self
         table.menu = contextMenu
@@ -802,7 +824,7 @@ private final class ConflictResolverViewController: NSViewController, NSTableVie
             $0.lineBreakMode = .byTruncatingMiddle
             $0.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         }
-        descriptionLabel.font = .systemFont(ofSize: 12, weight: .semibold)
+        descriptionLabel.font = AppSettingsStore.shared.applicationFont(size: 12, weight: .semibold)
         sideSelector.selectedSegment = 0
         sideSelector.target = self
         sideSelector.action = #selector(changeSide)

@@ -54,6 +54,13 @@ enum GitRepositoryModuleTests {
         require(restarted.map(\.id) == revisions.map(\.id), "revision reader: restart preserves revision ordering")
         let finalHistoryQueryCount = await runner.historyQueryCount
         require(finalHistoryQueryCount == 2, "revision reader: restarted reads execute independently without duplicate snapshot history")
+        let limited = await state.revisionReadRequest.reader.read(state.revisionReadRequest.context, batchSize: 2, maximumCount: 1)
+        var limitedRevisions: [Commit] = []
+        for try await batch in limited { limitedRevisions.append(contentsOf: batch) }
+        require(limitedRevisions.filter { !$0.isArtificial }.count < revisions.filter { !$0.isArtificial }.count,
+                "revision reader: configured limit reduces Git history, not merely grid display")
+        require(limitedRevisions.contains { $0.kind == .workingDirectory } && limitedRevisions.contains { $0.kind == .index },
+                "revision reader: limiting real history preserves artificial rows")
     }
 
     static func runFileViewer() async throws {
@@ -67,13 +74,14 @@ enum GitRepositoryModuleTests {
         let working = try required(revisions.first(where: { $0.kind == .workingDirectory }), "file viewer: working row exists")
         let details = try await source.loadRevisionDetails(for: working)
         let file = try required(details.files.first(where: { $0.path == "working.txt" }), "file viewer: changed file exists")
-        let options = FileDiffOptions(whitespace: .changes, contextLines: 7, treatsAllFilesAsText: true)
+        let options = FileDiffOptions(whitespace: .changes, contextLines: 7, treatsAllFilesAsText: true, usesHistogram: true)
         let diff = try await source.loadDiff(for: working, file: file, options: options)
         require(diff?.lines.isEmpty == false, "file viewer: option-bearing diff still parses")
         let commands = await runner.commands
         require(
             commands.contains(where: {
                 $0.first == "diff"
+                    && $0.contains("--histogram")
                     && $0.contains("--ignore-space-change")
                     && $0.contains("--unified=7")
                     && $0.contains("--text")

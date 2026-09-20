@@ -6,8 +6,8 @@ enum BrowserMetrics {
     static let primaryToolbarHeight: CGFloat = 25
     static let filterToolbarHeight: CGFloat = 25
     static let statusHeight: CGFloat = 22
-    static let revisionRowHeight: CGFloat = 22
-    static let fileRowHeight: CGFloat = 18
+    @MainActor static var revisionRowHeight: CGFloat { AppSettingsStore.shared.applicationRowHeight(minimum: 22) }
+    @MainActor static var fileRowHeight: CGFloat { AppSettingsStore.shared.applicationRowHeight(minimum: 18) }
     static let diffRowHeight: CGFloat = 18
 }
 
@@ -86,7 +86,7 @@ enum AppKitFactory {
         return button
     }
 
-    static func textButton(
+    @MainActor static func textButton(
         _ title: String,
         symbol: String? = nil,
         tooltip: String? = nil,
@@ -96,7 +96,7 @@ enum AppKitFactory {
         let button = NSButton(title: title, target: target, action: action)
         button.bezelStyle = .texturedRounded
         button.controlSize = .small
-        button.font = .systemFont(ofSize: 11)
+        button.font = AppSettingsStore.shared.applicationFont(size: 11)
         if let symbol {
             button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: tooltip ?? title)
             button.imagePosition = .imageLeading
@@ -107,10 +107,10 @@ enum AppKitFactory {
         return button
     }
 
-    static func popUp(_ title: String, width: CGFloat) -> NSPopUpButton {
+    @MainActor static func popUp(_ title: String, width: CGFloat) -> NSPopUpButton {
         let button = NSPopUpButton(frame: .zero, pullsDown: false)
         button.controlSize = .small
-        button.font = .systemFont(ofSize: 11)
+        button.font = AppSettingsStore.shared.applicationFont(size: 11)
         button.addItem(withTitle: title)
         button.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
@@ -137,9 +137,9 @@ enum AppKitFactory {
         return view
     }
 
-    static func label(_ text: String, size: CGFloat = 11, color: NSColor = .labelColor) -> NSTextField {
+    @MainActor static func label(_ text: String, size: CGFloat = 11, color: NSColor = .labelColor) -> NSTextField {
         let label = NSTextField(labelWithString: text)
-        label.font = .systemFont(ofSize: size)
+        label.font = AppSettingsStore.shared.applicationFont(size: size)
         label.textColor = color
         label.lineBreakMode = .byTruncatingTail
         return label
@@ -270,10 +270,16 @@ private extension CGFloat {
 }
 
 final class GitExtensionsSelectionRowView: NSTableRowView {
+    var repositoryBackgroundColor: NSColor?
+    override func drawBackground(in dirtyRect: NSRect) {
+        guard let repositoryBackgroundColor else { super.drawBackground(in: dirtyRect); return }
+        repositoryBackgroundColor.setFill()
+        dirtyRect.fill()
+    }
     override func drawSelection(in dirtyRect: NSRect) {
         let color = isEmphasized
-            ? NSColor.systemBlue.withAlphaComponent(0.62)
-            : NSColor.unemphasizedSelectedContentBackgroundColor
+            ? ApplicationColors.color("Selection", fallback: NSColor.systemBlue.withAlphaComponent(0.62))
+            : ApplicationColors.color("InactiveSelectionHighlight", fallback: NSColor.unemphasizedSelectedContentBackgroundColor)
         color.setFill()
         dirtyRect.fill()
     }

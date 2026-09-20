@@ -16,8 +16,8 @@ final class CommitSummaryView: NSBox {
         titlePosition = .atTop
         contentViewMargins = NSSize(width: 14, height: 9)
 
-        subject.font = .boldSystemFont(ofSize: NSFont.systemFontSize)
-        author.font = .boldSystemFont(ofSize: NSFont.systemFontSize)
+        subject.font = AppSettingsStore.shared.applicationFont(size: NSFont.systemFontSize, weight: .bold)
+        author.font = AppSettingsStore.shared.applicationFont(size: NSFont.systemFontSize, weight: .bold)
         [subject, author, date, branches, tags].forEach {
             $0.lineBreakMode = .byTruncatingTail
             $0.maximumNumberOfLines = 1
@@ -86,9 +86,8 @@ final class CommitSummaryView: NSBox {
     }
 
     private func styleReferenceLabel(_ label: NSTextField, hasValues: Bool, color: NSColor) {
-        label.font = hasValues
-            ? .boldSystemFont(ofSize: NSFont.systemFontSize)
-            : .systemFont(ofSize: NSFont.systemFontSize)
+        label.font = AppSettingsStore.shared.applicationFont(
+            size: NSFont.systemFontSize, weight: hasValues ? .bold : .regular)
         label.drawsBackground = hasValues
         label.backgroundColor = hasValues ? color.withAlphaComponent(0.23) : .clear
     }

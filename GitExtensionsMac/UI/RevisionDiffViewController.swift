@@ -139,12 +139,28 @@ struct ChangedFileSection: Sendable {
     let files: [ChangedFile]
 }
 
+private final class FileStatusOutlineView: NSOutlineView {
+    var onShortcut: ((String) -> Void)?
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if window?.firstResponder === self,
+           let command = ApplicationHotkeys.shared.matching(event, category: "File status list") {
+            onShortcut?(command)
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+    override func keyDown(with event: NSEvent) {
+        if let command = ApplicationHotkeys.shared.matching(event, category: "File status list") { onShortcut?(command) }
+        else { super.keyDown(with: event) }
+    }
+}
+
 final class ChangedFilesViewController: NSViewController, NSOutlineViewDelegate, NSOutlineViewDataSource, NSMenuDelegate, NSTextFieldDelegate {
     var onSelection: ((ChangedFile) -> Void)?
     var onMutation: ((String, [ChangedFile], ChangedFileSelectionScope) -> Void)?
     var onFileCommand: ((String, ChangedFile) -> Void)?
 
-    private let outlineView = NSOutlineView()
+    private let outlineView = FileStatusOutlineView()
     private let filterField = NSTextField()
     private let treeModeButton = NSButton()
     private weak var showUntrackedMenuItem: NSMenuItem?
@@ -226,6 +242,14 @@ final class ChangedFilesViewController: NSViewController, NSOutlineViewDelegate,
         outlineView.backgroundColor = .controlBackgroundColor
         outlineView.doubleAction = #selector(openFile)
         outlineView.target = self
+        outlineView.onShortcut = { [weak self] command in
+            guard let self else { return }
+            let menu = NSMenu()
+            populateFileMenu(menu)
+            guard let item = menuItem(withIdentifier: command, in: menu), item.isEnabled,
+                  let action = item.action else { return }
+            NSApp.sendAction(action, to: item.target, from: item)
+        }
 
         let menu = NSMenu()
         menu.delegate = self
@@ -240,7 +264,7 @@ final class ChangedFilesViewController: NSViewController, NSOutlineViewDelegate,
         scroll.translatesAutoresizingMaskIntoConstraints = false
 
         filterField.placeholderString = "Filter files using a regular expression..."
-        filterField.font = .systemFont(ofSize: 11)
+        filterField.font = AppSettingsStore.shared.applicationFont(size: 11)
         filterField.controlSize = .small
         filterField.isBezeled = true
         filterField.isBordered = true
@@ -478,6 +502,10 @@ final class ChangedFilesViewController: NSViewController, NSOutlineViewDelegate,
         if row >= 0, !outlineView.selectedRowIndexes.contains(row) {
             outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
         }
+        populateFileMenu(menu)
+    }
+
+    private func populateFileMenu(_ menu: NSMenu) {
         let selectedNodes = outlineView.selectedRowIndexes.compactMap { outlineView.item(atRow: $0) as? ChangedFileNode }
         let selectedFiles = Array(Set(selectedNodes.flatMap(\.descendantFiles)))
         let context = ChangedFileContextMenuContext(
@@ -696,7 +724,7 @@ final class ChangedFileCellView: NSTableCellView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         let text = NSTextField(labelWithString: "")
-        text.font = .systemFont(ofSize: 11)
+        text.font = AppSettingsStore.shared.applicationFont(size: 11)
         text.lineBreakMode = .byTruncatingMiddle
         text.translatesAutoresizingMaskIntoConstraints = false
         statusImage.translatesAutoresizingMaskIntoConstraints = false
@@ -719,7 +747,7 @@ final class ChangedFileCellView: NSTableCellView {
 
     func apply(node: ChangedFileNode) {
         textField?.stringValue = node.title
-        textField?.font = .systemFont(ofSize: 11)
+        textField?.font = AppSettingsStore.shared.applicationFont(size: 11)
         if let file = node.file {
             statusImage.image = AppKitFactory.resourceImage(node.imageName, accessibilityDescription: file.changeType.description)
         } else {
@@ -729,7 +757,7 @@ final class ChangedFileCellView: NSTableCellView {
 
     func apply(file: ChangedFile, title: String? = nil) {
         textField?.stringValue = title ?? file.path
-        textField?.font = .systemFont(ofSize: 11)
+        textField?.font = AppSettingsStore.shared.applicationFont(size: 11)
         let imageName = ChangedFileStatusPresentation.imageName(for: file.changeType)
         statusImage.image = AppKitFactory.resourceImage(imageName, accessibilityDescription: file.changeType.description)
     }
@@ -890,13 +918,14 @@ final class DiffContentViewController: NSViewController, NSTableViewDataSource, 
     var onFileCommand: ((String, ChangedFile) -> Void)?
     var supportedFileCommands: Set<String> = ["file.open.local", "file.showFinder", "file.difftool"]
     var selectionScope: ChangedFileSelectionScope = .revision
-    private let tableView = NSTableView()
+    private let tableView = FileViewerTableView()
     private let emptyStateLabel = NSTextField(labelWithString: "")
-    private let hoverToolbar = DiffViewerToolbar(preferences: AppSettingsStore.shared.fileViewerPreferences)
+    private let hoverToolbar = DiffViewerToolbar(preferences: AppSettingsStore.shared.preferencesForNewFileViewer())
     private var presentations: [DiffLinePresentation] = []
     private var gutterMetrics = DiffGutterMetrics.empty
     private var caretRow = -1
-    private var preferences = AppSettingsStore.shared.fileViewerPreferences
+    private var searchQuery = ""
+    private var preferences = AppSettingsStore.shared.preferencesForNewFileViewer()
     private var currentFile: ChangedFile?
     private var currentDiff: FileDiff?
     var diffOptions: FileDiffOptions { preferences.diffOptions }
@@ -910,14 +939,33 @@ final class DiffContentViewController: NSViewController, NSTableViewDataSource, 
             self?.performToolbarAction(action, state: state)
         }
 
+        NotificationCenter.default.addObserver(self, selector: #selector(viewerPreferencesChanged), name: .fileViewerSettingsApplied, object: AppSettingsStore.shared)
+        tableView.onShortcut = { [weak self] shortcut in
+            guard let self, !presentations.isEmpty else { return false }
+            switch shortcut {
+            case .find: findText()
+            case .findNext, .findPrevious:
+                if shortcut == .findNext, searchQuery.isEmpty, supportedFileCommands.contains("file.difftool") {
+                    openWithDifftool()
+                } else if let row = FileViewerNavigationDialogs.matchingRow(lines: presentations.map(\.line), query: searchQuery, after: caretRow, forward: shortcut == .findNext) {
+                    caretRow = row
+                    tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+                    tableView.scrollRowToVisible(row)
+                } else { NSSound.beep() }
+            case .goToLine: goToLine()
+            case .stageLines, .unstageLines: return false
+            default: performToolbarAction(shortcut.title, state: preferences.showsSyntaxHighlighting ? .off : .on)
+            }
+            return true
+        }
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("DiffLine"))
         column.width = 900
         column.minWidth = 500
         tableView.addTableColumn(column)
         tableView.headerView = nil
-        tableView.rowHeight = BrowserMetrics.diffRowHeight
+        tableView.rowHeight = AppSettingsStore.shared.diffLineHeight
         tableView.intercellSpacing = .zero
-        tableView.backgroundColor = .textBackgroundColor
+        tableView.backgroundColor = ApplicationColors.color("EditorBackground", fallback: .textBackgroundColor)
         tableView.delegate = self
         tableView.dataSource = self
         tableView.allowsMultipleSelection = true
@@ -960,7 +1008,7 @@ final class DiffContentViewController: NSViewController, NSTableViewDataSource, 
         presentations = DiffLinePresentation.build(from: lines)
         emptyStateLabel.stringValue = diff == nil ? "Loading diff…" : (lines.isEmpty ? "No differences to display." : "")
         emptyStateLabel.isHidden = !presentations.isEmpty
-        gutterMetrics = DiffGutterMetrics(lines: lines)
+        gutterMetrics = DiffGutterMetrics(lines: lines, font: AppSettingsStore.shared.diffGutterFont)
         caretRow = -1
         tableView.reloadData()
         if !presentations.isEmpty { tableView.scrollRowToVisible(0) }
@@ -1023,9 +1071,18 @@ final class DiffContentViewController: NSViewController, NSTableViewDataSource, 
     }
 
     private func persistPreferences(reloadDiff: Bool) {
-        AppSettingsStore.shared.saveFileViewerPreferences(preferences)
+        AppSettingsStore.shared.updateFileViewerPreferences(preferences)
         hoverToolbar.apply(preferences: preferences)
         if reloadDiff { onOptionsChanged?(preferences.diffOptions) }
+    }
+
+    @objc private func viewerPreferencesChanged() {
+        let updated = AppSettingsStore.shared.fileViewerPreferences
+        let reload = updated.diffOptions != preferences.diffOptions
+        preferences = updated
+        hoverToolbar.apply(preferences: preferences)
+        reloadRenderedLines()
+        if reload { onOptionsChanged?(preferences.diffOptions) }
     }
 
     private func navigateToChange(forward: Bool) {
@@ -1056,6 +1113,8 @@ final class DiffContentViewController: NSViewController, NSTableViewDataSource, 
     }
 
     private func reloadRenderedLines() {
+        tableView.backgroundColor = ApplicationColors.color("EditorBackground", fallback: .textBackgroundColor)
+        gutterMetrics = DiffGutterMetrics(lines: currentDiff?.lines ?? [], font: AppSettingsStore.shared.diffGutterFont)
         let selectedRows = tableView.selectedRowIndexes
         tableView.reloadData()
         tableView.selectRowIndexes(selectedRows, byExtendingSelection: false)
@@ -1063,7 +1122,7 @@ final class DiffContentViewController: NSViewController, NSTableViewDataSource, 
 
     func numberOfRows(in tableView: NSTableView) -> Int { presentations.count }
 
-    func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat { BrowserMetrics.diffRowHeight }
+    func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat { AppSettingsStore.shared.diffLineHeight }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         let identifier = NSUserInterfaceItemIdentifier("DiffLineCell")
@@ -1171,40 +1230,14 @@ final class DiffContentViewController: NSViewController, NSTableViewDataSource, 
     }
 
     @objc private func findText() {
-        let alert = NSAlert()
-        alert.messageText = "Find in file"
-        alert.addButton(withTitle: "Find Next")
-        alert.addButton(withTitle: "Cancel")
-        let field = NSSearchField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
-        alert.accessoryView = field
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        let query = field.stringValue
-        guard !query.isEmpty else { return }
-        let origin = max(caretRow + 1, 0)
-        let ordered = Array(origin..<presentations.count) + Array(0..<min(origin, presentations.count))
-        guard let row = ordered.first(where: { presentations[$0].line.text.localizedCaseInsensitiveContains(query) }) else {
-            NSSound.beep()
-            return
-        }
+        guard let row = FileViewerNavigationDialogs.find(lines: presentations.map(\.line), after: caretRow, query: &searchQuery) else { return }
         caretRow = row
         tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
         tableView.scrollRowToVisible(row)
     }
 
     @objc private func goToLine() {
-        let alert = NSAlert()
-        alert.messageText = "Go to line"
-        alert.addButton(withTitle: "Go")
-        alert.addButton(withTitle: "Cancel")
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 160, height: 24))
-        field.placeholderString = "New file line number"
-        alert.accessoryView = field
-        guard alert.runModal() == .alertFirstButtonReturn,
-              let line = Int(field.stringValue), line > 0,
-              let row = presentations.firstIndex(where: { $0.line.newLineNumber == line || $0.line.oldLineNumber == line }) else {
-            NSSound.beep()
-            return
-        }
+        guard let row = FileViewerNavigationDialogs.goToLine(lines: presentations.map(\.line)) else { return }
         caretRow = row
         tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
         tableView.scrollRowToVisible(row)
@@ -1314,13 +1347,12 @@ struct DiffGutterMetrics: Equatable {
         self.numberColumnWidth = numberColumnWidth
     }
 
-    init(lines: [DiffLine]) {
+    init(lines: [DiffLine], font: NSFont = .monospacedDigitSystemFont(ofSize: 10, weight: .regular)) {
         let maximum = lines
             .flatMap { [$0.oldLineNumber, $0.newLineNumber] }
             .compactMap { $0 }
             .max() ?? 0
         let digits = max(1, String(maximum).count)
-        let font = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular)
         let digitWidth = ceil(("0" as NSString).size(withAttributes: [.font: font]).width)
         numberColumnWidth = CGFloat(digits + 1) * digitWidth
     }
@@ -1351,7 +1383,7 @@ final class DiffLineCellView: NSTableCellView {
         addSubview(stack)
 
         [oldNumber, newNumber].forEach {
-            $0.font = .monospacedDigitSystemFont(ofSize: 10, weight: .regular)
+            $0.font = AppSettingsStore.shared.diffGutterFont
             $0.textColor = .tertiaryLabelColor
             $0.alignment = .left
             $0.translatesAutoresizingMaskIntoConstraints = false
@@ -1360,11 +1392,11 @@ final class DiffLineCellView: NSTableCellView {
         newNumberWidthConstraint = newNumber.widthAnchor.constraint(equalToConstant: gutterMetrics.numberColumnWidth)
         oldNumberWidthConstraint.isActive = true
         newNumberWidthConstraint.isActive = true
-        prefix.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        prefix.font = AppSettingsStore.shared.codeFont
         prefix.alignment = .center
         prefix.translatesAutoresizingMaskIntoConstraints = false
         prefix.widthAnchor.constraint(equalToConstant: prefixWidth).isActive = true
-        content.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        content.font = AppSettingsStore.shared.codeFont
         content.lineBreakMode = .byClipping
         content.maximumNumberOfLines = 1
         content.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -1383,14 +1415,16 @@ final class DiffLineCellView: NSTableCellView {
         guard let presentation else { return }
 
         let gutterWidth = gutterMetrics.totalWidth
+        ApplicationColors.color("LineNumberBackground", fallback: .clear).setFill()
+        NSRect(x: 0, y: 0, width: min(gutterWidth, bounds.width), height: bounds.height).fill()
         let baseColor: NSColor?
         switch presentation.line.kind {
         case .addition:
-            baseColor = NSColor.systemGreen.withAlphaComponent(0.13)
+            baseColor = ApplicationColors.color("AnsiTerminalGreenBackNormal", fallback: NSColor.systemGreen.withAlphaComponent(0.13))
         case .deletion:
-            baseColor = NSColor.systemRed.withAlphaComponent(0.13)
+            baseColor = ApplicationColors.color("AnsiTerminalRedBackNormal", fallback: NSColor.systemRed.withAlphaComponent(0.13))
         case .hunk:
-            baseColor = NSColor.systemBlue.withAlphaComponent(0.10)
+            baseColor = ApplicationColors.color("DiffSection", fallback: NSColor.systemBlue.withAlphaComponent(0.10))
         case .header, .context:
             baseColor = nil
         }
@@ -1400,7 +1434,7 @@ final class DiffLineCellView: NSTableCellView {
             NSRect(x: 0, y: 0, width: min(gutterWidth, bounds.width), height: bounds.height).fill()
 
             if presentation.line.kind == .addition || presentation.line.kind == .deletion {
-                let font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+                let font = AppSettingsStore.shared.codeFont
                 let textWidth = ceil((presentation.line.text as NSString).size(withAttributes: [.font: font]).width)
                 let width = min(prefixWidth + textWidth + 1, max(0, bounds.width - gutterWidth))
                 NSRect(x: gutterWidth, y: 0, width: width, height: bounds.height).fill()
@@ -1412,14 +1446,14 @@ final class DiffLineCellView: NSTableCellView {
             let string = presentation.line.text as NSString
             let safeLocation = min(max(0, change.location), string.length)
             let safeLength = min(max(0, change.length), string.length - safeLocation)
-            let font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+            let font = AppSettingsStore.shared.codeFont
             let leadingText = string.substring(with: NSRange(location: 0, length: safeLocation))
             let changedText = string.substring(with: NSRange(location: safeLocation, length: safeLength))
             let leadingWidth = ceil((leadingText as NSString).size(withAttributes: [.font: font]).width)
             let changedWidth = max(2, ceil((changedText as NSString).size(withAttributes: [.font: font]).width))
             let emphasis = presentation.line.kind == .addition
-                ? NSColor.systemGreen.withAlphaComponent(0.24)
-                : NSColor.systemRed.withAlphaComponent(0.24)
+                ? ApplicationColors.color("AnsiTerminalGreenBackBold", fallback: NSColor.systemGreen.withAlphaComponent(0.24))
+                : ApplicationColors.color("AnsiTerminalRedBackBold", fallback: NSColor.systemRed.withAlphaComponent(0.24))
             emphasis.setFill()
             NSRect(
                 x: gutterWidth + prefixWidth + leadingWidth,
@@ -1446,7 +1480,7 @@ final class DiffLineCellView: NSTableCellView {
         oldNumber.stringValue = line.oldLineNumber.map(String.init) ?? ""
         newNumber.stringValue = line.newLineNumber.map(String.init) ?? ""
         let displayText = showsNonPrintingCharacters
-            ? line.text.replacingOccurrences(of: "\t", with: "→").replacingOccurrences(of: " ", with: "·")
+            ? FileViewerWhitespace.patchLine(line.text, glyph: AppSettingsStore.shared.fontPreferences.showEolMarkerAsGlyph)
             : line.text
         content.attributedStringValue = DiffSyntaxHighlighter.attributedText(
             for: line,
@@ -1457,10 +1491,10 @@ final class DiffLineCellView: NSTableCellView {
         switch line.kind {
         case .addition:
             prefix.stringValue = "+"
-            prefix.textColor = .systemGreen
+            prefix.textColor = ApplicationColors.color("AnsiTerminalGreenForeNormal", fallback: .systemGreen)
         case .deletion:
             prefix.stringValue = "−"
-            prefix.textColor = .systemRed
+            prefix.textColor = ApplicationColors.color("AnsiTerminalRedForeNormal", fallback: .systemRed)
         case .hunk:
             prefix.stringValue = ""
         case .header:
@@ -1504,8 +1538,29 @@ enum FileViewerSyntaxDetector {
     }
 }
 
-private enum DiffSyntaxHighlighter {
-    private static let font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+enum FileViewerWhitespace {
+    static func text(_ text: String, glyph: Bool) -> String {
+        var result = ""
+        for character in text {
+            switch character {
+            case "\r\n": result += (glyph ? "¶" : "\\r\\n") + "\r\n"
+            case "\n": result += (glyph ? "¶" : "\\n") + "\n"
+            case "\r": result += (glyph ? "¶" : "\\r") + "\r"
+            case "\t": result += "→"
+            case " ": result += "·"
+            default: result.append(character)
+            }
+        }
+        return result
+    }
+
+    static func patchLine(_ line: String, glyph: Bool) -> String {
+        text(line, glyph: glyph) + (glyph ? "¶" : "\\n")
+    }
+}
+
+@MainActor private enum DiffSyntaxHighlighter {
+    private static var font: NSFont { AppSettingsStore.shared.codeFont }
     private static let keywordExpression = try! NSRegularExpression(
         pattern: #"\b(?:using|namespace|internal|sealed|class|public|private|protected|readonly|static|void|return|new|if|else|for|while|async|await|var|let)\b"#
     )
@@ -1525,7 +1580,7 @@ private enum DiffSyntaxHighlighter {
         case .hunk:
             baseColor = .systemBlue
         case .context, .addition, .deletion:
-            baseColor = .labelColor
+            baseColor = ApplicationColors.color("WindowText", fallback: .labelColor)
         }
 
         let result = NSMutableAttributedString(
@@ -1612,12 +1667,12 @@ final class DiffViewerToolbar: NSVisualEffectView {
         addButton("File", "Treat all files as text", toggleState: preferences.treatsAllFilesAsText ? .on : .off)
 
         encoding.controlSize = .small
-        encoding.font = .systemFont(ofSize: 11)
-        RepositoryTextEncoding.allCases.forEach { value in
+        encoding.font = AppSettingsStore.shared.applicationFont(size: 11)
+        AppSettingsStore.shared.viewerEncodings(including: preferences.textEncoding).forEach { value in
             encoding.addItem(withTitle: value.title)
             encoding.lastItem?.representedObject = value.rawValue
         }
-        encoding.selectItem(at: RepositoryTextEncoding.allCases.firstIndex(of: preferences.textEncoding) ?? 0)
+        encoding.selectItem(at: encoding.itemArray.firstIndex { ($0.representedObject as? String) == preferences.textEncoding.rawValue } ?? 0)
         encoding.toolTip = "Encoding"
         encoding.target = self
         encoding.action = #selector(performPopUpAction(_:))
@@ -1645,7 +1700,12 @@ final class DiffViewerToolbar: NSVisualEffectView {
         buttons["Ignore changes in amount of whitespace"]?.state = preferences.whitespace == .changes ? .on : .off
         buttons["Ignore all whitespace changes"]?.state = preferences.whitespace == .all ? .on : .off
         buttons["Treat all files as text"]?.state = preferences.treatsAllFilesAsText ? .on : .off
-        encoding.selectItem(at: RepositoryTextEncoding.allCases.firstIndex(of: preferences.textEncoding) ?? 0)
+        encoding.removeAllItems()
+        for value in AppSettingsStore.shared.viewerEncodings(including: preferences.textEncoding) {
+            encoding.addItem(withTitle: value.title)
+            encoding.lastItem?.representedObject = value.rawValue
+        }
+        encoding.selectItem(at: encoding.itemArray.firstIndex { ($0.representedObject as? String) == preferences.textEncoding.rawValue } ?? 0)
     }
 
     func install(in root: NSView) {
@@ -1880,7 +1940,7 @@ private final class RevisionFileTreeOutlineViewController: NSViewController, NSO
             icon = existingIcon
         } else {
             text = NSTextField(labelWithString: "")
-            text.font = .systemFont(ofSize: 11)
+            text.font = AppSettingsStore.shared.applicationFont(size: 11)
             text.lineBreakMode = .byTruncatingMiddle
             text.translatesAutoresizingMaskIntoConstraints = false
             icon = NSImageView()
@@ -1997,6 +2057,53 @@ private final class RevisionFileTreeItem: NSObject {
     }
 }
 
+@MainActor
+enum FileViewerNavigationDialogs {
+    static func find(lines: [DiffLine], after caret: Int, query: inout String) -> Int? {
+        let alert = NSAlert()
+        alert.messageText = "Find in file"
+        alert.addButton(withTitle: "Find Next")
+        alert.addButton(withTitle: "Cancel")
+        let field = NSSearchField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
+        field.stringValue = query
+        alert.accessoryView = field
+        guard alert.runModal() == .alertFirstButtonReturn, !field.stringValue.isEmpty else { return nil }
+        query = field.stringValue
+        guard let row = matchingRow(lines: lines, query: field.stringValue, after: caret) else {
+            NSSound.beep()
+            return nil
+        }
+        return row
+    }
+
+    static func matchingRow(lines: [DiffLine], query: String, after caret: Int, forward: Bool = true) -> Int? {
+        guard !lines.isEmpty, !query.isEmpty else { return nil }
+        let origin = min(max(forward ? caret + 1 : (caret < 0 ? lines.count : caret), 0), lines.count)
+        let order = forward ? Array(origin..<lines.count) + Array(0..<origin)
+            : Array((0..<origin).reversed()) + Array((origin..<lines.count).reversed())
+        return order.first {
+            lines[$0].text.localizedCaseInsensitiveContains(query)
+        }
+    }
+
+    static func goToLine(lines: [DiffLine]) -> Int? {
+        let alert = NSAlert()
+        alert.messageText = "Go to line"
+        alert.addButton(withTitle: "Go")
+        alert.addButton(withTitle: "Cancel")
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 160, height: 24))
+        field.placeholderString = "New file line number"
+        alert.accessoryView = field
+        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+        guard let line = Int(field.stringValue), line > 0,
+              let row = lines.firstIndex(where: { $0.newLineNumber == line || $0.oldLineNumber == line }) else {
+            NSSound.beep()
+            return nil
+        }
+        return row
+    }
+}
+
 final class RevisionFileContentViewController: NSViewController, NSMenuDelegate {
     private let pathLabel = NSTextField(labelWithString: "Select a file")
     private let metadataLabel = NSTextField(labelWithString: "")
@@ -2005,6 +2112,7 @@ final class RevisionFileContentViewController: NSViewController, NSMenuDelegate 
     private let encodingButton = NSPopUpButton()
     private var revisionName = ""
     private var content: RepositoryFileContent?
+    private var appliedEncoding: RepositoryTextEncoding = .automatic
     var onEncodingChanged: (() -> Void)?
     var selectedEncoding: RepositoryTextEncoding {
         AppSettingsStore.shared.fileViewerPreferences.textEncoding
@@ -2015,11 +2123,9 @@ final class RevisionFileContentViewController: NSViewController, NSMenuDelegate 
         let toolbar = AppKitFactory.toolbarBackground()
         toolbar.translatesAutoresizingMaskIntoConstraints = false
 
-        RepositoryTextEncoding.allCases.forEach { encoding in
-            encodingButton.addItem(withTitle: encoding.title)
-            encodingButton.lastItem?.representedObject = encoding.rawValue
-        }
-        encodingButton.selectItem(at: RepositoryTextEncoding.allCases.firstIndex(of: selectedEncoding) ?? 0)
+        reloadEncodingChoices()
+        appliedEncoding = selectedEncoding
+        NotificationCenter.default.addObserver(self, selector: #selector(settingsApplied), name: .fileViewerSettingsApplied, object: AppSettingsStore.shared)
         encodingButton.controlSize = .small
         encodingButton.target = self
         encodingButton.action = #selector(changeEncoding(_:))
@@ -2028,19 +2134,19 @@ final class RevisionFileContentViewController: NSViewController, NSMenuDelegate 
         header.alignment = .centerY
         header.spacing = 6
         header.translatesAutoresizingMaskIntoConstraints = false
-        pathLabel.font = .systemFont(ofSize: 11, weight: .semibold)
+        pathLabel.font = AppSettingsStore.shared.applicationFont(size: 11, weight: .semibold)
         pathLabel.lineBreakMode = .byTruncatingMiddle
         pathLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        metadataLabel.font = .monospacedDigitSystemFont(ofSize: 10, weight: .regular)
+        metadataLabel.font = AppSettingsStore.shared.fontPreferences.font(.monospace, fallback: .monospacedDigitSystemFont(ofSize: 10, weight: .regular))
         metadataLabel.textColor = .secondaryLabelColor
         toolbar.addSubview(header)
 
         textView.isEditable = false
         textView.isSelectable = true
         textView.isRichText = false
-        textView.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        textView.font = AppSettingsStore.shared.codeFont
         textView.textColor = .labelColor
-        textView.backgroundColor = .textBackgroundColor
+        textView.backgroundColor = ApplicationColors.color("EditorBackground", fallback: .textBackgroundColor)
         textView.textContainerInset = NSSize(width: 8, height: 7)
         textView.frame = NSRect(x: 0, y: 0, width: 600, height: 200)
         textView.minSize = .zero
@@ -2097,6 +2203,7 @@ final class RevisionFileContentViewController: NSViewController, NSMenuDelegate 
 
     func apply(file: RepositoryFileEntry?, selectedPath: String?) {
         _ = view
+        content = nil
         guard let file else {
             pathLabel.stringValue = selectedPath ?? "Select a file"
             metadataLabel.stringValue = selectedPath == nil ? "" : "Folder at \(revisionName)"
@@ -2118,8 +2225,10 @@ final class RevisionFileContentViewController: NSViewController, NSMenuDelegate 
     }
 
     func apply(content: RepositoryFileContent, revisionLabel: String) {
+        _ = view
         revisionName = revisionLabel
         self.content = content
+        appliedEncoding = selectedEncoding
         pathLabel.stringValue = content.path
         let encoding = content.encoding?.title ?? (content.kind == .image ? "Image" : "Binary")
         metadataLabel.stringValue = "\(content.byteCount) bytes   \(encoding)   \(revisionName)"
@@ -2134,7 +2243,7 @@ final class RevisionFileContentViewController: NSViewController, NSMenuDelegate 
             textView.enclosingScrollView?.isHidden = false
             let preferences = AppSettingsStore.shared.fileViewerPreferences
             let displayed = preferences.showsNonPrintingCharacters
-                ? content.text.replacingOccurrences(of: "\t", with: "→").replacingOccurrences(of: " ", with: "·")
+                ? FileViewerWhitespace.text(content.text, glyph: AppSettingsStore.shared.fontPreferences.showEolMarkerAsGlyph)
                 : content.text
             let line = DiffLine(
                 id: "file-content",
@@ -2155,6 +2264,7 @@ final class RevisionFileContentViewController: NSViewController, NSMenuDelegate 
 
     func apply(error: Error, selectedPath: String) {
         _ = view
+        content = nil
         pathLabel.stringValue = selectedPath
         metadataLabel.stringValue = "Unable to load"
         textView.string = error.localizedDescription
@@ -2189,12 +2299,43 @@ final class RevisionFileContentViewController: NSViewController, NSMenuDelegate 
         menu.addItem(history)
     }
 
+    private func reloadEncodingChoices() {
+        encodingButton.removeAllItems()
+        AppSettingsStore.shared.viewerEncodings(including: selectedEncoding).forEach { encoding in
+            encodingButton.addItem(withTitle: encoding.title)
+            encodingButton.lastItem?.representedObject = encoding.rawValue
+        }
+        encodingButton.selectItem(at: encodingButton.itemArray.firstIndex { ($0.representedObject as? String) == selectedEncoding.rawValue } ?? 0)
+    }
+
+    @objc private func settingsApplied() {
+        reloadEncodingChoices()
+        textView.backgroundColor = ApplicationColors.color("EditorBackground", fallback: .textBackgroundColor)
+        guard appliedEncoding == selectedEncoding else {
+            appliedEncoding = selectedEncoding
+            onEncodingChanged?()
+            return
+        }
+        guard let content else { return }
+        let selection = textView.selectedRange()
+        let origin = textView.enclosingScrollView?.contentView.bounds.origin
+        apply(content: content, revisionLabel: revisionName)
+        let length = (textView.string as NSString).length
+        if selection.location <= length {
+            textView.setSelectedRange(NSRange(location: selection.location, length: min(selection.length, length - selection.location)))
+        }
+        if let origin, let scroll = textView.enclosingScrollView {
+            scroll.contentView.scroll(to: origin)
+            scroll.reflectScrolledClipView(scroll.contentView)
+        }
+    }
+
     @objc private func changeEncoding(_ sender: NSPopUpButton) {
         guard let raw = sender.selectedItem?.representedObject as? String,
               let encoding = RepositoryTextEncoding(rawValue: raw) else { return }
         var preferences = AppSettingsStore.shared.fileViewerPreferences
         preferences.textEncoding = encoding
-        AppSettingsStore.shared.saveFileViewerPreferences(preferences)
+        AppSettingsStore.shared.updateFileViewerPreferences(preferences)
         onEncodingChanged?()
     }
 
@@ -2285,7 +2426,7 @@ private final class SignatureMessageView: NSView {
         textView.isSelectable = true
         textView.isRichText = false
         textView.drawsBackground = false
-        textView.font = .systemFont(ofSize: 11)
+        textView.font = AppSettingsStore.shared.applicationFont(size: 11)
         textView.textContainerInset = NSSize(width: 3, height: 3)
         let scroll = NSScrollView()
         scroll.documentView = textView

@@ -5,8 +5,11 @@ package enum FileContentDecoder {
     package static func decode(
         _ data: Data,
         path: String,
-        requestedEncoding: RepositoryTextEncoding
+        requestedEncoding: RepositoryTextEncoding,
+        configuredEncoding: RepositoryTextEncoding? = nil
     ) -> RepositoryFileContent {
+        let requestedEncoding = requestedEncoding == .automatic && !hasTextPreamble(data)
+            ? (configuredEncoding ?? requestedEncoding) : requestedEncoding
         if isImage(data, path: path) {
             return RepositoryFileContent(path: path, kind: .image, data: data)
         }
@@ -46,6 +49,8 @@ package enum FileContentDecoder {
         requested: RepositoryTextEncoding
     ) -> [RepositoryTextEncoding] {
         guard requested == .automatic else { return [requested] }
+        if data.starts(with: [0xFF, 0xFE, 0x00, 0x00]) { return [RepositoryTextEncoding(ianaName: "utf-32le")!] }
+        if data.starts(with: [0x00, 0x00, 0xFE, 0xFF]) { return [RepositoryTextEncoding(ianaName: "utf-32be")!] }
         if data.starts(with: [0xEF, 0xBB, 0xBF]) { return [.utf8] }
         if data.starts(with: [0xFF, 0xFE]) { return [.utf16LittleEndian] }
         if data.starts(with: [0xFE, 0xFF]) { return [.utf16BigEndian] }
@@ -54,6 +59,7 @@ package enum FileContentDecoder {
 
     private static func hasTextPreamble(_ data: Data) -> Bool {
         data.starts(with: [0xEF, 0xBB, 0xBF])
+            || data.starts(with: [0x00, 0x00, 0xFE, 0xFF])
             || data.starts(with: [0xFF, 0xFE])
             || data.starts(with: [0xFE, 0xFF])
     }
@@ -64,6 +70,8 @@ package enum FileContentDecoder {
     ) -> Data {
         let count: Int
         switch encoding {
+        case _ where encoding.ianaName == "utf-32le" && data.starts(with: [0xFF, 0xFE, 0x00, 0x00]): count = 4
+        case _ where encoding.ianaName == "utf-32be" && data.starts(with: [0x00, 0x00, 0xFE, 0xFF]): count = 4
         case .utf8 where data.starts(with: [0xEF, 0xBB, 0xBF]): count = 3
         case .utf16LittleEndian where data.starts(with: [0xFF, 0xFE]): count = 2
         case .utf16BigEndian where data.starts(with: [0xFE, 0xFF]): count = 2
@@ -73,13 +81,7 @@ package enum FileContentDecoder {
     }
 
     private static func foundationEncoding(_ encoding: RepositoryTextEncoding) -> String.Encoding {
-        switch encoding {
-        case .automatic, .utf8: .utf8
-        case .utf16LittleEndian: .utf16LittleEndian
-        case .utf16BigEndian: .utf16BigEndian
-        case .westernISO88591: .isoLatin1
-        case .windows1252: .windowsCP1252
-        }
+        encoding.foundationEncoding
     }
 
     private static func isImage(_ data: Data, path: String) -> Bool {

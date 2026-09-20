@@ -215,7 +215,7 @@ enum MutationDialogs {
         stack.addArrangedSubview(labeledControl("Mode:", mode))
 
         let messageView = NSTextView()
-        messageView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        messageView.font = AppSettingsStore.shared.fontPreferences.font(.monospace, fallback: .monospacedSystemFont(ofSize: 12, weight: .regular))
         messageView.isRichText = false
         messageView.isAutomaticQuoteSubstitutionEnabled = false
         messageView.isAutomaticDashSubstitutionEnabled = false
@@ -763,7 +763,7 @@ enum MutationDialogs {
 
         let textView = NSTextView(frame: scroll.contentView.bounds)
         textView.string = text
-        textView.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        textView.font = AppSettingsStore.shared.fontPreferences.font(.monospace, fallback: .monospacedSystemFont(ofSize: 12, weight: .regular))
         textView.isRichText = false
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
@@ -783,7 +783,7 @@ enum MutationDialogs {
 
     private static func label(_ text: String) -> NSTextField {
         let field = NSTextField(wrappingLabelWithString: text)
-        field.font = .systemFont(ofSize: 12)
+        field.font = AppSettingsStore.shared.applicationFont(size: 12)
         return field
     }
 
@@ -793,7 +793,7 @@ enum MutationDialogs {
         row.alignment = .centerY
         row.spacing = 8
         let caption = NSTextField(labelWithString: title)
-        caption.font = .systemFont(ofSize: 11)
+        caption.font = AppSettingsStore.shared.applicationFont(size: 11)
         caption.alignment = .right
         caption.widthAnchor.constraint(equalToConstant: 105).isActive = true
         row.addArrangedSubview(caption)

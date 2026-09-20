@@ -20,6 +20,7 @@ final class CommitDetailViewController: NSViewController, NSMenuDelegate {
     private let subjectLabel = NSTextField(wrappingLabelWithString: "")
     private let bodyLabel = NSTextField(wrappingLabelWithString: "")
     private let scrollView = NSScrollView()
+    private let externalLinks = NSStackView()
 
     override func loadView() {
         stack.orientation = .vertical
@@ -53,13 +54,13 @@ final class CommitDetailViewController: NSViewController, NSMenuDelegate {
         grid.xPlacement = .leading
         grid.column(at: 0).xPlacement = .leading
         [commitIDValue, authorValue, authorDateValue, committerValue, commitDateValue, branchesValue, tagsValue].forEach {
-            $0.font = .systemFont(ofSize: 11)
+            $0.font = AppSettingsStore.shared.applicationFont(size: 11)
             $0.lineBreakMode = .byTruncatingTail
             $0.isSelectable = true
         }
         parentsValue.onSelectRevision = { [weak self] in self?.onSelectRevision?($0) }
         childrenValue.onSelectRevision = { [weak self] in self?.onSelectRevision?($0) }
-        commitIDValue.font = .monospacedSystemFont(ofSize: 10.5, weight: .regular)
+        commitIDValue.font = AppSettingsStore.shared.fontPreferences.font(.monospace, fallback: .monospacedSystemFont(ofSize: 10.5, weight: .regular))
 
         headerRow.addArrangedSubview(avatar)
         headerRow.addArrangedSubview(grid)
@@ -79,7 +80,7 @@ final class CommitDetailViewController: NSViewController, NSMenuDelegate {
         messageBackground.material = .contentBackground
         messageBackground.blendingMode = .withinWindow
         messageBackground.state = .active
-        subjectLabel.font = .boldSystemFont(ofSize: 12)
+        subjectLabel.font = AppSettingsStore.shared.applicationFont(size: 12, weight: .bold)
         subjectLabel.translatesAutoresizingMaskIntoConstraints = false
         messageBackground.addSubview(subjectLabel)
         NSLayoutConstraint.activate([
@@ -89,7 +90,7 @@ final class CommitDetailViewController: NSViewController, NSMenuDelegate {
             subjectLabel.bottomAnchor.constraint(equalTo: messageBackground.bottomAnchor, constant: -8)
         ])
 
-        bodyLabel.font = .systemFont(ofSize: 11)
+        bodyLabel.font = AppSettingsStore.shared.applicationFont(size: 11)
         bodyLabel.textColor = .labelColor
         let bodyContainer = NSView()
         bodyContainer.translatesAutoresizingMaskIntoConstraints = false
@@ -105,6 +106,10 @@ final class CommitDetailViewController: NSViewController, NSMenuDelegate {
         stack.addArrangedSubview(headerContainer)
         stack.addArrangedSubview(messageBackground)
         stack.addArrangedSubview(bodyContainer)
+        externalLinks.orientation = .vertical
+        externalLinks.alignment = .leading
+        externalLinks.spacing = 3
+        stack.addArrangedSubview(externalLinks)
         [headerContainer, messageBackground, bodyContainer].forEach {
             $0.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         }
@@ -135,6 +140,7 @@ final class CommitDetailViewController: NSViewController, NSMenuDelegate {
     }
 
     func apply(commit: Commit, relations: CommitRelations, history: [Commit]) {
+        applyExternalLinks([])
         let shortIDByID = Dictionary(uniqueKeysWithValues: history.map { ($0.id, $0.shortID) })
         avatar.apply(name: commit.authorName, email: commit.authorEmail)
         commitIDValue.stringValue = commit.shortID
@@ -151,13 +157,34 @@ final class CommitDetailViewController: NSViewController, NSMenuDelegate {
         view.needsLayout = true
     }
 
+    func applyExternalLinks(_ links: [RevisionLinkDefinition.Link], error: String? = nil) {
+        for view in externalLinks.arrangedSubviews { externalLinks.removeArrangedSubview(view); view.removeFromSuperview() }
+        for link in links {
+            let button = NSButton(title: link.caption, target: self, action: #selector(openExternalLink(_:)))
+            button.isBordered = false
+            button.contentTintColor = .linkColor
+            button.font = AppSettingsStore.shared.applicationFont(size: 11)
+            button.toolTip = link.destination
+            button.identifier = NSUserInterfaceItemIdentifier(link.destination)
+            button.isEnabled = URL(string: link.destination)?.scheme != nil
+            externalLinks.addArrangedSubview(button)
+        }
+        if let error { externalLinks.addArrangedSubview(NSTextField(wrappingLabelWithString: "Revision links: \(error)")) }
+        view.needsLayout = true
+    }
+
+    @objc private func openExternalLink(_ sender: NSButton) {
+        guard let value = sender.identifier?.rawValue, let url = URL(string: value), url.scheme != nil else { return }
+        NSWorkspace.shared.open(url)
+    }
+
     private static func joinedOrNone(_ values: [String]) -> String {
         values.isEmpty ? "(none)" : values.joined(separator: ", ")
     }
 
     private func caption(_ value: String) -> NSTextField {
         let text = NSTextField(labelWithString: value)
-        text.font = .systemFont(ofSize: 11, weight: .semibold)
+        text.font = AppSettingsStore.shared.applicationFont(size: 11, weight: .semibold)
         text.textColor = .secondaryLabelColor
         return text
     }
@@ -259,7 +286,7 @@ private final class RevisionLinkListView: NSView {
             if index > 0 { stack.addArrangedSubview(valueLabel(", ")) }
             let button = NSButton(title: revision.title, target: self, action: #selector(selectRevision(_:)))
             button.isBordered = false
-            button.font = .monospacedSystemFont(ofSize: 10.5, weight: .regular)
+            button.font = AppSettingsStore.shared.fontPreferences.font(.monospace, fallback: .monospacedSystemFont(ofSize: 10.5, weight: .regular))
             button.contentTintColor = .linkColor
             button.toolTip = "Go to revision \(revision.title)"
             button.identifier = NSUserInterfaceItemIdentifier(revision.id.string)
@@ -276,7 +303,7 @@ private final class RevisionLinkListView: NSView {
 
     private func valueLabel(_ value: String) -> NSTextField {
         let label = NSTextField(labelWithString: value)
-        label.font = .systemFont(ofSize: 11)
+        label.font = AppSettingsStore.shared.applicationFont(size: 11)
         label.isSelectable = true
         return label
     }

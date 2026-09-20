@@ -8,6 +8,7 @@ enum MergeDialog {
         source: any RepositoryMergingDataSource,
         context: RepositoryMergeContext,
         initialTarget: String?,
+        distributedSettings: DistributedSettings? = nil,
         owner: NSWindow,
         onRepositoryChanged: @escaping (RevisionID?) -> Void,
         onClose: @escaping () -> Void
@@ -16,6 +17,7 @@ enum MergeDialog {
             source: source,
             context: context,
             initialTarget: initialTarget,
+            distributedSettings: distributedSettings,
             onRepositoryChanged: onRepositoryChanged
         )
         let window = NSWindow(contentViewController: controller)
@@ -56,6 +58,7 @@ private final class MergeDialogViewController: NSViewController, NSWindowDelegat
     var onClose: (() -> Void)?
 
     private let source: any RepositoryMergingDataSource
+    private let distributedSettings: DistributedSettings?
     private let context: RepositoryMergeContext
     private let onRepositoryChanged: (RevisionID?) -> Void
     private let settings = AppSettingsStore.shared
@@ -95,9 +98,11 @@ private final class MergeDialogViewController: NSViewController, NSWindowDelegat
         source: any RepositoryMergingDataSource,
         context: RepositoryMergeContext,
         initialTarget: String?,
+        distributedSettings: DistributedSettings?,
         onRepositoryChanged: @escaping (RevisionID?) -> Void
     ) {
         self.source = source
+        self.distributedSettings = distributedSettings
         self.context = context
         self.onRepositoryChanged = onRepositoryChanged
         self.targets = Self.makeTargets(context)
@@ -106,7 +111,7 @@ private final class MergeDialogViewController: NSViewController, NSWindowDelegat
 
         let current = context.branches.first(where: \.isCurrent)
         currentBranch.stringValue = current?.name ?? "Detached HEAD"
-        currentBranch.font = .boldSystemFont(ofSize: NSFont.systemFontSize)
+        currentBranch.font = AppSettingsStore.shared.applicationFont(size: NSFont.systemFontSize, weight: .bold)
 
         let defaultTarget = initialTarget ?? Self.trackingTarget(context: context, currentBranch: current)
         targetCombo.stringValue = defaultTarget ?? ""
@@ -167,7 +172,7 @@ private final class MergeDialogViewController: NSViewController, NSWindowDelegat
     private func configureHelpPane() {
         helpImage.imageScaling = .scaleProportionallyUpOrDown
         helpImage.translatesAutoresizingMaskIntoConstraints = false
-        helpNotice.font = .systemFont(ofSize: 11)
+        helpNotice.font = AppSettingsStore.shared.applicationFont(size: 11)
         helpNotice.textColor = .secondaryLabelColor
         helpNotice.alignment = .center
         helpNotice.translatesAutoresizingMaskIntoConstraints = false
@@ -214,7 +219,7 @@ private final class MergeDialogViewController: NSViewController, NSWindowDelegat
         fastForward.action = #selector(fastForwardChanged)
         noFastForward.target = self
         noFastForward.action = #selector(fastForwardChanged)
-        let preferences = settings.mergePreferences
+        let preferences = (try? distributedSettings?.mergePreferences(settings)) ?? settings.mergePreferences
         noFastForward.state = preferences.noFastForward ? .on : .off
         fastForward.state = preferences.noFastForward ? .off : .on
         noCommit.state = preferences.noCommit ? .on : .off
@@ -298,7 +303,7 @@ private final class MergeDialogViewController: NSViewController, NSWindowDelegat
         specifyMessage.action = #selector(messageChanged)
         advancedPanel.addArrangedSubview(specifyMessage)
 
-        mergeMessage.font = .systemFont(ofSize: NSFont.systemFontSize)
+        mergeMessage.font = AppSettingsStore.shared.applicationFont(size: NSFont.systemFontSize)
         mergeMessage.isRichText = false
         mergeMessage.isAutomaticQuoteSubstitutionEnabled = false
         mergeMessage.isAutomaticDashSubstitutionEnabled = false
@@ -426,7 +431,12 @@ private final class MergeDialogViewController: NSViewController, NSWindowDelegat
         logCount.integerValue = count
         logStepper.integerValue = count
         preferences.logMessagesCount = count
-        settings.saveMergePreferences(preferences)
+        do {
+            if let distributedSettings { try distributedSettings.saveMergeLog(preferences, store: settings) }
+            else { settings.saveMergePreferences(preferences) }
+        } catch {
+            if let window { Task { await MutationDialogs.showError(error, title: "Save merge preferences", window: window) } }
+        }
     }
 
     @objc private func toggleHelp() {
@@ -459,7 +469,7 @@ private final class MergeDialogViewController: NSViewController, NSWindowDelegat
             helpToggle.attributedTitle = NSAttributedString(
                 string: "Hide help",
                 attributes: [
-                    .font: NSFont.systemFont(ofSize: 12),
+                    .font: AppSettingsStore.shared.applicationFont(size: 12),
                     .foregroundColor: NSColor.linkColor,
                     .underlineStyle: NSUnderlineStyle.single.rawValue
                 ]
@@ -468,7 +478,7 @@ private final class MergeDialogViewController: NSViewController, NSWindowDelegat
         } else {
             helpToggle.attributedTitle = NSAttributedString(
                 string: "Show help",
-                attributes: [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor.linkColor]
+                attributes: [.font: AppSettingsStore.shared.applicationFont(size: 12), .foregroundColor: NSColor.linkColor]
             )
             helpToggle.image = AppKitFactory.resourceImage("Information", accessibilityDescription: "Show help")
             helpToggle.imagePosition = .imageLeading
@@ -829,10 +839,10 @@ private final class MergeProcessViewController: NSViewController, NSWindowDelega
         progress.controlSize = .small
         progress.isIndeterminate = true
         progress.widthAnchor.constraint(equalToConstant: 92).isActive = true
-        status.font = .boldSystemFont(ofSize: 12)
+        status.font = AppSettingsStore.shared.applicationFont(size: 12, weight: .bold)
         outputView.isEditable = false
         outputView.isSelectable = true
-        outputView.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        outputView.font = AppSettingsStore.shared.fontPreferences.font(.monospace, fallback: .monospacedSystemFont(ofSize: 11, weight: .regular))
         outputView.textContainerInset = NSSize(width: 6, height: 6)
         outputView.isVerticallyResizable = true
         outputView.isHorizontallyResizable = true
@@ -934,7 +944,7 @@ private final class MergeProcessViewController: NSViewController, NSWindowDelega
         outputView.textStorage?.append(NSAttributedString(
             string: value,
             attributes: [
-                .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .regular),
+                .font: AppSettingsStore.shared.fontPreferences.font(.monospace, fallback: .monospacedSystemFont(ofSize: 11, weight: .regular)),
                 .foregroundColor: color
             ]
         ))

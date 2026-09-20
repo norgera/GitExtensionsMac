@@ -28,7 +28,7 @@ package actor RevisionReader {
         source = .revisions(revisions)
     }
 
-    package func read(_ context: RevisionReadContext, batchSize: Int = 200) -> AsyncThrowingStream<[Commit], Error> {
+    package func read(_ context: RevisionReadContext, batchSize: Int = 200, maximumCount: Int = 0) -> AsyncThrowingStream<[Commit], Error> {
         activeSession?.cancel()
         var createdSession: RevisionStreamSession?
         let stream = AsyncThrowingStream<[Commit], Error> { continuation in
@@ -45,6 +45,7 @@ package actor RevisionReader {
                         session.publish(revisions)
                     case .repository(let git, let directory):
                         var arguments = ["log", "-z", "--all"]
+                        if maximumCount > 0 { arguments.append("--max-count=\(maximumCount)") }
                         if context.showReflogReferences { arguments.append("--reflog") }
                         arguments.append("--format=%H%x00%P%x00%at%x00%ct%x00%aN%x00%aE%x00%cN%x00%cE%x00%B")
                         let command = GitCommand(
@@ -73,7 +74,7 @@ package actor RevisionReader {
                 }
             }
             session.task = task
-            continuation.onTermination = { _ in session.cancel() }
+            continuation.onTermination = { _ in Task { session.cancel() } }
         }
         activeSession = createdSession
         return stream
@@ -546,7 +547,9 @@ package actor GitRepositoryModule: RepositoryOpeningDataSource {
             submoduleTree: submoduleTree
         )
         let status = RepositoryStatusSummary(
-            workingDirectoryChangeCount: workingDirectoryChangeCount
+            workingDirectoryChangeCount: workingDirectoryChangeCount,
+            worktree: GitStatusRecord.revisionChangeCounts(parsedStatus, staged: false),
+            index: GitStatusRecord.revisionChangeCounts(parsedStatus, staged: true)
         )
         return RepositoryLoadState(
             identity: identity,
@@ -726,7 +729,8 @@ package actor GitRepositoryModule: RepositoryOpeningDataSource {
         encoding: RepositoryTextEncoding
     ) async throws -> RepositoryFileContent {
         let data = try await loadFileData(for: commit, file: file)
-        return FileContentDecoder.decode(data, path: file.path, requestedEncoding: encoding)
+        let configured = encoding == .automatic ? try await configuredFileEncoding() : nil
+        return FileContentDecoder.decode(data, path: file.path, requestedEncoding: encoding, configuredEncoding: configured)
     }
 
     package func openWithDifftool(for commit: Commit, file: ChangedFile, customToolPath: String?) async throws {

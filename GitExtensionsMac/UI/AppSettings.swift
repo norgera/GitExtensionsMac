@@ -9,6 +9,75 @@ enum ApplicationTheme: String, Codable, CaseIterable, Sendable {
     case dark = "Dark"
 }
 
+enum ApplicationFontRole: String, Codable, CaseIterable {
+    case code, application, commit, monospace
+    var title: String {
+        switch self {
+        case .code: "Code font"
+        case .application: "Application font"
+        case .commit: "Commit font"
+        case .monospace: "Monospace font"
+        }
+    }
+}
+
+struct StoredApplicationFont: Codable, Equatable {
+    let name: String
+    let size: Double
+
+    init(_ font: NSFont) { name = font.fontName; size = font.pointSize }
+    var font: NSFont? {
+        guard size.isFinite, size > 0, size <= 288 else { return nil }
+        return NSFont(name: name, size: size)
+    }
+}
+
+struct ApplicationFontPreferences: Codable, Equatable {
+    var fonts: [ApplicationFontRole: StoredApplicationFont] = [:]
+    var showEolMarkerAsGlyph = false
+
+    init() {}
+    private enum CodingKeys: String, CodingKey { case fonts, showEolMarkerAsGlyph }
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        fonts = try values.decodeIfPresent([ApplicationFontRole: StoredApplicationFont].self, forKey: .fonts) ?? [:]
+        showEolMarkerAsGlyph = try values.decodeIfPresent(Bool.self, forKey: .showEolMarkerAsGlyph) ?? false
+    }
+
+    func font(_ role: ApplicationFontRole, fallback: NSFont) -> NSFont {
+        fonts[role]?.font ?? fallback
+    }
+}
+
+struct BrowseDisplayPreferences: Codable, Equatable, Sendable {
+    var showChangedFilesOnCommitButton = true
+    var showArtificialRevisionCounts = true
+    var showSubmoduleStatus = false
+    var showAheadBehind = true
+    var quickSearchTimeoutMilliseconds = 4000
+    var maximumRevisionCount = 100000
+
+    init() {}
+    private enum CodingKeys: String, CodingKey { case showChangedFilesOnCommitButton, showArtificialRevisionCounts, showSubmoduleStatus, showAheadBehind, quickSearchTimeoutMilliseconds, maximumRevisionCount }
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        showChangedFilesOnCommitButton = try values.decodeIfPresent(Bool.self, forKey: .showChangedFilesOnCommitButton) ?? true
+        showArtificialRevisionCounts = try values.decodeIfPresent(Bool.self, forKey: .showArtificialRevisionCounts) ?? true
+        showSubmoduleStatus = try values.decodeIfPresent(Bool.self, forKey: .showSubmoduleStatus) ?? false
+        showAheadBehind = try values.decodeIfPresent(Bool.self, forKey: .showAheadBehind) ?? true
+        quickSearchTimeoutMilliseconds = try values.decodeIfPresent(Int.self, forKey: .quickSearchTimeoutMilliseconds) ?? 4000
+        maximumRevisionCount = max(0, try values.decodeIfPresent(Int.self, forKey: .maximumRevisionCount) ?? 100000)
+    }
+
+    func commitTitle(changedFiles: Int) -> String {
+        showChangedFilesOnCommitButton ? "Commit (\(changedFiles))" : "Commit"
+    }
+
+    func branchCounts(ahead: Int, behind: Int) -> String {
+        showAheadBehind && (ahead > 0 || behind > 0) ? " ↑\(ahead) ↓\(behind)" : ""
+    }
+}
+
 struct AppPreferences: Codable, Equatable, Sendable {
     var reopenLastRepository = true
     var maximumRecentRepositories = 20
@@ -326,6 +395,7 @@ struct FileStatusListPreferences: Codable, Equatable, Sendable {
 }
 
 struct FileViewerPreferences: Codable, Equatable, Sendable {
+    var usesHistogram = false
     var whitespace: DiffWhitespaceMode = .none
     var contextLines = 3
     var showsEntireFile = false
@@ -334,14 +404,40 @@ struct FileViewerPreferences: Codable, Equatable, Sendable {
     var showsSyntaxHighlighting = true
     var textEncoding: RepositoryTextEncoding = .automatic
 
+    init() {}
+    private enum CodingKeys: String, CodingKey {
+        case usesHistogram, whitespace, contextLines, showsEntireFile, treatsAllFilesAsText
+        case showsNonPrintingCharacters, showsSyntaxHighlighting, textEncoding
+    }
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        usesHistogram = try values.decodeIfPresent(Bool.self, forKey: .usesHistogram) ?? false
+        whitespace = try values.decodeIfPresent(DiffWhitespaceMode.self, forKey: .whitespace) ?? .none
+        contextLines = try values.decodeIfPresent(Int.self, forKey: .contextLines) ?? 3
+        showsEntireFile = try values.decodeIfPresent(Bool.self, forKey: .showsEntireFile) ?? false
+        treatsAllFilesAsText = try values.decodeIfPresent(Bool.self, forKey: .treatsAllFilesAsText) ?? false
+        showsNonPrintingCharacters = try values.decodeIfPresent(Bool.self, forKey: .showsNonPrintingCharacters) ?? false
+        showsSyntaxHighlighting = try values.decodeIfPresent(Bool.self, forKey: .showsSyntaxHighlighting) ?? true
+        textEncoding = try values.decodeIfPresent(RepositoryTextEncoding.self, forKey: .textEncoding) ?? .automatic
+    }
+
     var diffOptions: FileDiffOptions {
         FileDiffOptions(
             whitespace: whitespace,
             contextLines: contextLines,
             showsEntireFile: showsEntireFile,
-            treatsAllFilesAsText: treatsAllFilesAsText
+            treatsAllFilesAsText: treatsAllFilesAsText,
+            usesHistogram: usesHistogram
         )
     }
+}
+
+struct FileViewerRememberPreferences: Codable, Equatable, Sendable {
+    var whitespace = true
+    var entireFile = false
+    var nonPrinting = false
+    var contextLines = false
+    var syntaxHighlighting = true
 }
 
 enum CommitMessageValidationIssue: Equatable, Sendable {
@@ -491,6 +587,7 @@ final class AppSettingsStore {
 
     private enum Key {
         static let preferences = "GitExtensionsMac.preferences.v1"
+        static let fonts = "GitExtensionsMac.fonts.v1"
         static let recentRepositories = "GitExtensionsMac.recentRepositories.v1"
         static let lastRepository = "GitExtensionsMac.lastRepository"
         static let pullPreferences = "GitExtensionsMac.pullPreferences.v1"
@@ -498,9 +595,11 @@ final class AppSettingsStore {
         static let commitPreferences = "GitExtensionsMac.commitPreferences.v1"
         static let fileStatusListPreferences = "GitExtensionsMac.fileStatusListPreferences.v1"
         static let fileViewerPreferences = "GitExtensionsMac.fileViewerPreferences.v1"
+        static let fileViewerRemember = "GitExtensionsMac.fileViewerRemember.v1"
         static let rebasePreferences = "GitExtensionsMac.rebasePreferences.v1"
         static let cherryPickPreferences = "GitExtensionsMac.cherryPickPreferences.v1"
         static let stashPreferences = "GitExtensionsMac.stashPreferences.v1"
+        static let browseDisplay = "GitExtensionsMac.browseDisplay.v1"
         static let tagPreferences = "GitExtensionsMac.tagPreferences.v1"
         static let repositoryTreePreferences = "GitExtensionsMac.repositoryTreePreferences.v1"
         static let remoteManagementPreferences = "GitExtensionsMac.remoteManagementPreferences.v1"
@@ -512,13 +611,68 @@ final class AppSettingsStore {
     }
 
     private let defaults: UserDefaults
+
+    private var cachedColorPreferences: ApplicationColorPreferences?
+    var colorPreferences: ApplicationColorPreferences {
+        get {
+            if let cachedColorPreferences { return cachedColorPreferences }
+            let value = defaults.data(forKey: "GitExtensionsMac.colors.v1")
+                .flatMap { try? JSONDecoder().decode(ApplicationColorPreferences.self, from: $0) } ?? .init()
+            cachedColorPreferences = value
+            return value
+        }
+        set {
+            cachedColorPreferences = newValue
+            defaults.set(try? JSONEncoder().encode(newValue), forKey: "GitExtensionsMac.colors.v1")
+            ApplicationColors.invalidate()
+        }
+    }
+
+    var hotkeyOverrides: [String: ApplicationKeyChord] {
+        get {
+            guard let data = defaults.data(forKey: "GitExtensionsMac.hotkeys.v1") else { return [:] }
+            return (try? JSONDecoder().decode([String: ApplicationKeyChord].self, from: data)) ?? [:]
+        }
+        set {
+            ApplicationHotkeys.shared.objectWillChange.send()
+            defaults.set(try? JSONEncoder().encode(newValue), forKey: "GitExtensionsMac.hotkeys.v1")
+        }
+    }
+
+    var revisionLinksXML: String? {
+        get { defaults.string(forKey: "GitExtensionsMac.revisionLinks.v1") }
+        set { defaults.set(newValue, forKey: "GitExtensionsMac.revisionLinks.v1") }
+    }
+
+    var includedTextEncodings: [RepositoryTextEncoding] {
+        get {
+            let baseline: [RepositoryTextEncoding] = [.utf8, .utf16LittleEndian, .utf16BigEndian, .westernISO88591, .windows1252]
+            let saved = defaults.stringArray(forKey: "GitExtensionsMac.availableEncodings.v1")?.compactMap { RepositoryTextEncoding(rawValue: $0) } ?? baseline
+            var result = Self.requiredTextEncodings
+            for encoding in saved where encoding != .automatic && !result.contains(encoding) { result.append(encoding) }
+            return result
+        }
+        set { defaults.set(newValue.map(\.rawValue), forKey: "GitExtensionsMac.availableEncodings.v1") }
+    }
+    static var requiredTextEncodings: [RepositoryTextEncoding] {
+        [.utf8, .utf16LittleEndian, .utf16BigEndian, RepositoryTextEncoding(ianaName: "us-ascii")!]
+    }
+    func viewerEncodings(including selected: RepositoryTextEncoding) -> [RepositoryTextEncoding] {
+        var values = [.automatic] + includedTextEncodings
+        if !values.contains(selected) { values.append(selected) }
+        return values
+    }
     private(set) var preferences: AppPreferences
+    private(set) var fontPreferences: ApplicationFontPreferences
+    private(set) var browseDisplayPreferences: BrowseDisplayPreferences
     private(set) var recentRepositories: [RecentRepository]
     private(set) var pullPreferences: PullPreferences
     private(set) var pushPreferences: PushPreferences
     private(set) var commitPreferences: CommitPreferences
     private(set) var fileStatusListPreferences: FileStatusListPreferences
     private(set) var fileViewerPreferences: FileViewerPreferences
+    private(set) var fileViewerDefaults: FileViewerPreferences
+    private(set) var fileViewerRemember: FileViewerRememberPreferences
     private(set) var rebasePreferences: RebasePreferences
     private(set) var cherryPickPreferences: CherryPickPreferences
     private(set) var stashPreferences: StashPreferences
@@ -561,6 +715,16 @@ final class AppSettingsStore {
                 value.whitespace = loadedPreferences.ignoreWhitespace ? .all : .none
                 return value
             }()
+        fontPreferences = defaults.data(forKey: Key.fonts)
+            .flatMap { try? decoder.decode(ApplicationFontPreferences.self, from: $0) }
+            ?? ApplicationFontPreferences()
+        browseDisplayPreferences = defaults.data(forKey: Key.browseDisplay)
+            .flatMap { try? decoder.decode(BrowseDisplayPreferences.self, from: $0) }
+            ?? BrowseDisplayPreferences()
+        fileViewerDefaults = fileViewerPreferences
+        fileViewerRemember = defaults.data(forKey: Key.fileViewerRemember)
+            .flatMap { try? decoder.decode(FileViewerRememberPreferences.self, from: $0) }
+            ?? FileViewerRememberPreferences()
         rebasePreferences = defaults.data(forKey: Key.rebasePreferences)
             .flatMap { try? decoder.decode(RebasePreferences.self, from: $0) }
             ?? RebasePreferences()
@@ -606,13 +770,15 @@ final class AppSettingsStore {
     }
 
     func save(_ preferences: AppPreferences) {
+        let previous = self.preferences
         self.preferences = preferences
         defaults.set(try? JSONEncoder().encode(preferences), forKey: Key.preferences)
         var viewer = fileViewerPreferences
-        viewer.contextLines = preferences.diffContextLines
-        viewer.whitespace = preferences.ignoreWhitespace ? .all : .none
+        if preferences.diffContextLines != previous.diffContextLines { viewer.contextLines = preferences.diffContextLines }
+        if preferences.ignoreWhitespace != previous.ignoreWhitespace { viewer.whitespace = preferences.ignoreWhitespace ? .all : .none }
         if viewer != fileViewerPreferences {
             fileViewerPreferences = viewer
+            fileViewerDefaults = viewer
             defaults.set(try? JSONEncoder().encode(viewer), forKey: Key.fileViewerPreferences)
             NotificationCenter.default.post(name: .fileViewerPreferencesDidChange, object: self)
         }
@@ -646,12 +812,81 @@ final class AppSettingsStore {
     }
 
     func saveFileViewerPreferences(_ preferences: FileViewerPreferences) {
+        fileViewerDefaults = preferences
         fileViewerPreferences = preferences
         defaults.set(try? JSONEncoder().encode(preferences), forKey: Key.fileViewerPreferences)
         self.preferences.diffContextLines = preferences.contextLines
         self.preferences.ignoreWhitespace = preferences.whitespace != .none
         defaults.set(try? JSONEncoder().encode(self.preferences), forKey: Key.preferences)
         NotificationCenter.default.post(name: .fileViewerPreferencesDidChange, object: self)
+    }
+
+    func saveFileViewerRemember(_ preferences: FileViewerRememberPreferences) {
+        fileViewerRemember = preferences
+        defaults.set(try? JSONEncoder().encode(preferences), forKey: Key.fileViewerRemember)
+    }
+
+    func saveFontPreferences(_ preferences: ApplicationFontPreferences) {
+        fontPreferences = preferences
+        defaults.set(try? JSONEncoder().encode(preferences), forKey: Key.fonts)
+    }
+
+    func saveBrowseDisplayPreferences(_ preferences: BrowseDisplayPreferences) {
+        browseDisplayPreferences = preferences
+        defaults.set(try? JSONEncoder().encode(preferences), forKey: Key.browseDisplay)
+    }
+
+    var codeFont: NSFont { fontPreferences.font(.code, fallback: .monospacedSystemFont(ofSize: 11, weight: .regular)) }
+    var diffGutterFont: NSFont { fontPreferences.font(.code, fallback: .monospacedDigitSystemFont(ofSize: 10, weight: .regular)) }
+    var diffLineHeight: CGFloat {
+        guard fontPreferences.fonts[.code] != nil else { return BrowserMetrics.diffRowHeight }
+        let font = codeFont
+        return max(BrowserMetrics.diffRowHeight, ceil(font.ascender - font.descender + font.leading + 3))
+    }
+    var commitFont: NSFont { fontPreferences.font(.commit, fallback: .monospacedSystemFont(ofSize: 12, weight: .regular)) }
+    var monospaceFont: NSFont { fontPreferences.font(.monospace, fallback: .monospacedSystemFont(ofSize: 11, weight: .regular)) }
+    func applicationFont(size: CGFloat, weight: NSFont.Weight = .regular) -> NSFont {
+        guard let font = fontPreferences.fonts[.application]?.font else { return .systemFont(ofSize: size, weight: weight) }
+        return weight >= .semibold ? NSFontManager.shared.convert(font, toHaveTrait: .boldFontMask) : font
+    }
+
+    func applicationRowHeight(minimum: CGFloat) -> CGFloat {
+        [ApplicationFontRole.application, .monospace].reduce(minimum) { height, role in
+            guard let font = fontPreferences.fonts[role]?.font else { return height }
+            return max(height, ceil(font.ascender - font.descender + font.leading + 4))
+        }
+    }
+
+    func updateFileViewerPreferences(_ preferences: FileViewerPreferences) {
+        guard preferences != fileViewerPreferences else { return }
+        fileViewerPreferences = preferences
+        let previousDefaults = fileViewerDefaults
+        fileViewerDefaults.textEncoding = preferences.textEncoding
+        fileViewerDefaults.usesHistogram = preferences.usesHistogram
+        fileViewerDefaults.treatsAllFilesAsText = preferences.treatsAllFilesAsText
+        if fileViewerRemember.contextLines {
+            fileViewerDefaults.contextLines = preferences.contextLines
+        }
+        if fileViewerDefaults != previousDefaults {
+            defaults.set(try? JSONEncoder().encode(fileViewerDefaults), forKey: Key.fileViewerPreferences)
+        }
+        NotificationCenter.default.post(name: .fileViewerPreferencesDidChange, object: self)
+    }
+
+    func preferencesForNewFileViewer() -> FileViewerPreferences {
+        var result = fileViewerPreferences
+        if !fileViewerRemember.whitespace { result.whitespace = fileViewerDefaults.whitespace }
+        if !fileViewerRemember.entireFile { result.showsEntireFile = fileViewerDefaults.showsEntireFile }
+        if !fileViewerRemember.nonPrinting { result.showsNonPrintingCharacters = fileViewerDefaults.showsNonPrintingCharacters }
+        if !fileViewerRemember.syntaxHighlighting { result.showsSyntaxHighlighting = fileViewerDefaults.showsSyntaxHighlighting }
+        if !fileViewerRemember.contextLines { result.contextLines = 3 }
+        fileViewerPreferences = result
+        return result
+    }
+
+    func applyFileViewerPreferences(_ preferences: FileViewerPreferences) {
+        updateFileViewerPreferences(preferences)
+        NotificationCenter.default.post(name: .fileViewerSettingsApplied, object: self)
     }
 
     func saveRebasePreferences(_ preferences: RebasePreferences) {
@@ -798,6 +1033,7 @@ final class AppSettingsStore {
     }
 
     private func applyAppearance() {
+        ApplicationColors.invalidate()
         guard let application = NSApp else { return }
         switch preferences.theme {
         case .system: application.appearance = nil
@@ -814,4 +1050,5 @@ extension Notification.Name {
     static let commitPreferencesDidChange = Notification.Name("GitExtensionsMac.commitPreferencesDidChange")
     static let fileStatusListPreferencesDidChange = Notification.Name("GitExtensionsMac.fileStatusListPreferencesDidChange")
     static let fileViewerPreferencesDidChange = Notification.Name("GitExtensionsMac.fileViewerPreferencesDidChange")
+    static let fileViewerSettingsApplied = Notification.Name("GitExtensionsMac.fileViewerSettingsApplied")
 }

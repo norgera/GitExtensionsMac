@@ -252,13 +252,13 @@ private final class PullDialogViewController: NSViewController, NSWindowDelegate
         executeButton.keyEquivalent = "\r"
         executeButton.widthAnchor.constraint(equalToConstant: 124).isActive = true
         statusLabel.textColor = .secondaryLabelColor
-        statusLabel.font = .systemFont(ofSize: 10.5)
+        statusLabel.font = AppSettingsStore.shared.applicationFont(size: 10.5)
         statusLabel.lineBreakMode = .byTruncatingTail
         statusLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
     }
 
     private func makeHelpPanel() -> NSView {
-        helpNotice.font = .systemFont(ofSize: 12)
+        helpNotice.font = AppSettingsStore.shared.applicationFont(size: 12)
         helpNotice.maximumNumberOfLines = 2
         helpImageView.imageScaling = .scaleProportionallyUpOrDown
         helpImageView.imageAlignment = .alignTopLeft
@@ -960,14 +960,14 @@ private final class PullDialogViewController: NSViewController, NSWindowDelegate
             helpToggle.isBordered = false
             helpToggle.attributedTitle = NSAttributedString(
                 string: "Hide help",
-                attributes: [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor.linkColor, .underlineStyle: NSUnderlineStyle.single.rawValue]
+                attributes: [.font: AppSettingsStore.shared.applicationFont(size: 12), .foregroundColor: NSColor.linkColor, .underlineStyle: NSUnderlineStyle.single.rawValue]
             )
             helpToggle.toolTip = nil
             helpToggle.setAccessibilityLabel("Hide help")
         } else {
             helpToggle.attributedTitle = NSAttributedString(
                 string: "Show help",
-                attributes: [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor.linkColor]
+                attributes: [.font: AppSettingsStore.shared.applicationFont(size: 12), .foregroundColor: NSColor.linkColor]
             )
             helpToggle.image = AppKitFactory.resourceImage("Information", accessibilityDescription: "Show help")
             helpToggle.imagePosition = .imageLeading
@@ -1030,7 +1030,7 @@ private final class PullDialogViewController: NSViewController, NSWindowDelegate
         }
         value.append(NSAttributedString(
             string: title,
-            attributes: [.font: NSFont.systemFont(ofSize: NSFont.systemFontSize)]
+            attributes: [.font: AppSettingsStore.shared.applicationFont(size: NSFont.systemFontSize)]
         ))
         button.attributedTitle = value
         button.setAccessibilityLabel(title)
@@ -1150,9 +1150,9 @@ private final class PullProcessViewController: NSViewController, NSWindowDelegat
         progress.minValue = 0
         progress.maxValue = 100
         progress.widthAnchor.constraint(equalToConstant: 92).isActive = true
-        status.font = .boldSystemFont(ofSize: 12)
+        status.font = AppSettingsStore.shared.applicationFont(size: 12, weight: .bold)
         outputView.isEditable = false; outputView.isSelectable = true
-        outputView.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        outputView.font = AppSettingsStore.shared.fontPreferences.font(.monospace, fallback: .monospacedSystemFont(ofSize: 11, weight: .regular))
         outputView.textContainerInset = NSSize(width: 6, height: 6)
         outputView.frame = NSRect(x: 0, y: 0, width: 676, height: 330)
         outputView.minSize = .zero
@@ -1234,7 +1234,7 @@ private final class PullProcessViewController: NSViewController, NSWindowDelegat
     private func appendText(_ value: String, color: NSColor) {
         outputView.textStorage?.append(NSAttributedString(
             string: value,
-            attributes: [.font: NSFont.monospacedSystemFont(ofSize: 11, weight: .regular), .foregroundColor: color]
+            attributes: [.font: AppSettingsStore.shared.fontPreferences.font(.monospace, fallback: .monospacedSystemFont(ofSize: 11, weight: .regular)), .foregroundColor: color]
         ))
         outputView.scrollToEndOfDocument(nil)
     }
