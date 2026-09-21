@@ -16,6 +16,7 @@
 		FE0000000000000000000003 /* RevisionLinks.swift in Sources */ = {isa = PBXBuildFile; fileRef = FE0000000000000000000004 /* RevisionLinks.swift */; };
 		FE0000000000000000000005 /* ApplicationHotkeys.swift in Sources */ = {isa = PBXBuildFile; fileRef = FE0000000000000000000006 /* ApplicationHotkeys.swift */; };
 		FE0000000000000000000007 /* ApplicationColors.swift in Sources */ = {isa = PBXBuildFile; fileRef = FE0000000000000000000008 /* ApplicationColors.swift */; };
+		FC1000000000000000000003 /* CommandLogDialog.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC1000000000000000000004 /* CommandLogDialog.swift */; };
 		FE0000000000000000000009 /* Themes in Resources */ = {isa = PBXBuildFile; fileRef = FE000000000000000000000A /* Themes */; };
 		112BE999EC08DEEB28C3C42A /* RevisionGridViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = CD98877CA9D0868A1851B8C6 /* RevisionGridViewController.swift */; };
 		12738490E6DE54B1018899E3 /* GitExtensionsCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B6C91C19D614504FA0220624 /* GitExtensionsCore.framework */; };
@@ -93,6 +94,7 @@
 		FB0000000000000000000001 /* GitPatches.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB0000000000000000000002 /* GitPatches.swift */; };
 		FC0000000000000000000001 /* GitArchive.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC0000000000000000000002 /* GitArchive.swift */; };
 		FD0000000000000000000001 /* GitSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD0000000000000000000002 /* GitSettings.swift */; };
+		FC1000000000000000000001 /* CommandLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC1000000000000000000002 /* CommandLog.swift */; };
 		E20000000000000000000001 /* GitBisect.swift in Sources */ = {isa = PBXBuildFile; fileRef = E10000000000000000000001 /* GitBisect.swift */; };
 		FB0000000000000000000005 /* PatchDialogs.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB0000000000000000000006 /* PatchDialogs.swift */; };
 		FC0000000000000000000005 /* ArchiveDialog.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC0000000000000000000006 /* ArchiveDialog.swift */; };
@@ -100,6 +102,7 @@
 		FB0000000000000000000003 /* GitPatchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FB0000000000000000000004 /* GitPatchTests.swift */; };
 		FC0000000000000000000003 /* GitArchiveTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC0000000000000000000004 /* GitArchiveTests.swift */; };
 		FD0000000000000000000003 /* GitSettingsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD0000000000000000000004 /* GitSettingsTests.swift */; };
+		FC1000000000000000000005 /* CommandLogTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC1000000000000000000006 /* CommandLogTests.swift */; };
 		E20000000000000000000003 /* GitBisectTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E10000000000000000000003 /* GitBisectTests.swift */; };
 		F70000000000000000000001 /* GitReflog.swift in Sources */ = {isa = PBXBuildFile; fileRef = F71000000000000000000001 /* GitReflog.swift */; };
 F80000000000000000000001 /* GitWorktrees.swift in Sources */ = {isa = PBXBuildFile; fileRef = F81000000000000000000001 /* GitWorktrees.swift */; };
@@ -318,6 +321,7 @@ F80000000000000000000001 /* GitWorktrees.swift in Sources */ = {isa = PBXBuildFi
 		FB0000000000000000000002 /* GitPatches.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitPatches.swift; sourceTree = "<group>"; };
 		FC0000000000000000000002 /* GitArchive.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitArchive.swift; sourceTree = "<group>"; };
 		FD0000000000000000000002 /* GitSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitSettings.swift; sourceTree = "<group>"; };
+		FC1000000000000000000002 /* CommandLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandLog.swift; sourceTree = "<group>"; };
 		E10000000000000000000001 /* GitBisect.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GitBisect.swift; sourceTree = "<group>"; };
 		FB0000000000000000000006 /* PatchDialogs.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PatchDialogs.swift; sourceTree = "<group>"; };
 		FC0000000000000000000006 /* ArchiveDialog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ArchiveDialog.swift; sourceTree = "<group>"; };
@@ -325,6 +329,7 @@ F80000000000000000000001 /* GitWorktrees.swift in Sources */ = {isa = PBXBuildFi
 		FB0000000000000000000004 /* GitPatchTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitPatchTests.swift; sourceTree = "<group>"; };
 		FC0000000000000000000004 /* GitArchiveTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitArchiveTests.swift; sourceTree = "<group>"; };
 		FD0000000000000000000004 /* GitSettingsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitSettingsTests.swift; sourceTree = "<group>"; };
+		FC1000000000000000000006 /* CommandLogTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandLogTests.swift; sourceTree = "<group>"; };
 		E10000000000000000000003 /* GitBisectTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GitBisectTests.swift; sourceTree = "<group>"; };
 		F71000000000000000000001 /* GitReflog.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GitReflog.swift; sourceTree = "<group>"; };
 		F81000000000000000000001 /* GitWorktrees.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GitWorktrees.swift; sourceTree = "<group>"; };
@@ -355,6 +360,7 @@ F80000000000000000000001 /* GitWorktrees.swift in Sources */ = {isa = PBXBuildFi
 		FE0000000000000000000004 /* RevisionLinks.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = RevisionLinks.swift; sourceTree = "<group>"; };
 		FE0000000000000000000006 /* ApplicationHotkeys.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ApplicationHotkeys.swift; sourceTree = "<group>"; };
 		FE0000000000000000000008 /* ApplicationColors.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ApplicationColors.swift; sourceTree = "<group>"; };
+		FC1000000000000000000004 /* CommandLogDialog.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CommandLogDialog.swift; sourceTree = "<group>"; };
 		FE000000000000000000000A /* Themes */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Themes; sourceTree = "<group>"; };
 		BB4000000000000000000002 /* ApplicationShellDialogs.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ApplicationShellDialogs.swift; sourceTree = "<group>"; };
 		BB4000000000000000000003 /* CommitWorkflowDialog.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CommitWorkflowDialog.swift; sourceTree = "<group>"; };
@@ -536,6 +542,7 @@ F80000000000000000000001 /* GitWorktrees.swift in Sources */ = {isa = PBXBuildFi
 				FB0000000000000000000004 /* GitPatchTests.swift */,
 				FC0000000000000000000004 /* GitArchiveTests.swift */,
 				FD0000000000000000000004 /* GitSettingsTests.swift */,
+				FC1000000000000000000006 /* CommandLogTests.swift */,
 				E10000000000000000000003 /* GitBisectTests.swift */,
 				F71000000000000000000003 /* GitReflogTests.swift */,
 				F81000000000000000000003 /* GitWorktreeTests.swift */,
@@ -567,6 +574,7 @@ F80000000000000000000001 /* GitWorktrees.swift in Sources */ = {isa = PBXBuildFi
 				FE0000000000000000000004 /* RevisionLinks.swift */,
 				FE0000000000000000000006 /* ApplicationHotkeys.swift */,
 				FE0000000000000000000008 /* ApplicationColors.swift */,
+				FC1000000000000000000004 /* CommandLogDialog.swift */,
 				FE000000000000000000000A /* Themes */,
 				29791E05C5BDD2E38B9202F8 /* AppKitFactory.swift */,
 				9AEEB4C47C86C525342CF491 /* BrowserCommandCenter.swift */,
@@ -720,6 +728,7 @@ F80000000000000000000001 /* GitWorktrees.swift in Sources */ = {isa = PBXBuildFi
 				FB0000000000000000000002 /* GitPatches.swift */,
 				FC0000000000000000000002 /* GitArchive.swift */,
 				FD0000000000000000000002 /* GitSettings.swift */,
+				FC1000000000000000000002 /* CommandLog.swift */,
 				E10000000000000000000001 /* GitBisect.swift */,
 				F71000000000000000000001 /* GitReflog.swift */,
 				F81000000000000000000001 /* GitWorktrees.swift */,
@@ -1053,6 +1062,7 @@ F80000000000000000000001 /* GitWorktrees.swift in Sources */ = {isa = PBXBuildFi
 				FB0000000000000000000001 /* GitPatches.swift in Sources */,
 				FC0000000000000000000001 /* GitArchive.swift in Sources */,
 				FD0000000000000000000001 /* GitSettings.swift in Sources */,
+				FC1000000000000000000001 /* CommandLog.swift in Sources */,
 				E20000000000000000000001 /* GitBisect.swift in Sources */,
 				F70000000000000000000001 /* GitReflog.swift in Sources */,
 				F80000000000000000000001 /* GitWorktrees.swift in Sources */,
@@ -1088,6 +1098,7 @@ F80000000000000000000001 /* GitWorktrees.swift in Sources */ = {isa = PBXBuildFi
 				FB0000000000000000000003 /* GitPatchTests.swift in Sources */,
 				FC0000000000000000000003 /* GitArchiveTests.swift in Sources */,
 				FD0000000000000000000003 /* GitSettingsTests.swift in Sources */,
+				FC1000000000000000000005 /* CommandLogTests.swift in Sources */,
 				E20000000000000000000003 /* GitBisectTests.swift in Sources */,
 				F70000000000000000000003 /* GitReflogTests.swift in Sources */,
 				F80000000000000000000003 /* GitWorktreeTests.swift in Sources */,
@@ -1114,6 +1125,7 @@ F80000000000000000000001 /* GitWorktrees.swift in Sources */ = {isa = PBXBuildFi
 				FE0000000000000000000003 /* RevisionLinks.swift in Sources */,
 				FE0000000000000000000005 /* ApplicationHotkeys.swift in Sources */,
 				FE0000000000000000000007 /* ApplicationColors.swift in Sources */,
+				FC1000000000000000000003 /* CommandLogDialog.swift in Sources */,
 				4C0FD4E1EFBFC51F0389352A /* ApplicationShellDialogs.swift in Sources */,
 				354CE59B9C7864633744A808 /* BrowserCommandCenter.swift in Sources */,
 				875F07AC9062188009341ACC /* CheckoutBranchDialogs.swift in Sources */,

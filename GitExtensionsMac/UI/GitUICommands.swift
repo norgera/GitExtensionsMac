@@ -4,6 +4,7 @@ import AppKit
 
 @MainActor
 final class GitUICommands {
+    private static var commandLogWindow: CommandLogWindowController?
     private let repositoryModule: any RepositoryBrowsingDataSource
     private weak var browser: RepositoryBrowserViewController?
     let repositoryChangedNotifier: RepositoryChangedNotifier
@@ -69,6 +70,17 @@ final class GitUICommands {
                 controller.showWindow(nil); controller.window?.makeKeyAndOrderFront(nil)
             } catch { await MutationDialogs.showError(error, title: "Archive", window: owner) }
         }
+    }
+
+    static func startCommandLog() {
+        if commandLogWindow == nil {
+            let controller = CommandLogWindowController()
+            controller.onClose = { commandLogWindow = nil }
+            commandLogWindow = controller
+        }
+        commandLogWindow?.showWindow(nil)
+        commandLogWindow?.window?.deminiaturize(nil)
+        commandLogWindow?.window?.makeKeyAndOrderFront(nil)
     }
 
     func startSettings() {

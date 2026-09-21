@@ -111,19 +111,26 @@ package extension GitCommandRunning {
         standardInput: Data? = nil,
         environment: [String: String] = [:]
     ) async throws -> GitCommandResult {
-        let result = try await run(
-            arguments: command.arguments,
-            in: directory,
-            standardInput: standardInput,
-            environment: environment
-        )
-        return GitCommandResult(
-            arguments: result.arguments,
-            standardOutput: result.standardOutput,
-            standardError: result.standardError,
-            exitStatus: result.exitStatus,
-            executionClass: command.executionClass
-        )
+        let logID = CommandLog.shared.start(command, directory: directory)
+        do {
+            let result = try await CommandLogContext.entryID.withValue(logID) { try await run(
+                arguments: command.arguments,
+                in: directory,
+                standardInput: standardInput,
+                environment: environment
+            ) }
+            CommandLog.shared.finish(logID, result: result)
+            return GitCommandResult(
+                arguments: result.arguments,
+                standardOutput: result.standardOutput,
+                standardError: result.standardError,
+                exitStatus: result.exitStatus,
+                executionClass: command.executionClass
+            )
+        } catch {
+            CommandLog.shared.finish(logID, cancelled: error is CancellationError)
+            throw error
+        }
     }
 
     func runStreaming(
@@ -133,20 +140,27 @@ package extension GitCommandRunning {
         environment: [String: String] = [:],
         output: @escaping GitOutputHandler
     ) async throws -> GitCommandResult {
-        let result = try await runStreaming(
-            arguments: command.arguments,
-            in: directory,
-            standardInput: standardInput,
-            environment: environment,
-            output: output
-        )
-        return GitCommandResult(
-            arguments: result.arguments,
-            standardOutput: result.standardOutput,
-            standardError: result.standardError,
-            exitStatus: result.exitStatus,
-            executionClass: command.executionClass
-        )
+        let logID = CommandLog.shared.start(command, directory: directory)
+        do {
+            let result = try await CommandLogContext.entryID.withValue(logID) { try await runStreaming(
+                arguments: command.arguments,
+                in: directory,
+                standardInput: standardInput,
+                environment: environment,
+                output: output
+            ) }
+            CommandLog.shared.finish(logID, result: result)
+            return GitCommandResult(
+                arguments: result.arguments,
+                standardOutput: result.standardOutput,
+                standardError: result.standardError,
+                exitStatus: result.exitStatus,
+                executionClass: command.executionClass
+            )
+        } catch {
+            CommandLog.shared.finish(logID, cancelled: error is CancellationError)
+            throw error
+        }
     }
     func runStreaming(
         arguments: [String],
@@ -206,6 +220,7 @@ package final class GitProcess: GitCommandRunning, @unchecked Sendable {
         environment: [String: String],
         output: GitOutputHandler?
     ) async throws -> GitCommandResult {
+        CommandLog.shared.processStarted(CommandLogContext.entryID.wrappedValue, executable: executableURL)
         guard FileManager.default.isExecutableFile(atPath: executableURL.path) else {
             throw GitError.executableUnavailable(executableURL.path)
         }
@@ -218,6 +233,7 @@ package final class GitProcess: GitCommandRunning, @unchecked Sendable {
             environmentOverrides: environment,
             executionQueue: executionQueue,
             ioQueue: ioQueue,
+            logID: CommandLogContext.entryID.wrappedValue,
             outputHandler: output
         )
 
@@ -259,6 +275,7 @@ private enum GitProcessEnvironment {
 }
 
 private final class GitProcessExecution: @unchecked Sendable {
+    private let logID: UUID?
     private let executableURL: URL
     private let arguments: [String]
     private let directory: URL
@@ -279,6 +296,7 @@ private final class GitProcessExecution: @unchecked Sendable {
         environmentOverrides: [String: String],
         executionQueue: DispatchQueue,
         ioQueue: DispatchQueue,
+        logID: UUID?,
         outputHandler: GitOutputHandler?
     ) {
         self.executableURL = executableURL
@@ -288,6 +306,7 @@ private final class GitProcessExecution: @unchecked Sendable {
         self.environmentOverrides = environmentOverrides
         self.executionQueue = executionQueue
         self.ioQueue = ioQueue
+        self.logID = logID
         self.outputHandler = outputHandler
     }
 
@@ -338,6 +357,7 @@ private final class GitProcessExecution: @unchecked Sendable {
 
         do {
             try process.run()
+            CommandLog.shared.processStarted(logID, executable: executableURL, pid: process.processIdentifier)
         } catch {
             clearProcess()
             throw GitError.launchFailed(error.localizedDescription)

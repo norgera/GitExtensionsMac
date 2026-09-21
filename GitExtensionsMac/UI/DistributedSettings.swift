@@ -5,8 +5,6 @@ enum DistributedSettingsScope: String, CaseIterable {
     case effective, local, distributed, global
 }
 
-/// Application settings, not Git config. Local wins over the versionable
-/// working-directory file, which wins over existing native global preferences.
 @MainActor
 struct DistributedSettings {
     static let remoteBranches = "Detailed.GetRemoteBranchesDirectlyFromRemote"
@@ -16,7 +14,6 @@ struct DistributedSettings {
     let distributedURL: URL
 
     static func normalizedMergeLogCount(_ value: String) -> String? {
-        // Upstream NumberSetting<int>: empty/invalid input removes the override.
         Int32(value.trimmingCharacters(in: .whitespacesAndNewlines)).map(String.init)
     }
 
@@ -43,8 +40,6 @@ struct DistributedSettings {
         return result
     }
 
-    /// Read latest contents before writing: untouched keys, including Windows
-    /// settings we do not expose, must survive a Mac preference edit.
     @discardableResult
     static func write(_ edits: [String: String?], to url: URL) throws -> Bool {
         var values = try read(url)

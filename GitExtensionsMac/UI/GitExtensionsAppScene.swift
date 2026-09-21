@@ -1,9 +1,11 @@
 import SwiftUI
+import GitCommands
 
 package struct GitExtensionsAppScene: Scene {
     private let launch: RepositoryBrowserLaunch
 
     package init() {
+        CommandLog.shared.capturesCallStacks = UserDefaults.standard.bool(forKey: "GitExtensionsMac.commandLog.captureCallStacks")
         let arguments = CommandLine.arguments
         if arguments.contains("--dashboard") {
             launch = .dashboard
@@ -199,7 +201,7 @@ private struct GitExtensionsMenuCommands: Commands {
         }
 
         CommandMenu("Tools") {
-            Button("Git command log") { perform(.unavailable("Git command log")) }
+            Button("Git command log") { GitUICommands.startCommandLog() }
             Button("Settings…") { perform(.settings) }
                 .keyboardShortcut(hotkeys.shortcut("settings"))
             Divider()

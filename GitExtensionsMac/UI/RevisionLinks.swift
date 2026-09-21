@@ -1,8 +1,6 @@
 import Foundation
 import GitExtensionsCore
 
-/// User-defined application links, persisted using upstream's RevisionLinkDefs
-/// XML. These are presentation rules, not Git revision expressions or commands.
 struct RevisionLinkDefinition: Equatable {
     struct Format: Equatable { var caption: String; var format: String }
     var name = "<new>"
@@ -132,8 +130,6 @@ struct RevisionLinkDefinition: Equatable {
         } }
     }
 
-    /// Indexed string.Format substitutions (including escaped braces). Invalid
-    /// formats do not produce an actionable URL.
     static func format(_ template: String, groups: [String]) -> String? {
         var result = ""
         var remaining = template[...]
@@ -142,8 +138,6 @@ struct RevisionLinkDefinition: Equatable {
             if first == "{" {
                 if remaining.first == "{" { result.append("{"); remaining = remaining.dropFirst(); continue }
                 guard let end = remaining.firstIndex(of: "}") else { return nil }
-                // ExternalLinkFormat formats string captures with String.Format.
-                // Strings ignore a format specifier, but alignment still applies.
                 let item = remaining[..<end]
                 guard !item.contains("{") else { return nil }
                 let address = item.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)[0]
