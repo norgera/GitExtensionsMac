@@ -213,12 +213,25 @@ package final class GitProcess: GitCommandRunning, @unchecked Sendable {
         try await run(arguments: arguments, in: directory, standardInput: standardInput, environment: environment, output: output)
     }
 
+    package func startBackground(arguments: [String], in directory: URL,
+                                 environment: [String: String] = [:]) async throws -> Int32 {
+        let launch = BackgroundProcessLaunch()
+        Task.detached { [self] in
+            do {
+                _ = try await run(arguments: arguments, in: directory, standardInput: nil,
+                    environment: environment, output: nil, started: { launch.complete(.success($0)) })
+            } catch { launch.complete(.failure(error)) }
+        }
+        return try await launch.wait()
+    }
+
     private func run(
         arguments: [String],
         in directory: URL,
         standardInput: Data?,
         environment: [String: String],
-        output: GitOutputHandler?
+        output: GitOutputHandler?,
+        started: (@Sendable (Int32) -> Void)? = nil
     ) async throws -> GitCommandResult {
         CommandLog.shared.processStarted(CommandLogContext.entryID.wrappedValue, executable: executableURL)
         guard FileManager.default.isExecutableFile(atPath: executableURL.path) else {
@@ -234,13 +247,37 @@ package final class GitProcess: GitCommandRunning, @unchecked Sendable {
             executionQueue: executionQueue,
             ioQueue: ioQueue,
             logID: CommandLogContext.entryID.wrappedValue,
-            outputHandler: output
+            outputHandler: output,
+            started: started
         )
 
         return try await withTaskCancellationHandler {
             try await execution.result()
         } onCancel: {
             execution.cancel()
+        }
+    }
+}
+
+private final class BackgroundProcessLaunch: @unchecked Sendable {
+    private let lock = NSLock()
+    private var result: Result<Int32, Error>?
+    private var continuation: CheckedContinuation<Int32, Error>?
+
+    func complete(_ value: Result<Int32, Error>) {
+        lock.lock()
+        guard result == nil else { lock.unlock(); return }
+        result = value
+        let pending = continuation; continuation = nil
+        lock.unlock()
+        pending?.resume(with: value)
+    }
+
+    func wait() async throws -> Int32 {
+        try await withCheckedThrowingContinuation { pending in
+            lock.lock()
+            if let result { lock.unlock(); pending.resume(with: result) }
+            else { continuation = pending; lock.unlock() }
         }
     }
 }
@@ -275,6 +312,7 @@ private enum GitProcessEnvironment {
 }
 
 private final class GitProcessExecution: @unchecked Sendable {
+    private let started: (@Sendable (Int32) -> Void)?
     private let logID: UUID?
     private let executableURL: URL
     private let arguments: [String]
@@ -297,7 +335,8 @@ private final class GitProcessExecution: @unchecked Sendable {
         executionQueue: DispatchQueue,
         ioQueue: DispatchQueue,
         logID: UUID?,
-        outputHandler: GitOutputHandler?
+        outputHandler: GitOutputHandler?,
+        started: (@Sendable (Int32) -> Void)? = nil
     ) {
         self.executableURL = executableURL
         self.arguments = arguments
@@ -308,6 +347,7 @@ private final class GitProcessExecution: @unchecked Sendable {
         self.ioQueue = ioQueue
         self.logID = logID
         self.outputHandler = outputHandler
+        self.started = started
     }
 
     func result() async throws -> GitCommandResult {
@@ -341,9 +381,17 @@ private final class GitProcessExecution: @unchecked Sendable {
         process.executableURL = executableURL
         process.arguments = arguments
         process.currentDirectoryURL = directory
-        process.standardOutput = stdoutPipe
-        process.standardError = stderrPipe
-        process.standardInput = stdinPipe
+        if started != nil {
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            process.standardInput = FileHandle.nullDevice
+            try? stdoutPipe.fileHandleForWriting.close()
+            try? stderrPipe.fileHandleForWriting.close()
+        } else {
+            process.standardOutput = stdoutPipe
+            process.standardError = stderrPipe
+            process.standardInput = stdinPipe
+        }
 
         process.environment = GitProcessEnvironment.make(overrides: environmentOverrides)
 
@@ -357,6 +405,7 @@ private final class GitProcessExecution: @unchecked Sendable {
 
         do {
             try process.run()
+            started?(process.processIdentifier)
             CommandLog.shared.processStarted(logID, executable: executableURL, pid: process.processIdentifier)
         } catch {
             clearProcess()

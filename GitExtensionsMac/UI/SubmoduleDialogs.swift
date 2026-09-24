@@ -15,9 +15,11 @@ enum SubmoduleDialogs {
             owner.beginSheet(panel); controller.start()
         }
     }
-    static func resolveConflict(source: any RepositorySubmoduleManagingDataSource, path: String, owner: NSWindow) async -> Bool {
+    static func resolveConflict(source: any RepositorySubmoduleManagingDataSource, path: String, owner: NSWindow,
+                                scriptHooks: ((any RepositoryBrowsingDataSource) -> ApplicationScriptHooks)? = nil) async -> Bool {
         await withCheckedContinuation { continuation in
             let controller = SubmoduleConflictViewController(source: source, path: path) { continuation.resume(returning: $0) }
+            controller.scriptHooks = scriptHooks
             let panel = NSPanel(contentViewController: controller)
             panel.title = "Submodule conflict"; panel.styleMask = [.titled, .closable, .resizable]
             panel.setContentSize(NSSize(width: 595, height: 300)); panel.minSize = NSSize(width: 595, height: 280)
@@ -128,6 +130,7 @@ private final class SubmoduleProcessViewController: NSViewController, NSWindowDe
 
 @MainActor
 private final class SubmoduleConflictViewController: NSViewController, NSWindowDelegate {
+    var scriptHooks: ((any RepositoryBrowsingDataSource) -> ApplicationScriptHooks)?
     weak var panel: NSPanel?
     private let source: any RepositorySubmoduleManagingDataSource
     private let path: String
@@ -212,12 +215,13 @@ private final class SubmoduleConflictViewController: NSViewController, NSWindowD
                     onConflicts: { [weak self] in
                         guard let resolver = value.source as? any RepositoryConflictResolutionDataSource else { return }
                         Task { @MainActor in
-                            let changed = await WorkflowManagementDialogs.resolveConflicts(source: resolver, window: panel)
+                            let changed = await WorkflowManagementDialogs.resolveConflicts(source: resolver, window: panel, scriptHooks: self?.scriptHooks?(value.source))
                             if changed { self?.changed = true }; self?.reload()
                         }
                     },
                     onMerge: { _ in }, onRebase: { _ in },
                     onCheckoutCompleted: { [weak self] in self?.stageCurrent() })
+                coordinator?.scriptHooks = scriptHooks?(value.source)
                 coordinator?.checkoutBranch(initialTarget: nil)
             } catch { status.stringValue = error.localizedDescription }
         }

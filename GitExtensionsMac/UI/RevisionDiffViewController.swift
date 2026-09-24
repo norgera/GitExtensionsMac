@@ -3,6 +3,7 @@ import GitCommands
 import AppKit
 
 final class RevisionDiffViewController: RetainingSplitViewController {
+    var onScript: ((ScriptDefinition) -> Void)?
     var onFileMutation: ((String, [ChangedFile], ChangedFileSelectionScope) -> Void)?
     var onHunkMutation: ((RepositoryHunkSelection) -> Void)?
     var diffProvider: (@Sendable (Commit, ChangedFile, FileDiffOptions) async throws -> FileDiff?)?
@@ -17,6 +18,11 @@ final class RevisionDiffViewController: RetainingSplitViewController {
     private var selectedFileID: String?
     private var diffTask: Task<Void, Never>?
     private var didSetInitialDivider = false
+
+    var scriptFileContext: [String: [String]] {
+        ["SelectedRelativePaths": filesController.currentlySelectedFiles().map(\.path),
+         "LineNumber": [String(diffController.scriptLineNumber)], "ColumnNumber": ["1"]]
+    }
 
     init() {
         super.init(resizeBehavior: .fixedLeadingPane)
@@ -73,6 +79,7 @@ final class RevisionDiffViewController: RetainingSplitViewController {
                 }
             }
         }
+        filesController.onScript = { [weak self] in self?.onScript?($0) }
         filesController.onMutation = { [weak self] identifier, files, scope in
             self?.onFileMutation?(identifier, files, scope)
         }
@@ -156,6 +163,7 @@ private final class FileStatusOutlineView: NSOutlineView {
 }
 
 final class ChangedFilesViewController: NSViewController, NSOutlineViewDelegate, NSOutlineViewDataSource, NSMenuDelegate, NSTextFieldDelegate {
+    var onScript: ((ScriptDefinition) -> Void)?
     var onSelection: ((ChangedFile) -> Void)?
     var onMutation: ((String, [ChangedFile], ChangedFileSelectionScope) -> Void)?
     var onFileCommand: ((String, ChangedFile) -> Void)?
@@ -515,6 +523,11 @@ final class ChangedFilesViewController: NSViewController, NSOutlineViewDelegate,
             allFilesExist: selectedFiles.allSatisfy { $0.changeType != .deleted }
         )
         populatePlaceholderMenu(menu, with: ChangedFileContextMenuBuilder.build(context))
+        if onScript != nil {
+            let scripts = NSMenuItem(title: "Scripts", action: nil, keyEquivalent: "")
+            scripts.submenu = ApplicationScriptsMenu(placement: .files, execute: { [weak self] in self?.onScript?($0) })
+            menu.addItem(scripts)
+        }
         retargetMenuItems(
             in: menu,
             where: { ["file.stage", "file.unstage", "file.stageAll", "file.unstageAll"].contains($0) },
@@ -929,6 +942,13 @@ final class DiffContentViewController: NSViewController, NSTableViewDataSource, 
     private var currentFile: ChangedFile?
     private var currentDiff: FileDiff?
     var diffOptions: FileDiffOptions { preferences.diffOptions }
+
+    var scriptLineNumber: Int {
+        let row = tableView.selectedRow >= 0 ? tableView.selectedRow : caretRow
+        guard presentations.indices.contains(row) else { return 1 }
+        let line = presentations[row].line
+        return line.newLineNumber ?? line.oldLineNumber ?? 1
+    }
 
     override func loadView() {
         let root = DiffTrackingView()

@@ -4,6 +4,7 @@ import AppKit
 
 @MainActor
 final class CheckoutBranchWorkflowCoordinator {
+    var scriptHooks: ApplicationScriptHooks?
     private let source: any RepositoryCheckoutBranchDataSource
     private let stashSource: (any RepositoryStashDataSource)?
     private let pullSource: (any RepositoryPullingDataSource)?
@@ -114,7 +115,12 @@ final class CheckoutBranchWorkflowCoordinator {
                 }
 
                 onStatus("Checking out…")
-                var result = try await source.checkout(draft.request)
+                scriptHooks?.begin()
+                defer { scriptHooks?.end() }
+                let hooks = scriptHooks
+                var result = try await source.checkout(draft.request, beforeExecution: {
+                    guard await hooks?.run(.beforeCheckout) != false else { throw CancellationError() }
+                })
                 guard !Task.isCancelled else { return }
                 await publish(selected: result.selectedCommitID)
                 result = try await updateSubmodulesIfRequested(result, previousContext: startingContext, owner: owner)
@@ -128,8 +134,12 @@ final class CheckoutBranchWorkflowCoordinator {
                     await publish(selected: result.selectedCommitID)
                 }
                 present(result)
-                if case .completed = result.outcome { onCheckoutCompleted?() }
+                _ = await scriptHooks?.run(.afterCheckout)
+                if case .completed = result.outcome {
+                    onCheckoutCompleted?()
+                }
             } catch is CancellationError {
+                await refreshAfterFailure(previousSelection: previousSelection)
                 return
             } catch {
                 await refreshAfterFailure(previousSelection: previousSelection)
@@ -154,11 +164,17 @@ final class CheckoutBranchWorkflowCoordinator {
             ) else { onStatus("Checkout cancelled"); return }
             do {
                 onStatus("Checking out \(commit.shortID)…")
-                var result = try await source.checkout(request)
+                scriptHooks?.begin()
+                defer { scriptHooks?.end() }
+                let hooks = scriptHooks
+                var result = try await source.checkout(request, beforeExecution: {
+                    guard await hooks?.run(.beforeCheckout) != false else { throw CancellationError() }
+                })
                 guard !Task.isCancelled else { return }
                 await publish(selected: result.selectedCommitID)
                 result = try await updateSubmodulesIfRequested(result, previousContext: startingContext, owner: owner)
                 present(result)
+                _ = await scriptHooks?.run(.afterCheckout)
             } catch is CancellationError {
                 return
             } catch {

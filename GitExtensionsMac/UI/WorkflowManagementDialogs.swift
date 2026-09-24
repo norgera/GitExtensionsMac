@@ -21,7 +21,8 @@ enum WorkflowManagementDialogs {
         window: NSWindow,
         manageStashes: Bool = true,
         initialStash: String? = nil,
-        openWithDifftool: (@MainActor (Commit, ChangedFile) -> Void)? = nil
+        openWithDifftool: (@MainActor (Commit, ChangedFile) -> Void)? = nil,
+        scriptHooks: ApplicationScriptHooks? = nil
     ) async -> StashDialogResult {
         await StashDialog.present(
             source: source,
@@ -31,7 +32,7 @@ enum WorkflowManagementDialogs {
             owner: window,
             openWithDifftool: openWithDifftool,
             resolveConflicts: { stashWindow in
-                await resolveConflicts(source: source, window: stashWindow)
+                await resolveConflicts(source: source, window: stashWindow, scriptHooks: scriptHooks)
             }
         )
     }
@@ -39,50 +40,56 @@ enum WorkflowManagementDialogs {
     static func resolveConflicts(
         source: any RepositoryConflictResolutionDataSource,
         window: NSWindow,
-        offerCommit: Bool? = nil
+        offerCommit: Bool? = nil,
+        scriptHooks: ApplicationScriptHooks? = nil
     ) async -> Bool {
         await presentConflictResolver(
             source: source,
             window: window,
-            offerMergeCommit: offerCommit
+            offerMergeCommit: offerCommit, scriptHooks: scriptHooks
         ).repositoryChanged
     }
 
     static func resolveCherryPickConflicts(
         source: any RepositoryCherryPickDataSource,
-        window: NSWindow
+        window: NSWindow,
+        scriptHooks: ApplicationScriptHooks? = nil
     ) async -> ConflictResolutionResult {
-        await presentConflictResolver(source: source, window: window)
+        await presentConflictResolver(source: source, window: window, scriptHooks: scriptHooks)
     }
 
     static func resolveRevertConflicts(
         source: any RepositoryRevertingDataSource,
-        window: NSWindow
+        window: NSWindow,
+        scriptHooks: ApplicationScriptHooks? = nil
     ) async -> ConflictResolutionResult {
-        await presentConflictResolver(source: source, window: window)
+        await presentConflictResolver(source: source, window: window, scriptHooks: scriptHooks)
     }
 
     static func resolveMergeConflicts(
         source: any RepositoryMergingDataSource,
         offerCommit: Bool,
-        window: NSWindow
+        window: NSWindow,
+        scriptHooks: ApplicationScriptHooks? = nil
     ) async -> ConflictResolutionResult {
         await presentConflictResolver(
             source: source,
             window: window,
-            offerMergeCommit: offerCommit
+            offerMergeCommit: offerCommit, scriptHooks: scriptHooks
         )
     }
 
     private static func presentConflictResolver(
         source: any RepositoryConflictResolutionDataSource,
         window: NSWindow,
-        offerMergeCommit: Bool? = nil
+        offerMergeCommit: Bool? = nil,
+        scriptHooks: ApplicationScriptHooks? = nil
     ) async -> ConflictResolutionResult {
         let controller = ConflictResolverViewController(
             source: source,
             offerMergeCommit: offerMergeCommit
         )
+        controller.scriptHooks = scriptHooks
         let panel = NSPanel(contentViewController: controller)
         panel.title = "Resolve merge conflicts"
         panel.styleMask = [.titled, .closable, .resizable]
@@ -102,9 +109,11 @@ enum WorkflowManagementDialogs {
 
     static func manageRebase(
         source: any RepositoryRebaseDataSource,
-        window: NSWindow
+        window: NSWindow,
+        scriptHooks: ApplicationScriptHooks? = nil
     ) async -> Bool {
         let controller = RebaseManagerViewController(source: source)
+        controller.scriptHooks = scriptHooks
         let panel = NSPanel(contentViewController: controller)
         panel.title = "Rebase"
         panel.styleMask = [.titled, .closable, .resizable]
@@ -129,7 +138,8 @@ enum WorkflowManagementDialogs {
         initialActions: [ObjectID: RepositoryRebaseTodoAction],
         advancedFrom: String?,
         showAdvancedOptions: Bool,
-        window: NSWindow
+        window: NSWindow,
+        scriptHooks: ApplicationScriptHooks? = nil
     ) async -> Bool {
         let controller = RebaseManagerViewController(
             source: source,
@@ -139,6 +149,7 @@ enum WorkflowManagementDialogs {
             advancedFrom: advancedFrom,
             showAdvancedOptions: showAdvancedOptions
         )
+        controller.scriptHooks = scriptHooks
         let panel = NSPanel(contentViewController: controller)
         panel.title = "Rebase"
         panel.styleMask = [.titled, .closable, .resizable]
@@ -155,6 +166,7 @@ enum WorkflowManagementDialogs {
 
 @MainActor
 private final class RebaseManagerViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSWindowDelegate {
+    var scriptHooks: ApplicationScriptHooks?
     weak var panel: NSPanel?
     var onClose: ((Bool) -> Void)?
     private let source: any RepositoryRebaseDataSource
@@ -625,7 +637,7 @@ private final class RebaseManagerViewController: NSViewController, NSTableViewDa
         guard let panel else { return }
         task = Task { @MainActor [weak self] in
             guard let self else { return }
-            if await WorkflowManagementDialogs.resolveConflicts(source: source, window: panel) { repositoryChanged = true }
+            if await WorkflowManagementDialogs.resolveConflicts(source: source, window: panel, scriptHooks: scriptHooks) { repositoryChanged = true }
             task = nil; reload()
         }
     }
@@ -708,6 +720,7 @@ struct ConflictResolverActionState: Equatable {
 
 @MainActor
 private final class ConflictResolverViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSWindowDelegate, NSMenuDelegate {
+    var scriptHooks: ApplicationScriptHooks?
     weak var panel: NSPanel?
     var onClose: ((ConflictResolutionResult) -> Void)?
     private let source: any RepositoryConflictResolutionDataSource
@@ -1238,7 +1251,7 @@ private final class ConflictResolverViewController: NSViewController, NSTableVie
             do {
                 if let submodules = source as? any RepositorySubmoduleManagingDataSource, let panel {
                     for conflict in conflicts where conflict.isSubmodule {
-                        if await GitUICommands.resolveSubmoduleConflict(source: submodules, path: conflict.path, owner: panel) { repositoryChanged = true }
+                        if await GitUICommands.resolveSubmoduleConflict(source: submodules, path: conflict.path, owner: panel, scriptHooks: scriptHooks?.childHooks) { repositoryChanged = true }
                     }
                 }
                 let conflicts = conflicts.filter { !$0.isSubmodule }

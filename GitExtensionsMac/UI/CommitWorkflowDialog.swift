@@ -42,8 +42,12 @@ enum CommitWorkflowSpecialKind {
 @MainActor
 private final class CommitRootView: NSView {
     var onShortcut: ((CommitKeyboardShortcut) -> Bool)?
+    var onScriptShortcut: ((String) -> Void)?
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if window?.attachedSheet == nil, let command = ApplicationHotkeys.shared.matching(event, category: "Scripts") {
+            onScriptShortcut?(command); return true
+        }
         if let viewer = window?.firstResponder as? FileViewerTableView, viewer.performConfiguredShortcut(event) { return true }
         let configured = ApplicationHotkeys.shared.matching(event, category: "Commit")
             .flatMap { CommitKeyboardShortcut(rawValue: String($0.dropFirst("commit.".count).split(separator: ".")[0])) }
@@ -64,6 +68,7 @@ enum CommitWorkflowDialog {
         owner: NSWindow,
         onManageRemotes: ((String?, String?) -> Void)? = nil,
         onDifftool: ((Commit, ChangedFile) -> Void)? = nil,
+        scriptHooks: ApplicationScriptHooks? = nil,
         onRepositoryChanged: @escaping (RevisionID?) -> Void,
         onClose: @escaping () -> Void
     ) -> NSWindowController {
@@ -78,6 +83,7 @@ enum CommitWorkflowDialog {
             onDifftool: onDifftool,
             onRepositoryChanged: onRepositoryChanged
         )
+        controller.scriptHooks = scriptHooks
         let commitWindow = NSWindow(contentViewController: controller)
         commitWindow.title = "Commit"
         commitWindow.styleMask = [.titled, .closable, .miniaturizable, .resizable]
@@ -109,6 +115,7 @@ enum CommitWorkflowDialog {
 
 @MainActor
 private final class CommitWorkflowViewController: NSViewController, NSOutlineViewDataSource, NSOutlineViewDelegate, NSTextViewDelegate, NSSearchFieldDelegate, NSWindowDelegate, NSMenuDelegate {
+    var scriptHooks: ApplicationScriptHooks?
     private struct TemplateMenuValue {
         let template: CommitMessageTemplate
     }
@@ -237,6 +244,10 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
     override func loadView() {
         let root = CommitRootView()
         root.onShortcut = { [weak self] shortcut in self?.perform(shortcut: shortcut) ?? false }
+        root.onScriptShortcut = { [weak self] identifier in
+            guard let script = try? ApplicationScriptsStore.shared.load().first(where: { "script.\($0.hotkeyCommandIdentifier)" == identifier }) else { return }
+            self?.executeScript(script)
+        }
         commitDiffView.onApplyHunk = { [weak self] lineID, direction in
             self?.applySelectedHunk(lineID: lineID, direction: direction)
         }
@@ -1260,6 +1271,9 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
         }
         menu.removeAllItems()
         let files = selectedFiles(in: table)
+        let scripts = NSMenuItem(title: "Scripts", action: nil, keyEquivalent: "")
+        scripts.submenu = ApplicationScriptsMenu(placement: .files, execute: { [weak self] in self?.executeScript($0) })
+        menu.addItem(scripts)
         let mutation = NSMenuItem(
             title: table === unstagedTable ? "Stage selected" : "Unstage selected",
             action: table === unstagedTable ? #selector(stageSelected) : #selector(unstageSelected),
@@ -1616,6 +1630,9 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
         actionTask = Task { @MainActor [weak self, weak commitWindow] in
             guard let self, let commitWindow else { return }
             defer { actionTask = nil; updateButtonStates() }
+            scriptHooks?.begin()
+            defer { scriptHooks?.end() }
+            let originalMutationState = try? await source.loadMutationState()
             do {
                 let message = messageView.string
                 guard !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
@@ -1695,8 +1712,13 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
                 commitAndPushButton.isEnabled = false
                 status.stringValue = currentCommitMode == .normal ? "Committing…" : "Amending…"
                 let wasAmend = currentCommitMode != .normal
-                let result = try await source.commit(request)
+                let hooks = scriptHooks
+                let scriptContext = scriptFileContext
+                let result = try await source.commit(request, beforeExecution: {
+                    guard await hooks?.runWithOptions(.beforeCommit, options: scriptContext) != false else { throw CancellationError() }
+                })
                 onRepositoryChanged(result.selectedCommitID)
+                _ = await scriptHooks?.runWithOptions(.afterCommit, options: scriptContext)
                 let repositoryState = try await source.loadRepositoryState()
                 repositoryContext = repositoryState.commitContext
                 networkContext = repositoryState.networkContext
@@ -1732,14 +1754,35 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
                     reloadChanges()
                 }
             } catch is CancellationError {
+                if let before = originalMutationState, let after = try? await source.loadMutationState(), before != after {
+                    onRepositoryChanged(nil)
+                }
                 status.stringValue = "Commit cancelled."
                 reloadChanges(preserveMessage: true)
                 return
             } catch {
+                if let before = originalMutationState, let after = try? await source.loadMutationState(), before != after {
+                    onRepositoryChanged(nil)
+                }
                 status.stringValue = error.localizedDescription
                 await showOperationError(error, title: "Commit failed")
                 reloadChanges(preserveMessage: true)
             }
+        }
+    }
+
+    private var scriptFileContext: [String: [String]] {
+        ["SelectedRelativePaths": selectedPaths(in: unstagedTable) + selectedPaths(in: stagedTable),
+         "LineNumber": [String(commitDiffView.scriptLineNumber)], "ColumnNumber": ["1"]]
+    }
+
+    private func executeScript(_ script: ScriptDefinition) {
+        guard actionTask == nil, let run = scriptHooks?.manualRun else { return }
+        actionTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { actionTask = nil; updateButtonStates() }
+            _ = await run(script, scriptFileContext)
+            reloadChanges(preserveMessage: true)
         }
     }
 
@@ -1848,6 +1891,7 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
             executeImmediately: true,
             initialForceWithLease: forceWithLease,
             onManageRemotes: onManageRemotes ?? { _, _ in },
+            scriptHooks: scriptHooks,
             onRepositoryChanged: { [weak self] selected in
                 self?.onRepositoryChanged(selected)
                 self?.reloadChanges(preserveMessage: true)
@@ -1970,9 +2014,16 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
         alert.accessoryView = popup
         guard await begin(alert, window: window) == .alertFirstButtonReturn,
               let name = popup.titleOfSelectedItem else { return false }
+        scriptHooks?.begin()
+        defer { scriptHooks?.end() }
         do {
-            let result = try await source.checkout(RepositoryCheckoutRequest(target: .localBranch(name), localChanges: .keep))
+            let hooks = scriptHooks
+            let context = scriptFileContext
+            let result = try await source.checkout(RepositoryCheckoutRequest(target: .localBranch(name), localChanges: .keep), beforeExecution: {
+                guard await hooks?.runWithOptions(.beforeCheckout, options: context) != false else { throw CancellationError() }
+            })
             onRepositoryChanged(result.selectedCommitID)
+            _ = await hooks?.runWithOptions(.afterCheckout, options: context)
             reloadChanges(preserveMessage: true)
             return true
         } catch {
@@ -1985,7 +2036,7 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
         guard let commitWindow else { return }
         actionTask = Task { @MainActor [weak self, weak commitWindow] in
             guard let self, let commitWindow else { return }
-            if await WorkflowManagementDialogs.resolveConflicts(source: source, window: commitWindow) {
+            if await WorkflowManagementDialogs.resolveConflicts(source: source, window: commitWindow, scriptHooks: scriptHooks) {
                 onRepositoryChanged(nil)
             }
             actionTask = nil
@@ -2328,6 +2379,12 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
 
 @MainActor
 private final class CommitDiffView: NSView, NSTableViewDataSource, NSTableViewDelegate {
+    var scriptLineNumber: Int {
+        let row = tableView.selectedRow >= 0 ? tableView.selectedRow : caretRow
+        guard presentations.indices.contains(row) else { return 1 }
+        let line = presentations[row].line
+        return line.newLineNumber ?? line.oldLineNumber ?? 1
+    }
     private let tableView = FileViewerTableView()
     private let trackingView = DiffTrackingView()
     private let hoverToolbar = DiffViewerToolbar(preferences: AppSettingsStore.shared.preferencesForNewFileViewer())

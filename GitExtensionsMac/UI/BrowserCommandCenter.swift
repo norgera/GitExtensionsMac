@@ -14,6 +14,7 @@ enum BrowserCommand: Equatable, Sendable {
     case cloneRepository
     case initializeRepository
     case settings
+    case scripts
     case clearRecentRepositories
     case openRecentRepository(URL)
     case openRepositoryAtRevisions(URL, [RevisionID])

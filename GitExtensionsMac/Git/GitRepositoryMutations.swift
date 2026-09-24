@@ -581,7 +581,15 @@ package protocol RepositoryCommitDataSource: RepositoryStagingDataSource {
     func loadCommitState(historyLimit: Int, showOnlyMyMessages: Bool, rememberAmend: Bool) async throws -> RepositoryCommitState
     func saveCommitDraft(message: String, amend: Bool, rememberAmend: Bool, encoding: String?) async throws
     func commit(_ request: RepositoryCommitRequest) async throws -> RepositoryMutationResult
+    func commit(_ request: RepositoryCommitRequest, beforeExecution: @escaping @Sendable () async throws -> Void) async throws -> RepositoryMutationResult
     func resetSoftToParent() async throws -> RepositoryMutationResult
+}
+
+package extension RepositoryCommitDataSource {
+    func commit(_ request: RepositoryCommitRequest, beforeExecution: @escaping @Sendable () async throws -> Void) async throws -> RepositoryMutationResult {
+        try await beforeExecution()
+        return try await commit(request)
+    }
 }
 
 package protocol RepositoryStashDataSource: RepositoryMutationStateDataSource {
@@ -658,6 +666,10 @@ extension GitRepositoryModule: RepositoryBrowserMutationDataSource, RepositorySt
     }
 
     package func checkout(_ request: RepositoryCheckoutRequest) async throws -> RepositoryMutationResult {
+        try await checkout(request, beforeExecution: {})
+    }
+
+    package func checkout(_ request: RepositoryCheckoutRequest, beforeExecution: @escaping @Sendable () async throws -> Void) async throws -> RepositoryMutationResult {
         guard let repository = resolvedRepository else {
             throw RepositoryMutationError.unavailable
         }
@@ -676,6 +688,7 @@ extension GitRepositoryModule: RepositoryBrowserMutationDataSource, RepositorySt
             shouldReapplyStash = reapply
         }
 
+        try await beforeExecution()
         let checkoutArguments = try await checkoutArguments(for: request, state: before, repository: repository)
         do {
             _ = try await checkedMutation(checkoutArguments, in: repository)
@@ -924,6 +937,10 @@ extension GitRepositoryModule: RepositoryBrowserMutationDataSource, RepositorySt
     }
 
     package func commit(_ request: RepositoryCommitRequest) async throws -> RepositoryMutationResult {
+        try await commit(request, beforeExecution: {})
+    }
+
+    package func commit(_ request: RepositoryCommitRequest, beforeExecution: @escaping @Sendable () async throws -> Void) async throws -> RepositoryMutationResult {
         let repository = try mutationRepository()
         guard !request.message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw RepositoryMutationError.emptyCommitMessage
@@ -973,6 +990,7 @@ extension GitRepositoryModule: RepositoryBrowserMutationDataSource, RepositorySt
         let messageURL = repository.gitDirectoryURL.appendingPathComponent(isMerge ? "MERGE_MSG" : "COMMITMESSAGE")
         try messageData.write(to: messageURL, options: .atomic)
 
+        try await beforeExecution()
         let arguments = GitCommitCommandBuilder.arguments(
             request: request,
             messageFile: messageURL.path,

@@ -7,6 +7,9 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		FC2000000000000000000001 /* ScriptExecution.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC2000000000000000000002; };
+		FC2000000000000000000003 /* ApplicationScripts.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC2000000000000000000004; };
+		FC2000000000000000000005 /* ApplicationScriptsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC2000000000000000000006; };
 		033992BBA2E8906DB9F26ECF /* GitParsers.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000002 /* GitParsers.swift */; };
 		07E9D0F67EB72584374CD9C7 /* GitForWindows.png in Resources */ = {isa = PBXBuildFile; fileRef = 18380254780F2F71655E1BD8 /* GitForWindows.png */; };
 		093E973EC3EA24ACC2B8342F /* RepositoryBrowserViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = DAB34393DFAAB78EA77D71CF /* RepositoryBrowserViewController.swift */; };
@@ -263,6 +266,9 @@ F80000000000000000000001 /* GitWorktrees.swift in Sources */ = {isa = PBXBuildFi
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		FC2000000000000000000002 /* ScriptExecution.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScriptExecution.swift; sourceTree = "<group>"; };
+		FC2000000000000000000004 /* ApplicationScripts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ApplicationScripts.swift; sourceTree = "<group>"; };
+		FC2000000000000000000006 /* ApplicationScriptsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ApplicationScriptsTests.swift; sourceTree = "<group>"; };
 		0294C9B5CC6C3650E63E15C5 /* GitExtensionsAppScene.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GitExtensionsAppScene.swift; sourceTree = "<group>"; };
 		08DEF6BF0625ADBEED676B3F /* Push.png */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = image.png; path = Push.png; sourceTree = "<group>"; };
 		0C987A792115F7C216AE0623 /* WorkTree.png */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = image.png; path = WorkTree.png; sourceTree = "<group>"; };
@@ -543,6 +549,7 @@ F80000000000000000000001 /* GitWorktrees.swift in Sources */ = {isa = PBXBuildFi
 				FC0000000000000000000004 /* GitArchiveTests.swift */,
 				FD0000000000000000000004 /* GitSettingsTests.swift */,
 				FC1000000000000000000006 /* CommandLogTests.swift */,
+				FC2000000000000000000006 /* ApplicationScriptsTests.swift */,
 				E10000000000000000000003 /* GitBisectTests.swift */,
 				F71000000000000000000003 /* GitReflogTests.swift */,
 				F81000000000000000000003 /* GitWorktreeTests.swift */,
@@ -575,6 +582,7 @@ F80000000000000000000001 /* GitWorktrees.swift in Sources */ = {isa = PBXBuildFi
 				FE0000000000000000000006 /* ApplicationHotkeys.swift */,
 				FE0000000000000000000008 /* ApplicationColors.swift */,
 				FC1000000000000000000004 /* CommandLogDialog.swift */,
+				FC2000000000000000000004 /* ApplicationScripts.swift */,
 				FE000000000000000000000A /* Themes */,
 				29791E05C5BDD2E38B9202F8 /* AppKitFactory.swift */,
 				9AEEB4C47C86C525342CF491 /* BrowserCommandCenter.swift */,
@@ -729,6 +737,7 @@ F80000000000000000000001 /* GitWorktrees.swift in Sources */ = {isa = PBXBuildFi
 				FC0000000000000000000002 /* GitArchive.swift */,
 				FD0000000000000000000002 /* GitSettings.swift */,
 				FC1000000000000000000002 /* CommandLog.swift */,
+				FC2000000000000000000002 /* ScriptExecution.swift */,
 				E10000000000000000000001 /* GitBisect.swift */,
 				F71000000000000000000001 /* GitReflog.swift */,
 				F81000000000000000000001 /* GitWorktrees.swift */,
@@ -1063,6 +1072,7 @@ F80000000000000000000001 /* GitWorktrees.swift in Sources */ = {isa = PBXBuildFi
 				FC0000000000000000000001 /* GitArchive.swift in Sources */,
 				FD0000000000000000000001 /* GitSettings.swift in Sources */,
 				FC1000000000000000000001 /* CommandLog.swift in Sources */,
+				FC2000000000000000000001 /* ScriptExecution.swift in Sources */,
 				E20000000000000000000001 /* GitBisect.swift in Sources */,
 				F70000000000000000000001 /* GitReflog.swift in Sources */,
 				F80000000000000000000001 /* GitWorktrees.swift in Sources */,
@@ -1099,6 +1109,7 @@ F80000000000000000000001 /* GitWorktrees.swift in Sources */ = {isa = PBXBuildFi
 				FC0000000000000000000003 /* GitArchiveTests.swift in Sources */,
 				FD0000000000000000000003 /* GitSettingsTests.swift in Sources */,
 				FC1000000000000000000005 /* CommandLogTests.swift in Sources */,
+				FC2000000000000000000005 /* ApplicationScriptsTests.swift in Sources */,
 				E20000000000000000000003 /* GitBisectTests.swift in Sources */,
 				F70000000000000000000003 /* GitReflogTests.swift in Sources */,
 				F80000000000000000000003 /* GitWorktreeTests.swift in Sources */,
@@ -1126,6 +1137,7 @@ F80000000000000000000001 /* GitWorktrees.swift in Sources */ = {isa = PBXBuildFi
 				FE0000000000000000000005 /* ApplicationHotkeys.swift in Sources */,
 				FE0000000000000000000007 /* ApplicationColors.swift in Sources */,
 				FC1000000000000000000003 /* CommandLogDialog.swift in Sources */,
+				FC2000000000000000000003 /* ApplicationScripts.swift in Sources */,
 				4C0FD4E1EFBFC51F0389352A /* ApplicationShellDialogs.swift in Sources */,
 				354CE59B9C7864633744A808 /* BrowserCommandCenter.swift in Sources */,
 				875F07AC9062188009341ACC /* CheckoutBranchDialogs.swift in Sources */,

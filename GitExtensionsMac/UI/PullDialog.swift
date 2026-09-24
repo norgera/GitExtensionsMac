@@ -27,6 +27,7 @@ extension ApplicationShellDialogs {
         context: RepositoryNetworkContext,
         source: any RepositoryPullingDataSource,
         onManageRemotes: @escaping (String?, String?) -> Void,
+        scriptHooks: ApplicationScriptHooks? = nil,
         onRepositoryChanged: @escaping (RevisionID?) -> Void,
         onClose: @escaping () -> Void
     ) -> NSWindowController {
@@ -38,6 +39,7 @@ extension ApplicationShellDialogs {
             onManageRemotes: onManageRemotes,
             onRepositoryChanged: onRepositoryChanged
         )
+        controller.scriptHooks = scriptHooks
         let window = NSWindow(contentViewController: controller)
         window.title = "Pull (\(context.repository.path))"
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
@@ -58,6 +60,7 @@ extension ApplicationShellDialogs {
 
 @MainActor
 private final class PullDialogViewController: NSViewController, NSWindowDelegate, NSComboBoxDelegate {
+    var scriptHooks: ApplicationScriptHooks?
     var onClose: (() -> Void)?
 
     private let initialAction: NetworkDialogInitialAction
@@ -574,19 +577,31 @@ private final class PullDialogViewController: NSViewController, NSWindowDelegate
             defer { operationTask = nil }
             guard let prepared = await prepare(request) else { return }
             persistExecutionChoices(prepared)
-            let process = await PullProcessDialog.run(request: prepared, source: source, parent: window)
+            scriptHooks?.begin()
+            defer { scriptHooks?.end() }
+            let hooks = scriptHooks
+            let process = await PullProcessDialog.run(request: prepared, source: source, parent: window, beforeExecution: {
+                if prepared.mode != .fetch, await hooks?.run(.beforePull) == false { throw CancellationError() }
+                guard await hooks?.run(.beforeFetch) != false else { throw CancellationError() }
+            })
             switch process {
             case .success(let result):
                 onRepositoryChanged(result.selectedCommitID)
                 statusLabel.stringValue = result.message
+                var runAfterScripts = result.outcome == .completed
                 if case .conflicts = result.outcome {
-                    if await WorkflowManagementDialogs.resolveConflicts(source: source, window: window) {
+                    if await WorkflowManagementDialogs.resolveConflicts(source: source, window: window, scriptHooks: scriptHooks) {
+                        runAfterScripts = true
                         onRepositoryChanged(result.selectedCommitID)
                     }
                 } else if result.automaticStashCreated, result.outcome == .completed {
                     await handleAutomaticStash()
                 }
                 if let remote = result.suggestsRemotePrune { await offerRemotePrune(remote) }
+                if runAfterScripts {
+                    _ = await scriptHooks?.run(.afterFetch)
+                    if prepared.mode != .fetch { _ = await scriptHooks?.run(.afterPull) }
+                }
                 view.window?.performClose(nil)
             case .failure(let error):
                 statusLabel.stringValue = error is CancellationError ? "Aborted" : error.localizedDescription
@@ -760,9 +775,15 @@ private final class PullDialogViewController: NSViewController, NSWindowDelegate
         alert.accessoryView = selector
         guard await begin(alert) == .alertFirstButtonReturn,
               let name = selector.titleOfSelectedItem else { return false }
+        scriptHooks?.begin()
+        defer { scriptHooks?.end() }
         do {
-            let result = try await source.checkout(RepositoryCheckoutRequest(target: .localBranch(name), localChanges: .keep))
+            let hooks = scriptHooks
+            let result = try await source.checkout(RepositoryCheckoutRequest(target: .localBranch(name), localChanges: .keep), beforeExecution: {
+                guard await hooks?.run(.beforeCheckout) != false else { throw CancellationError() }
+            })
             onRepositoryChanged(result.selectedCommitID)
+            _ = await hooks?.run(.afterCheckout)
             localBranchField.stringValue = name
             return true
         } catch {
@@ -820,7 +841,7 @@ private final class PullDialogViewController: NSViewController, NSWindowDelegate
             statusLabel.stringValue = result.message
             if case .conflicts = result.outcome,
                let window = view.window,
-               await WorkflowManagementDialogs.resolveConflicts(source: source, window: window) {
+               await WorkflowManagementDialogs.resolveConflicts(source: source, window: window, scriptHooks: scriptHooks) {
                 onRepositoryChanged(result.selectedCommitID)
             }
         } catch { await showError(error, title: "Automatic stash could not be applied") }
@@ -904,7 +925,7 @@ private final class PullDialogViewController: NSViewController, NSWindowDelegate
         guard operationTask == nil, let window = view.window else { return }
         operationTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            if await WorkflowManagementDialogs.resolveConflicts(source: source, window: window) {
+            if await WorkflowManagementDialogs.resolveConflicts(source: source, window: window, scriptHooks: scriptHooks) {
                 onRepositoryChanged(context.headID.map(RevisionID.object))
             }
             operationTask = nil
@@ -1072,15 +1093,28 @@ enum PullProcessDialog {
     static func run(
         request: RepositoryPullRequest,
         source: any RepositoryPullingDataSource,
-        parent: NSWindow
+        parent: NSWindow,
+        beforeExecution: @escaping @Sendable () async throws -> Void = {},
+        scriptHooks: ApplicationScriptHooks? = nil
     ) async -> Result<RepositoryPullResult, Error>? {
+        scriptHooks?.begin()
+        defer { scriptHooks?.end() }
         let title = request.mode == .fetch ? "Fetch" : "Pull"
         let initialStatus = request.mode == .fetch
             ? "Fetching…"
             : (request.mode == .rebase ? "Pulling with rebase…" : "Pulling with merge…")
-        return await run(title: title, initialStatus: initialStatus, parent: parent) { output in
-            try await source.performPull(request, output: output)
+        let result = await run(title: title, initialStatus: initialStatus, parent: parent) { output in
+            try await source.performPull(request, beforeExecution: {
+                try await beforeExecution()
+                if request.mode != .fetch, await scriptHooks?.run(.beforePull) == false { throw CancellationError() }
+                guard await scriptHooks?.run(.beforeFetch) != false else { throw CancellationError() }
+            }, output: output)
         }
+        if case .success(let value) = result, value.outcome == .completed {
+            _ = await scriptHooks?.run(.afterFetch)
+            if request.mode != .fetch { _ = await scriptHooks?.run(.afterPull) }
+        }
+        return result
     }
 
     static func runPrune(

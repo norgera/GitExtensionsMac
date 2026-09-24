@@ -5,6 +5,8 @@ import AppKit
 @MainActor
 final class GitUICommands {
     private static var commandLogWindow: CommandLogWindowController?
+    private var scriptsWindow: ScriptsWindowController?
+    private var scriptTask: Task<Void, Never>?
     private let repositoryModule: any RepositoryBrowsingDataSource
     private weak var browser: RepositoryBrowserViewController?
     let repositoryChangedNotifier: RepositoryChangedNotifier
@@ -72,6 +74,133 @@ final class GitUICommands {
         }
     }
 
+    func startScripts() {
+        guard let browser, let identity = browser.repositoryIdentity else { return }
+        if let scriptsWindow { scriptsWindow.showWindow(nil); scriptsWindow.window?.makeKeyAndOrderFront(nil); return }
+        let directory = URL(fileURLWithPath: identity.currentRepository.path, isDirectory: true)
+        do {
+            let controller = try ScriptsWindowController(execute: { [weak self] script, completion in
+                guard let self else { return }
+                scriptTask = Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    do {
+                        let options = try await scriptOptions(for: script)
+                        try ScriptExecution.validateContext(script.arguments, options: options, beforePrompts: true)
+                        guard let script = await ScriptPrompts.resolve(script, options: options) else {
+                            completion(.failure(CancellationError())); scriptTask = nil; return
+                        }
+                        let invocation = try ScriptExecution.invocation(script, directory: directory, options: options,
+                            gitExecutable: URL(fileURLWithPath: AppSettingsStore.shared.preferences.gitExecutablePath),
+                            applicationExecutable: Bundle.main.executableURL)
+                        if script.isPowerShell || (script.runInBackground && !script.command.hasPrefix("navigateTo:")) {
+                            completion(.success(try await ScriptExecution.startBackground(invocation)))
+                        } else {
+                            let result = try await ScriptExecution.run(invocation, output: { _ in })
+                            try await finishScript(script, result: result)
+                            completion(.success(.completed(result)))
+                        }
+                    } catch { completion(.failure(error)) }
+                    scriptTask = nil
+                }
+            }, cancel: { [weak self] in self?.scriptTask?.cancel() })
+            scriptsWindow = controller
+            controller.showWindow(nil); controller.window?.makeKeyAndOrderFront(nil)
+        } catch { NSAlert(error: error).runModal() }
+    }
+
+    private func scriptOptions(for script: ScriptDefinition, module: (any RepositoryBrowsingDataSource)? = nil, context: [String: [String]] = [:]) async throws -> [String: [String]] {
+        guard let source = (module ?? repositoryModule) as? any RepositoryScriptContextDataSource else { return [:] }
+        let selected = module == nil ? browser?.workflowRevisionSelection.compactMap(\.objectID) ?? [] : []
+        var options = try await source.scriptContext(selected: selected, arguments: script.arguments)
+        if module == nil, let browser {
+            let revisions = browser.workflowRevisionSelection.compactMap { id in browser.revisions.first { $0.id == id } }
+            options.merge(ScriptExecution.selectedRevisionOptions(revisions)) { _, value in value }
+        }
+        let fileContext = module == nil ? browser?.scriptFileContext : nil
+        options.merge(fileContext ?? ["SelectedRelativePaths": [], "LineNumber": ["1"], "ColumnNumber": ["1"]]) { _, value in value }
+        options.merge(context) { _, value in value }
+        for key in options.keys.sorted() where key != "sHashes" && script.arguments.contains("{\(key)}") {
+            guard let values = options[key], values.count > 1 else { continue }
+            let alert = NSAlert(); alert.messageText = "Select \(key)"
+            let choices = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 400, height: 26))
+            choices.addItems(withTitles: values); alert.accessoryView = choices
+            alert.addButton(withTitle: "OK"); alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { throw CancellationError() }
+            options[key] = [values[choices.indexOfSelectedItem]]
+        }
+        return options
+    }
+
+    func startScript(_ script: ScriptDefinition) {
+        Task { @MainActor in
+            var script = script
+            script.enabled = true
+            _ = await runScriptEvent(script.onEvent, definitions: [script])
+        }
+    }
+
+    func runScriptEvent(_ event: ScriptEvent, module: (any RepositoryBrowsingDataSource)? = nil, definitions: [ScriptDefinition]? = nil, context: [String: [String]] = [:]) async -> Bool {
+        do {
+            return try await ApplicationScriptEvents.run(event, scripts: definitions ?? ApplicationScriptsStore.shared.load()) { [self] script in
+                guard !script.command.isEmpty else { return false }
+                if script.askConfirmation {
+                    let alert = NSAlert(); alert.messageText = "Execute script ‘\(script.displayName)’?"
+                    alert.addButton(withTitle: "Execute"); alert.addButton(withTitle: "Cancel")
+                    guard alert.runModal() == .alertFirstButtonReturn else { return false }
+                }
+                let options = try await scriptOptions(for: script, module: module, context: context)
+                try ScriptExecution.validateContext(script.arguments, options: options, beforePrompts: true)
+                guard let prepared = await ScriptPrompts.resolve(script, options: options) else { return false }
+                guard let directory = options["WorkingDir"]?.first else { return false }
+                let invocation = try ScriptExecution.invocation(prepared,
+                    directory: URL(fileURLWithPath: directory), options: options,
+                    gitExecutable: URL(fileURLWithPath: AppSettingsStore.shared.preferences.gitExecutablePath),
+                    applicationExecutable: Bundle.main.executableURL)
+                if script.isPowerShell || (script.runInBackground && !script.command.hasPrefix("navigateTo:")) {
+                    _ = try await ScriptExecution.startBackground(invocation)
+                    return true
+                }
+                let result = try await ScriptProcessWindow.run(invocation, title: script.displayName, owner: browser?.view.window)
+                try await finishScript(script, result: result, module: module)
+                if script.command.hasPrefix("navigateTo:") || result.succeeded { return true }
+                let alert = NSAlert(); alert.messageText = "Script failed: \(script.displayName)"
+                alert.informativeText = "Exit code: \(result.exitStatus)\n" + result.standardErrorString
+                alert.runModal(); return false
+            }
+        } catch is CancellationError { return false }
+        catch { NSAlert(error: error).runModal(); return false }
+    }
+
+    private func finishScript(_ script: ScriptDefinition, result: GitCommandResult, module: (any RepositoryBrowsingDataSource)? = nil) async throws {
+        if script.command.hasPrefix("navigateTo:") {
+            if let expression = result.standardOutputString.components(separatedBy: "\n").first, !expression.isEmpty,
+               let source = (module ?? repositoryModule) as? any RepositoryScriptContextDataSource {
+                let id = try await source.scriptRevision(expression.trimmingCharacters(in: .whitespacesAndNewlines))
+                if module == nil { browser?.selectScriptRevision(id) }
+            }
+        } else if result.succeeded { notifyRepositoryChanged() }
+    }
+
+    var scriptHooks: ApplicationScriptHooks {
+        scriptHooks(for: nil)
+    }
+
+    private func scriptHooks(for module: (any RepositoryBrowsingDataSource)?) -> ApplicationScriptHooks {
+        let notifier = repositoryChangedNotifier
+        return ApplicationScriptHooks(begin: { notifier.lock() },
+            end: { notifier.unlock(requestNotify: false) },
+            run: { [weak self] event in await self?.runScriptEvent(event, module: module) ?? false },
+            contextualRun: { [weak self] event, context in
+                await self?.runScriptEvent(event, module: module, context: context) ?? false
+            },
+            manualRun: { [weak self] script, context in
+                var script = script; script.enabled = true
+                return await self?.runScriptEvent(script.onEvent, module: module, definitions: [script], context: context) ?? false
+            }, childHooks: { [weak self] module in
+                self?.scriptHooks(for: module) ?? ApplicationScriptHooks(begin: {}, end: {}, run: { _ in false })
+            })
+    }
+
     static func startCommandLog() {
         if commandLogWindow == nil {
             let controller = CommandLogWindowController()
@@ -126,7 +255,7 @@ final class GitUICommands {
             currentBranch: browser.repositoryReferences?.branches.first(where: \.isCurrent)?.name,
             initialFile: file, viewPatch: { [weak self] file in self?.startPatch(.view, file: file) },
             changed: { [weak self, weak browser] in self?.notifyRepositoryChanged(preferredCommitID: browser?.selectedCommitID) },
-            conflicts: { window in await WorkflowManagementDialogs.resolveConflicts(source: source, window: window, offerCommit: false) },
+            conflicts: { [weak self] window in await WorkflowManagementDialogs.resolveConflicts(source: source, window: window, offerCommit: false, scriptHooks: self?.scriptHooks) },
             closed: { [weak self] in self?.patchWindows[id] = nil })
         patchWindows[id] = controller
         controller.window?.setFrameOrigin(NSPoint(x: owner.frame.minX + 30, y: owner.frame.minY + 30))
@@ -159,8 +288,10 @@ final class GitUICommands {
             }, closed: { [weak self] in self?.submoduleWindowController = nil })
     }
 
-    static func resolveSubmoduleConflict(source: any RepositorySubmoduleManagingDataSource, path: String, owner: NSWindow) async -> Bool {
-        await SubmoduleDialogs.resolveConflict(source: source, path: path, owner: owner)
+    static func resolveSubmoduleConflict(source: any RepositorySubmoduleManagingDataSource, path: String, owner: NSWindow,
+                                        scriptHooks: ((any RepositoryBrowsingDataSource) -> ApplicationScriptHooks)? = nil) async -> Bool {
+        await SubmoduleDialogs.resolveConflict(source: source, path: path, owner: owner,
+            scriptHooks: scriptHooks)
     }
 
     func startSubmoduleAction(_ action: RepositorySubmoduleAction) {
@@ -249,10 +380,10 @@ final class GitUICommands {
                         guard let self, let remotes = child as? any RepositoryRemoteManagingDataSource else { return }
                         self.submoduleRemoteWindowController = RemoteManagementDialog.present(source: remotes, selectedRemote: remote, selectedLocalBranch: branch,
                             onFetchRemote: { name, owner in
-                                _ = await PullProcessDialog.run(request: RepositoryPullRequest(source: .remote(name), mode: .fetch), source: pullSource, parent: owner)
+                                _ = await PullProcessDialog.run(request: RepositoryPullRequest(source: .remote(name), mode: .fetch), source: pullSource, parent: owner, scriptHooks: self.scriptHooks(for: child))
                             }, onRepositoryChanged: { [weak self] in self?.notifyRepositoryChanged() },
                             onClose: { [weak self] in self?.submoduleRemoteWindowController = nil })
-                    }, onRepositoryChanged: { [weak self] _ in self?.notifyRepositoryChanged() },
+                    }, scriptHooks: scriptHooks(for: child), onRepositoryChanged: { [weak self] _ in self?.notifyRepositoryChanged() },
                     onClose: { [weak self] in self?.submodulePullWindowController = nil })
             } catch { if let owner = browser?.view.window { worktreeError(error.localizedDescription, owner: owner) } }
         }
@@ -277,9 +408,9 @@ final class GitUICommands {
                             guard let self, let remotes = child as? any RepositoryRemoteManagingDataSource else { return }
                             self.submoduleRemoteWindowController = RemoteManagementDialog.present(source: remotes, selectedRemote: remote, selectedLocalBranch: branch,
                                 onFetchRemote: { name, window in
-                                    if let pull = child as? any RepositoryPullingDataSource { _ = await PullProcessDialog.run(request: .init(source: .remote(name), mode: .fetch), source: pull, parent: window) }
+                                    if let pull = child as? any RepositoryPullingDataSource { _ = await PullProcessDialog.run(request: .init(source: .remote(name), mode: .fetch), source: pull, parent: window, scriptHooks: self.scriptHooks(for: child)) }
                                 }, onRepositoryChanged: { [weak self] in self?.notifyRepositoryChanged() }, onClose: { [weak self] in self?.submoduleRemoteWindowController = nil })
-                        }, onRepositoryChanged: { [weak self] _ in self?.notifyRepositoryChanged() }, onClose: { [weak self] in self?.submoduleCommitWindowController = nil })
+                        }, scriptHooks: scriptHooks(for: child), onRepositoryChanged: { [weak self] _ in self?.notifyRepositoryChanged() }, onClose: { [weak self] in self?.submoduleCommitWindowController = nil })
                 case .stash:
                     guard let stash = child as? any RepositoryStashDataSource else { return }
                     let before = try await child.loadRepositoryState().navigation.stashes
@@ -443,6 +574,7 @@ final class GitUICommands {
             onManageRemotes: { [weak self] remote, localBranch in
                 self?.startRemoteManagement(selectedRemote: remote, selectedLocalBranch: localBranch)
             },
+            scriptHooks: scriptHooks,
             onRepositoryChanged: { [weak self, weak browser] selected in
                 self?.notifyRepositoryChanged(preferredCommitID: selected ?? browser?.selectedCommitID)
             },
@@ -468,10 +600,13 @@ final class GitUICommands {
               let source = repositoryModule as? any RepositoryPullingDataSource else { return }
         Task { @MainActor [weak self, weak browser, weak window] in
             guard let self, let browser, let window else { return }
+            scriptHooks.begin()
+            defer { scriptHooks.end() }
             let processResult = await PullProcessDialog.run(
                 request: RepositoryPullRequest(source: .remote(remote), mode: .fetch, prune: prune),
                 source: source,
-                parent: window
+                parent: window,
+                scriptHooks: scriptHooks
             )
             switch processResult {
             case .success(let result):
@@ -491,6 +626,8 @@ final class GitUICommands {
               let source = repositoryModule as? any RepositoryRemoteManagingDataSource else { return }
         Task { @MainActor [weak self, weak browser, weak window] in
             guard let self, let browser, let window else { return }
+            scriptHooks.begin()
+            defer { scriptHooks.end() }
             do {
                 try await source.setRemote(named: remote, disabled: disabled)
                 if fetchAfterEnabling,
@@ -498,7 +635,8 @@ final class GitUICommands {
                     let result = await PullProcessDialog.run(
                         request: RepositoryPullRequest(source: .remote(remote), mode: .fetch),
                         source: pullSource,
-                        parent: window
+                        parent: window,
+                        scriptHooks: scriptHooks
                     )
                     if case .success(let fetched) = result {
                         browser.statusLabel.stringValue = fetched.message
@@ -546,11 +684,14 @@ final class GitUICommands {
 
     private func fetchAfterSavingRemote(named remote: String, parent: NSWindow) async {
         guard let source = repositoryModule as? any RepositoryPullingDataSource else { return }
+        scriptHooks.begin()
+        defer { scriptHooks.end() }
         let request = RepositoryPullRequest(source: .remote(remote), mode: .fetch)
         guard let processResult = await PullProcessDialog.run(
             request: request,
             source: source,
-            parent: parent
+            parent: parent,
+            scriptHooks: scriptHooks
         ) else { return }
         switch processResult {
         case .success(let result):
@@ -584,6 +725,7 @@ final class GitUICommands {
             onManageRemotes: { [weak self] remote, localBranch in
                 self?.startRemoteManagement(selectedRemote: remote, selectedLocalBranch: localBranch)
             },
+            scriptHooks: scriptHooks,
             onRepositoryChanged: { [weak self, weak browser] preferredCommitID in
                 self?.notifyRepositoryChanged(preferredCommitID: preferredCommitID ?? browser?.selectedCommitID)
             },
@@ -704,7 +846,7 @@ final class GitUICommands {
                         }
                         let resolution = await WorkflowManagementDialogs.resolveRevertConflicts(
                             source: source,
-                            window: window
+                            window: window, scriptHooks: scriptHooks
                         )
                         if resolution.repositoryChanged {
                             notifyRepositoryChanged(preferredCommitID: preferredCommitID)
@@ -1155,6 +1297,8 @@ final class GitUICommands {
                 initial = value
                 do {
                     let target = try await source.resolveTagTarget(value.target)
+                    scriptHooks.begin()
+                    defer { scriptHooks.end() }
                     let result = try await source.createTag(RepositoryCreateTagRequest(
                         name: value.name,
                         target: target,
@@ -1168,7 +1312,8 @@ final class GitUICommands {
                         let processResult = await PushProcessDialog.run(
                             request: RepositoryPushRequest(destination: .remote(remote), operation: .tag(value.name)),
                             source: pushSource,
-                            parent: window
+                            parent: window,
+                            scriptHooks: scriptHooks
                         )
                         self.notifyRepositoryChanged(preferredCommitID: result.selectedCommitID)
                         if case .success(let pushed)? = processResult {
@@ -1221,6 +1366,8 @@ final class GitUICommands {
             ) {
                 initial = value
                 do {
+                    scriptHooks.begin()
+                    defer { scriptHooks.end() }
                     let result = try await source.deleteTag(named: value.name)
                     if value.deleteFromRemote,
                        !value.remote.isEmpty,
@@ -1231,7 +1378,8 @@ final class GitUICommands {
                                 operation: .deleteTag(value.name)
                             ),
                             source: pushSource,
-                            parent: window
+                            parent: window,
+                            scriptHooks: scriptHooks
                         )
                         self.notifyRepositoryChanged(preferredCommitID: browser.selectedCommitID)
                         if case .success(let pushed)? = processResult {
@@ -1302,6 +1450,7 @@ final class GitUICommands {
                 self?.startRebase(on: commit, interactive: false)
             }
         )
+        coordinator.scriptHooks = scriptHooks
         if retainOnBrowser { browser.checkoutBranchWorkflowCoordinator = coordinator }
         return coordinator
     }
@@ -1319,7 +1468,7 @@ final class GitUICommands {
             let refreshed = await WorkflowManagementDialogs.resolveConflicts(
                 source: source,
                 window: window,
-                offerCommit: offerCommit
+                offerCommit: offerCommit, scriptHooks: scriptHooks
             )
             if refreshed {
                 self.notifyRepositoryChanged(preferredCommitID: browser.selectedCommitID)
@@ -1346,7 +1495,7 @@ final class GitUICommands {
                 initialStash: initialStash,
                 openWithDifftool: { [weak self] commit, file in
                     self?.startDifftool(commit: commit, file: file)
-                }
+                }, scriptHooks: scriptHooks
             )
             if result.repositoryChanged {
                 self.notifyRepositoryChanged(

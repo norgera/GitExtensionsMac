@@ -11,6 +11,7 @@ enum PushDialog {
         executeImmediately: Bool = false,
         initialForceWithLease: Bool = false,
         onManageRemotes: @escaping (String?, String?) -> Void,
+        scriptHooks: ApplicationScriptHooks? = nil,
         onRepositoryChanged: @escaping (RevisionID?) -> Void,
         onCompletion: ((Bool) -> Void)? = nil,
         onClose: @escaping () -> Void
@@ -24,6 +25,7 @@ enum PushDialog {
             onManageRemotes: onManageRemotes,
             onRepositoryChanged: onRepositoryChanged
         )
+        controller.scriptHooks = scriptHooks
         let window = NSWindow(contentViewController: controller)
         window.title = "Push (\(context.repository.path))"
         window.styleMask = [.titled, .closable, .resizable]
@@ -44,6 +46,7 @@ enum PushDialog {
 @MainActor
 private final class PushDialogViewController: NSViewController,
     NSWindowDelegate, NSComboBoxDelegate, NSTextFieldDelegate, NSTabViewDelegate, NSTableViewDataSource, NSTableViewDelegate {
+    var scriptHooks: ApplicationScriptHooks?
     private static let allRefs = "[ All ]"
     private static let head = "HEAD"
 
@@ -744,7 +747,10 @@ private final class PushDialogViewController: NSViewController,
                     return
                 }
                 persistExecutionPreferences(request)
+                scriptHooks?.begin()
+                defer { scriptHooks?.end() }
                 while true {
+                    guard await scriptHooks?.run(.beforePush) != false else { operationTask = nil; return }
                     guard let processResult = await PushProcessDialog.run(request: request, source: source, parent: window) else {
                         statusLabel.stringValue = "Push cancelled"
                         break
@@ -760,6 +766,10 @@ private final class PushDialogViewController: NSViewController,
                         onRepositoryChanged(result.selectedCommitID)
                         statusLabel.stringValue = result.message
                         if result.outcome == .completed {
+                            let operation = try? await source.loadMutationState()
+                            if operation.map({ !$0.mergeInProgress && !$0.cherryPickInProgress && !$0.revertInProgress && !$0.rebaseInProgress }) ?? true {
+                                _ = await scriptHooks?.run(.afterPush)
+                            }
                             lastPushCompleted = true
                             openPullRequestIfRequested(request: request)
                             self.window?.close()
@@ -992,7 +1002,7 @@ private final class PushDialogViewController: NSViewController,
             includeUntrackedInAutoStash: pullPreferences.includeUntrackedInAutoStash,
             updateSubmodulesAfterPull: pullPreferences.updateSubmodulesAfterPull == true
         )
-        guard let pullResult = await PullProcessDialog.run(request: pullRequest, source: source, parent: window) else { return nil }
+        guard let pullResult = await PullProcessDialog.run(request: pullRequest, source: source, parent: window, scriptHooks: scriptHooks) else { return nil }
         switch pullResult {
         case .success(let value) where value.outcome == .completed:
             onRepositoryChanged(value.selectedCommitID)
@@ -1146,6 +1156,7 @@ enum RemoteBranchDeleteDialog {
         source: any RepositoryPushingDataSource,
         initialRemote: String,
         initialBranch: String,
+        scriptHooks: ApplicationScriptHooks? = nil,
         onRepositoryChanged: @escaping (RevisionID?) -> Void,
         onClose: @escaping () -> Void
     ) -> NSWindowController {
@@ -1157,6 +1168,7 @@ enum RemoteBranchDeleteDialog {
             onClose: onClose
         )
         let window = NSWindow(contentViewController: controller)
+        controller.scriptHooks = scriptHooks
         window.title = "Delete branch"
         window.styleMask = [.titled, .closable]
         window.setContentSize(NSSize(width: 403, height: 150))
@@ -1173,6 +1185,7 @@ enum RemoteBranchDeleteDialog {
 
 @MainActor
 private final class RemoteBranchDeleteViewController: NSViewController, NSWindowDelegate {
+    var scriptHooks: ApplicationScriptHooks?
     weak var window: NSWindow?
     private let source: any RepositoryPushingDataSource
     private let initialRemote: String
@@ -1401,6 +1414,8 @@ private final class RemoteBranchDeleteViewController: NSViewController, NSWindow
                 }
             }
 
+            scriptHooks?.begin()
+            defer { scriptHooks?.end() }
             let grouped = Dictionary(grouping: selectedBranches.compactMap(splitRemoteBranch), by: \.remote)
             for remote in grouped.keys.sorted() {
                 let actions = (grouped[remote] ?? []).map {
@@ -1411,7 +1426,7 @@ private final class RemoteBranchDeleteViewController: NSViewController, NSWindow
                     operation: .multiple(actions),
                     recursiveSubmodules: .none
                 )
-                guard let processResult = await PushProcessDialog.run(request: request, source: source, parent: window) else {
+                guard let processResult = await PushProcessDialog.run(request: request, source: source, parent: window, scriptHooks: scriptHooks) else {
                     status.stringValue = "Deletion cancelled"
                     task = nil
                     deleteOptionsChanged()
@@ -1499,8 +1514,12 @@ enum PushProcessDialog {
     static func run(
         request: RepositoryPushRequest,
         source: any RepositoryPushingDataSource,
-        parent: NSWindow
+        parent: NSWindow,
+        scriptHooks: ApplicationScriptHooks? = nil
     ) async -> Result<RepositoryPushResult, Error>? {
+        scriptHooks?.begin()
+        defer { scriptHooks?.end() }
+        guard await scriptHooks?.run(.beforePush) != false else { return nil }
         let controller = PushProcessViewController(initialStatus: "Pushing…") { output in
             try await source.performPush(request, output: output)
         }
@@ -1511,7 +1530,7 @@ enum PushProcessDialog {
         panel.minSize = NSSize(width: 520, height: 300)
         controller.panel = panel
         panel.delegate = controller
-        return await withCheckedContinuation { continuation in
+        let result: Result<RepositoryPushResult, Error>? = await withCheckedContinuation { continuation in
             controller.onClose = { result in
                 if parent.attachedSheet === panel { parent.endSheet(panel) }
                 continuation.resume(returning: result)
@@ -1519,6 +1538,10 @@ enum PushProcessDialog {
             parent.beginSheet(panel)
             controller.start()
         }
+        if case .success(let value) = result, value.outcome == .completed {
+            _ = await scriptHooks?.run(.afterPush)
+        }
+        return result
     }
 }
 

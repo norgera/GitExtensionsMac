@@ -39,7 +39,12 @@ struct ApplicationHotkeyDefinition {
 @MainActor
 final class ApplicationHotkeys: ObservableObject {
     static let shared = ApplicationHotkeys()
-    static let definitions: [ApplicationHotkeyDefinition] = {
+    static var definitions: [ApplicationHotkeyDefinition] {
+        baseDefinitions + ((try? ApplicationScriptsStore.shared.load()) ?? []).map {
+            .init(id: "script.\($0.hotkeyCommandIdentifier)", category: "Scripts", title: $0.displayName, defaultChord: .init(""))
+        }
+    }
+    private static let baseDefinitions: [ApplicationHotkeyDefinition] = {
         let menu: [(String, String, ApplicationKeyChord)] = [
             ("openRepository", "Open repository", .init("o", .command)),
             ("closeToDashboard", "Close to Dashboard", .init("w", [.command, .shift])),

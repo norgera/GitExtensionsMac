@@ -201,6 +201,7 @@ private struct GitExtensionsMenuCommands: Commands {
         }
 
         CommandMenu("Tools") {
+            Button("Scripts…") { perform(.scripts) }
             Button("Git command log") { GitUICommands.startCommandLog() }
             Button("Settings…") { perform(.settings) }
                 .keyboardShortcut(hotkeys.shortcut("settings"))

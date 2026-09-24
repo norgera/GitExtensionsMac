@@ -993,6 +993,7 @@ private final class SettingsViewController: NSViewController, NSOutlineViewDataS
                 SettingsNode("fonts", "Fonts"), SettingsNode("console", "Console style")
             ]),
             SettingsNode("revision_links", "Revision links"),
+            SettingsNode("scripts", "Scripts"),
             SettingsNode("hotkeys", "Hotkeys"),
             SettingsNode("advanced", "Advanced", [SettingsNode("confirmations", "Confirmations")]),
             SettingsNode("detailed", "Detailed", [
@@ -1372,6 +1373,12 @@ private final class SettingsViewController: NSViewController, NSOutlineViewDataS
                 }
                 content.arrangedSubviews.dropFirst().forEach(disable)
             }
+        case "scripts":
+            content.addArrangedSubview(note("Scripts are application preferences, shared across repositories. Configure event hooks, prompts, background execution and context-menu actions in the Scripts window. Keyboard assignments are under Hotkeys → Scripts."))
+            let button = CallbackButton(title: "Configure scripts…", target: nil, action: #selector(CallbackButton.invoke))
+            button.target = button
+            button.callback = { BrowserCommandCenter.perform(.scripts) }
+            content.addArrangedSubview(button)
         case "hotkeys":
             showHotkeys()
         case "ssh":
@@ -1530,11 +1537,13 @@ private final class SettingsViewController: NSViewController, NSOutlineViewDataS
 
     private func showHotkeys() {
         if hotkeyDraft == nil { hotkeyDraft = store.hotkeyOverrides }
-        content.addArrangedSubview(popup("Control:", values: ["Browse", "Revision grid", "Commit", "File viewer"], selected: hotkeyCategory) { value in
+        let categories = ApplicationHotkeys.definitions.map(\.category).reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }
+        content.addArrangedSubview(popup("Control:", values: categories, selected: hotkeyCategory) { value in
             self.hotkeyCategory = value
             self.showCategory(SettingsNode("hotkeys", "Hotkeys"))
         })
         let commands = ApplicationHotkeys.definitions.filter { $0.category == hotkeyCategory }
+        guard !commands.isEmpty else { return }
         if !commands.contains(where: { $0.id == hotkeyCommand }) { hotkeyCommand = commands[0].id }
         content.addArrangedSubview(popup("Command:", values: commands.map(\.title), selected: commands.first { $0.id == hotkeyCommand }!.title) { value in
             self.hotkeyCommand = commands.first { $0.title == value }!.id

@@ -4,7 +4,11 @@ import AppKit
 
 private final class BrowserShortcutRootView: NSView {
     var onFocusPane: ((String) -> Void)?
+    var onScript: ((String) -> Void)?
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if window?.attachedSheet == nil, let command = ApplicationHotkeys.shared.matching(event, category: "Scripts") {
+            onScript?(command); return true
+        }
         guard window?.attachedSheet == nil,
               let command = ApplicationHotkeys.shared.matching(event, category: "Browse panes") else {
             return super.performKeyEquivalent(with: event)
@@ -142,6 +146,8 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
     var commitDraft: CommitDialogDraft?
     private var openingSelection: [RevisionID]
     var workflowRevisionSelection: [RevisionID] { revisionGridController.selectedRevisionIDs }
+    var scriptFileContext: [String: [String]] { revisionDiffController.scriptFileContext }
+    func selectScriptRevision(_ id: ObjectID) { revisionGridController.selectCommit(id: .object(id)) }
 
     init(repositoryModule: any RepositoryBrowsingDataSource, openingSelection: [RevisionID] = []) {
         self.repositoryModule = repositoryModule
@@ -185,6 +191,12 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
 
         let root = BrowserShortcutRootView()
         root.onFocusPane = { [weak self] in self?.focusPane($0) }
+        root.onScript = { [weak self] identifier in
+            guard let script = try? ApplicationScriptsStore.shared.load().first(where: { "script.\($0.hotkeyCommandIdentifier)" == identifier }) else { return }
+            self?.uiCommands.startScript(script)
+        }
+        revisionGridController.onScript = { [weak self] in self?.uiCommands.startScript($0) }
+        revisionDiffController.onScript = { [weak self] in self?.uiCommands.startScript($0) }
         let browserToolbar = makeBrowserToolbar()
         let bisectBanner = makeBisectBanner()
         let rebaseBanner = makeRebaseBanner()
@@ -539,9 +551,10 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
         stack.addArrangedSubview(spacer)
         let scripts = AppKitFactory.popUp("Scripts", width: 58)
-        scripts.addItems(withTitles: ["Open terminal here", "Run repository script…"])
-        scripts.target = self
-        scripts.action = #selector(placeholderPopUp(_:))
+        scripts.pullsDown = true
+        scripts.menu = ApplicationScriptsMenu(placement: .toolbar,
+            execute: { [weak self] in self?.uiCommands.startScript($0) },
+            manage: { [weak self] in self?.uiCommands.startScripts() })
         stack.addArrangedSubview(scripts)
 
         background.addSubview(stack)
@@ -983,6 +996,8 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             if let commit = revisions.first(where: { $0.id == selectedCommitID && !$0.isArtificial }) {
                 uiCommands.startRebase(on: commit, interactive: false, showAdvancedOptions: true)
             }
+        case .scripts:
+            uiCommands.startScripts()
         case .settings:
             uiCommands.startSettings()
         case .showStatus(let message):
@@ -1810,6 +1825,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             source: pushSource,
             initialRemote: remote,
             initialBranch: branch.name,
+            scriptHooks: uiCommands.scriptHooks,
             onRepositoryChanged: { [weak self] preferredCommitID in
                 self?.uiCommands.notifyRepositoryChanged(
                     preferredCommitID: preferredCommitID ?? self?.selectedCommitID
@@ -2138,6 +2154,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             initialTarget: initialTarget,
             distributedSettings: distributedSettings,
             owner: owner,
+            scriptHooks: uiCommands.scriptHooks,
             onRepositoryChanged: { [weak self] selected in
                 guard let self else { return }
                 uiCommands.notifyRepositoryChanged(preferredCommitID: selected ?? previousSelection)
@@ -2175,6 +2192,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
                 )
             },
             onDifftool: { [weak self] commit, file in self?.uiCommands.startDifftool(commit: commit, file: file) },
+            scriptHooks: uiCommands.scriptHooks,
             onRepositoryChanged: { [weak self] selected in
                 guard let self else { return }
                 commitDraft = nil
@@ -2255,7 +2273,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
                 case .conflicts(let paths):
                     statusLabel.stringValue = "\(result.message) \(paths.count) conflicted path(s) remain."
                     if await MutationDialogs.confirmResolveStashConflicts(paths: paths, window: window),
-                       await WorkflowManagementDialogs.resolveConflicts(source: mutationSource, window: window) {
+                       await WorkflowManagementDialogs.resolveConflicts(source: mutationSource, window: window, scriptHooks: uiCommands.scriptHooks) {
                         uiCommands.notifyRepositoryChanged(preferredCommitID: result.selectedCommitID ?? previousSelection)
                         statusLabel.stringValue = "Repository refreshed after resolving stash conflicts."
                     }
@@ -2367,7 +2385,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
                         }
                         let resolution = await WorkflowManagementDialogs.resolveCherryPickConflicts(
                             source: mutationSource,
-                            window: window
+                            window: window, scriptHooks: uiCommands.scriptHooks
                         )
                         if resolution.repositoryChanged {
                             uiCommands.notifyRepositoryChanged(preferredCommitID: preferredCommitID)
@@ -2465,7 +2483,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
                 initialActions: initialActions,
                 advancedFrom: advancedFrom,
                 showAdvancedOptions: showAdvancedOptions,
-                window: window
+                window: window, scriptHooks: uiCommands.scriptHooks
             ) {
                 uiCommands.notifyRepositoryChanged(preferredCommitID: previousSelection)
                 statusLabel.stringValue = "Repository refreshed after Rebase."
@@ -2589,7 +2607,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         mutationTask?.cancel()
         mutationTask = Task { @MainActor [weak self, weak window] in
             guard let self, let window else { return }
-            if await WorkflowManagementDialogs.resolveConflicts(source: source, window: window) {
+            if await WorkflowManagementDialogs.resolveConflicts(source: source, window: window, scriptHooks: uiCommands.scriptHooks) {
                 uiCommands.notifyRepositoryChanged(preferredCommitID: selectedCommitID)
             }
             refreshOperationIndicators()
@@ -2601,7 +2619,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         mutationTask?.cancel()
         mutationTask = Task { @MainActor [weak self, weak window] in
             guard let self, let window else { return }
-            if await WorkflowManagementDialogs.manageRebase(source: source, window: window) {
+            if await WorkflowManagementDialogs.manageRebase(source: source, window: window, scriptHooks: uiCommands.scriptHooks) {
                 uiCommands.notifyRepositoryChanged(preferredCommitID: selectedCommitID)
             }
             refreshOperationIndicators()

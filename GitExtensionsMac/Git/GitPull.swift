@@ -165,6 +165,16 @@ package protocol RepositoryPullingDataSource:
         _ request: RepositoryPullRequest,
         output: @escaping GitOutputHandler
     ) async throws -> RepositoryPullResult
+    func performPull(_ request: RepositoryPullRequest, beforeExecution: @escaping @Sendable () async throws -> Void,
+                     output: @escaping GitOutputHandler) async throws -> RepositoryPullResult
+}
+
+package extension RepositoryPullingDataSource {
+    func performPull(_ request: RepositoryPullRequest, beforeExecution: @escaping @Sendable () async throws -> Void,
+                     output: @escaping GitOutputHandler) async throws -> RepositoryPullResult {
+        try await beforeExecution()
+        return try await performPull(request, output: output)
+    }
 }
 
 enum GitPullCommandBuilder {
@@ -336,6 +346,11 @@ extension GitRepositoryModule: RepositoryPullingDataSource {
         _ request: RepositoryPullRequest,
         output: @escaping GitOutputHandler
     ) async throws -> RepositoryPullResult {
+        try await performPull(request, beforeExecution: {}, output: output)
+    }
+
+    package func performPull(_ request: RepositoryPullRequest, beforeExecution: @escaping @Sendable () async throws -> Void,
+                             output: @escaping GitOutputHandler) async throws -> RepositoryPullResult {
         guard let repository = resolvedRepository else { throw RepositoryPullError.unavailable }
         if repository.isBare, request.mode != .fetch { throw RepositoryPullError.bareRepository }
         let before = try await loadPullState()
@@ -360,6 +375,7 @@ extension GitRepositoryModule: RepositoryPullingDataSource {
             automaticStashCreated = newStash != nil && newStash != oldStash
         }
 
+        try await beforeExecution()
         let fetchParallel = try await optionalConfig("fetch.parallel", repository: repository) == nil
         let submoduleJobs = try await optionalConfig("submodule.fetchjobs", repository: repository) == nil
         let arguments = try GitPullCommandBuilder.arguments(

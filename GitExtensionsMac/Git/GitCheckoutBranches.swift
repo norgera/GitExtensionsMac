@@ -1,6 +1,13 @@
 import GitExtensionsCore
 import Foundation
 
+package extension RepositoryCheckoutBranchDataSource {
+    func checkout(_ request: RepositoryCheckoutRequest, beforeExecution: @escaping @Sendable () async throws -> Void) async throws -> RepositoryMutationResult {
+        try await beforeExecution()
+        return try await checkout(request)
+    }
+}
+
 package enum RepositoryBranchCreationMode: Hashable, Sendable {
     case normal
     case orphan(clearWorkingDirectoryAndIndex: Bool)
@@ -138,6 +145,7 @@ package enum RepositoryBranchError: LocalizedError, Sendable {
 
 package protocol RepositoryCheckoutBranchDataSource: RepositoryMutationStateDataSource {
     func checkout(_ request: RepositoryCheckoutRequest) async throws -> RepositoryMutationResult
+    func checkout(_ request: RepositoryCheckoutRequest, beforeExecution: @escaping @Sendable () async throws -> Void) async throws -> RepositoryMutationResult
     func createBranch(_ request: RepositoryCreateBranchRequest) async throws -> RepositoryMutationResult
     func createBranch(named name: String) async throws -> RepositoryMutationResult
     func branchDeletionCandidates(names: [String]) async throws -> [RepositoryBranchDeletionCandidate]

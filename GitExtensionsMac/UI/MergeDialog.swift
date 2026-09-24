@@ -10,6 +10,7 @@ enum MergeDialog {
         initialTarget: String?,
         distributedSettings: DistributedSettings? = nil,
         owner: NSWindow,
+        scriptHooks: ApplicationScriptHooks? = nil,
         onRepositoryChanged: @escaping (RevisionID?) -> Void,
         onClose: @escaping () -> Void
     ) -> NSWindowController {
@@ -20,6 +21,7 @@ enum MergeDialog {
             distributedSettings: distributedSettings,
             onRepositoryChanged: onRepositoryChanged
         )
+        controller.scriptHooks = scriptHooks
         let window = NSWindow(contentViewController: controller)
         window.title = "Merge branches"
         window.styleMask = [.titled, .closable]
@@ -49,6 +51,7 @@ enum MergeDialog {
 
 @MainActor
 private final class MergeDialogViewController: NSViewController, NSWindowDelegate, NSComboBoxDelegate {
+    var scriptHooks: ApplicationScriptHooks?
     private struct TargetChoice: Hashable {
         let value: String
         let title: String
@@ -551,6 +554,11 @@ private final class MergeDialogViewController: NSViewController, NSWindowDelegat
                 logCount: selectedLogCount,
                 updateSubmodulesAfterMerge: updateSubmodules
             )
+            scriptHooks?.begin()
+            defer { scriptHooks?.end() }
+            guard await scriptHooks?.run(.beforeMerge) != false else {
+                operationTask = nil; setExecuting(false); return
+            }
             let result = await MergeProcessDialog.run(request: request, source: source, parent: window)
             operationTask = nil
             setExecuting(false)
@@ -564,6 +572,7 @@ private final class MergeDialogViewController: NSViewController, NSWindowDelegat
                 onRepositoryChanged(value.selectedCommitID)
                 switch value.outcome {
                 case .completed, .alreadyUpToDate, .readyToCommit:
+                    _ = await scriptHooks?.run(.afterMerge)
                     finish()
                     self.window?.close()
                 case .failed:
@@ -573,10 +582,11 @@ private final class MergeDialogViewController: NSViewController, NSWindowDelegat
                         let resolution = await WorkflowManagementDialogs.resolveMergeConflicts(
                             source: source,
                             offerCommit: !request.noCommit,
-                            window: window
+                            window: window, scriptHooks: scriptHooks
                         )
                         if resolution.repositoryChanged { onRepositoryChanged(value.selectedCommitID) }
                     }
+                    _ = await scriptHooks?.run(.afterMerge)
                     finish()
                     self.window?.close()
                 }

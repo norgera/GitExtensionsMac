@@ -3,6 +3,7 @@ import GitCommands
 import AppKit
 
 final class RevisionGridViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate {
+    var onScript: ((ScriptDefinition) -> Void)?
     var onCommand: ((String, [Commit], Commit) -> Void)?
     var selectedCommitCount: Int { tableView.selectedRowIndexes.count }
     var selectedRevisionIDs: [RevisionID] { tableView.selectedRowIndexes.compactMap { commits.indices.contains($0) ? commits[$0].id : nil } }
@@ -620,6 +621,9 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
             target: self,
             action: #selector(performMutationMenuCommand(_:))
         )
+        let scripts = NSMenuItem(title: "Scripts", action: nil, keyEquivalent: "")
+        scripts.submenu = ApplicationScriptsMenu(placement: .revisions, execute: { [weak self] in self?.onScript?($0) })
+        menu.addItem(scripts)
         menuItem(withIdentifier: "revision.other.reflog", in: menu)?.state =
             AppSettingsStore.shared.showReflogReferences ? .on : .off
     }
