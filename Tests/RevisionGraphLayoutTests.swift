@@ -20,6 +20,16 @@ func testRevisionID(_ label: String) -> RevisionID { .object(testObjectID(label)
 @main
 private enum RevisionGraphLayoutTests {
     static func main() async {
+        if CommandLine.arguments.contains("--hosts-only") {
+            do { try await RepositoryHostingTests.run() }
+            catch { fatalError("RepositoryHostingTests failed: \(error)") }
+            return
+        }
+        if CommandLine.arguments.contains("--plugins-only") {
+            do { try await ApplicationPluginsTests.run() }
+            catch { fatalError("ApplicationPluginsTests failed: \(error)") }
+            return
+        }
         if CommandLine.arguments.contains("--scripts-only") {
             do { try await ApplicationScriptsTests.run() }
             catch { fatalError("ApplicationScriptsTests failed: \(error)") }
@@ -246,6 +256,8 @@ private enum RevisionGraphLayoutTests {
             try await GitSettingsTests.run()
             try await CommandLogTests.run()
             try await ApplicationScriptsTests.run()
+            try await ApplicationPluginsTests.run()
+            try await RepositoryHostingTests.run()
             if let flagIndex = CommandLine.arguments.firstIndex(of: "--verify-mutations"),
                CommandLine.arguments.indices.contains(flagIndex + 1) {
                 try await GitRepositoryMutationTests.verifyDisposableClone(

@@ -79,6 +79,7 @@ struct RevisionContextMenuContext: Sendable {
     var cherryPickHasConflicts = false
     var isRebasing = false
     var rebaseHasConflicts = false
+    var buildStatus: BuildInfo?
 }
 
 enum RevisionContextMenuBuilder {
@@ -287,6 +288,12 @@ enum RevisionContextMenuBuilder {
             ]
         ))
         entries.append(command("revision.script", "Run script", enabled: false))
+        if context.buildStatus?.url != nil {
+            entries.append(command("revision.buildReport", "View build report in a browser"))
+        }
+        if context.buildStatus?.pullRequestURL != nil {
+            entries.append(command("revision.pullRequestPage", "View pull request in a browser"))
+        }
         entries.append(submenu(
             "revision.other",
             "Other actions",

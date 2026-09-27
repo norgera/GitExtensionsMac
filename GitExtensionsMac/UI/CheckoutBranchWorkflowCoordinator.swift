@@ -5,6 +5,7 @@ import AppKit
 @MainActor
 final class CheckoutBranchWorkflowCoordinator {
     var scriptHooks: ApplicationScriptHooks?
+    var pluginEvent: ((String, Bool?) -> Bool)?
     private let source: any RepositoryCheckoutBranchDataSource
     private let stashSource: (any RepositoryStashDataSource)?
     private let pullSource: (any RepositoryPullingDataSource)?
@@ -62,6 +63,9 @@ final class CheckoutBranchWorkflowCoordinator {
         let previousSelection = startingContext.headID.map(RevisionID.object)
         replaceTask { [weak self, weak owner] in
             guard let self, let owner else { return }
+            guard pluginEvent?("PreCheckoutBranch", nil) != false else { return }
+            var actionDone = false
+            defer { _ = pluginEvent?("PostCheckoutBranch", actionDone) }
             do {
                 onStatus("Checking repository state…")
                 let state = try await source.loadMutationState()
@@ -135,6 +139,7 @@ final class CheckoutBranchWorkflowCoordinator {
                 }
                 present(result)
                 _ = await scriptHooks?.run(.afterCheckout)
+                actionDone = true
                 if case .completed = result.outcome {
                     onCheckoutCompleted?()
                 }
@@ -155,6 +160,9 @@ final class CheckoutBranchWorkflowCoordinator {
         let previousSelection = startingContext.headID.map(RevisionID.object)
         replaceTask { [weak self, weak owner] in
             guard let self, let owner else { return }
+            guard pluginEvent?("PreCheckoutRevision", nil) != false else { return }
+            var actionDone = false
+            defer { _ = pluginEvent?("PostCheckoutRevision", actionDone) }
             guard let request = await CheckoutBranchDialogs.checkoutRevision(
                 commit: commit,
                 revisions: revisions,
@@ -175,6 +183,7 @@ final class CheckoutBranchWorkflowCoordinator {
                 result = try await updateSubmodulesIfRequested(result, previousContext: startingContext, owner: owner)
                 present(result)
                 _ = await scriptHooks?.run(.afterCheckout)
+                actionDone = true
             } catch is CancellationError {
                 return
             } catch {

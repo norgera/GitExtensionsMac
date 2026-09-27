@@ -608,6 +608,8 @@ final class AppSettingsStore {
         static let repositoryCreationPreferences = "GitExtensionsMac.repositoryCreationPreferences.v1"
         static let resetPreferences = "GitExtensionsMac.resetPreferences.v1"
         static let showReflogReferences = "GitExtensionsMac.showReflogReferences"
+        static let showBuildStatusIconColumn = "GitExtensionsMac.showbuildstatusiconcolumn"
+        static let showBuildStatusTextColumn = "GitExtensionsMac.showbuildstatustextcolumn"
     }
 
     private let defaults: UserDefaults
@@ -684,6 +686,8 @@ final class AppSettingsStore {
     private(set) var repositoryCreationPreferences: RepositoryCreationPreferences
     private(set) var resetPreferences: ResetPreferences
     private(set) var showReflogReferences: Bool
+    private(set) var showBuildStatusIconColumn: Bool
+    private(set) var showBuildStatusTextColumn: Bool
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -761,6 +765,8 @@ final class AppSettingsStore {
             .flatMap { try? decoder.decode(ResetPreferences.self, from: $0) }
             ?? ResetPreferences()
         showReflogReferences = defaults.object(forKey: Key.showReflogReferences) as? Bool ?? false
+        showBuildStatusIconColumn = defaults.object(forKey: Key.showBuildStatusIconColumn) as? Bool ?? true
+        showBuildStatusTextColumn = defaults.object(forKey: Key.showBuildStatusTextColumn) as? Bool ?? false
         recentRepositories.removeAll { !FileManager.default.fileExists(atPath: $0.path) }
         applyAppearance()
     }
@@ -964,6 +970,12 @@ final class AppSettingsStore {
     func saveResetPreferences(_ preferences: ResetPreferences) {
         resetPreferences = preferences
         defaults.set(try? JSONEncoder().encode(preferences), forKey: Key.resetPreferences)
+    }
+
+    func saveShowBuildStatus(icon: Bool, text: Bool) {
+        showBuildStatusIconColumn = icon; showBuildStatusTextColumn = text
+        defaults.set(icon, forKey: Key.showBuildStatusIconColumn)
+        defaults.set(text, forKey: Key.showBuildStatusTextColumn)
     }
 
     func saveShowReflogReferences(_ show: Bool) {

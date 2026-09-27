@@ -346,52 +346,6 @@ enum GitPushCommandBuilder {
     }
 }
 
-package enum RepositoryPullRequestURLBuilder {
-    package static func url(remoteURL: String, branch: String) -> URL? {
-        let branch = branch.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !branch.isEmpty else { return nil }
-        if let azure = azureURL(remoteURL: remoteURL, branch: branch) { return azure }
-        return gitHubURL(remoteURL: remoteURL, branch: branch)
-    }
-
-    private static func azureURL(remoteURL: String, branch: String) -> URL? {
-        let base: String?
-        if remoteURL.contains("dev.azure.com/") || remoteURL.contains("visualstudio.com/") {
-            base = remoteURL.hasSuffix(".git") ? String(remoteURL.dropLast(4)) : remoteURL
-        } else if remoteURL.hasPrefix("git@ssh.dev.azure.com:v3/") {
-            let path = String(remoteURL.dropFirst("git@ssh.dev.azure.com:v3/".count))
-            let parts = path.split(separator: "/").map(String.init)
-            base = parts.count >= 3 ? "https://dev.azure.com/\(parts[0])/\(parts[1])/_git/\(parts[2])" : nil
-        } else {
-            base = nil
-        }
-        guard let base, var components = URLComponents(string: base + "/pullrequestcreate") else { return nil }
-        components.queryItems = [URLQueryItem(name: "sourceRef", value: branch)]
-        return components.url
-    }
-
-    private static func gitHubURL(remoteURL: String, branch: String) -> URL? {
-        let path: String?
-        if let components = URLComponents(string: remoteURL),
-           let host = components.host,
-           host.caseInsensitiveCompare("github.com") == .orderedSame {
-            path = components.path
-        } else if remoteURL.hasPrefix("git@github.com:") {
-            path = "/" + String(remoteURL.dropFirst("git@github.com:".count))
-        } else {
-            path = nil
-        }
-        guard let path else { return nil }
-        var pieces = path.split(separator: "/").map(String.init)
-        guard pieces.count == 2 else { return nil }
-        if pieces[1].hasSuffix(".git") { pieces[1].removeLast(4) }
-        guard !pieces[0].isEmpty, !pieces[1].isEmpty else { return nil }
-        let allowed = CharacterSet.urlPathAllowed.subtracting(CharacterSet(charactersIn: "/?#"))
-        guard let encodedBranch = branch.addingPercentEncoding(withAllowedCharacters: allowed) else { return nil }
-        return URL(string: "https://github.com/\(pieces[0])/\(pieces[1])/compare/\(encodedBranch)?expand=1")
-    }
-}
-
 extension GitRepositoryModule: RepositoryPushingDataSource {
     package func loadPushState() async throws -> RepositoryPushState {
         guard let repository = resolvedRepository else { throw RepositoryPushError.unavailable }

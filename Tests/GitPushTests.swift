@@ -80,18 +80,14 @@ enum GitPushTests {
             "command builder: multiple push has per-row push, force, and delete refspecs"
         )
         try require(
-            RepositoryPullRequestURLBuilder.url(
-                remoteURL: "git@github.com:owner/repository.git",
-                branch: "feature/topic"
-            )?.absoluteString == "https://github.com/owner/repository/compare/feature%2Ftopic?expand=1",
-            "pull request follow-up: GitHub SSH remotes map to the host create page"
+            HostedRepositoryIdentity.parse("https://dev.azure.com/organization/project/_git/repository")?
+                .createPullRequestURL(branch: "feature/topic")?.absoluteString
+                == "https://dev.azure.com/organization/project/_git/repository/pullrequestcreate?sourceRef=feature%2Ftopic",
+            "pull request follow-up: Azure remotes map to the escaped host create page"
         )
         try require(
-            RepositoryPullRequestURLBuilder.url(
-                remoteURL: "https://dev.azure.com/organization/project/_git/repository",
-                branch: "feature/topic"
-            )?.absoluteString == "https://dev.azure.com/organization/project/_git/repository/pullrequestcreate?sourceRef=feature/topic",
-            "pull request follow-up: Azure remotes map to the host create page"
+            HostedRepositoryIdentity.parse("git@github.com:owner/repository.git")?.createPullRequestURL(branch: "feature/topic") == nil,
+            "pull request follow-up: GitHub uses the Create Pull Request form, not a browser page"
         )
 
         let trackingState = RepositoryPushState(

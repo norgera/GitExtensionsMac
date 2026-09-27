@@ -36,6 +36,11 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
     private let fileTreeController = FileTreeViewController()
     private let gpgController = GPGInfoViewController()
     private let detailTabs = DetailTabsViewController()
+    private let buildReportController = BuildReportViewController()
+    private var showsBuildReportTab = false
+    private var showBuildResultPage = false
+    private let buildServerWatcher = BuildServerWatcher()
+    private var buildServerLaunchTask: Task<Void, Never>?
 
     private let mainSplitController = RetainingSplitViewController(resizeBehavior: .fixedLeadingPane)
     private let rightSplitController = RetainingSplitViewController(resizeBehavior: .proportional)
@@ -340,6 +345,14 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         setInitialDividerPositionsIfNeeded()
     }
 
+    override func viewWillDisappear() {
+        super.viewWillDisappear()
+        uiCommands.stopPlugins()
+        buildServerLaunchTask?.cancel()
+        buildServerWatcher.repositoryChanged()
+        buildServerWatcher.cancel()
+    }
+
     override func viewDidLayout() {
         super.viewDidLayout()
         if !didSetInitialDividerPositions {
@@ -347,16 +360,52 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         }
     }
 
-    private func configureDetailTabs() {
-        detailTabs.configure(
-            items: [
-                ("Commit", "CommitSummary", commitDetailController),
-                ("Diff", "Diff", revisionDiffController),
-                ("File tree", "FileTree", fileTreeController),
-                ("GPG", "Key", gpgController)
-            ],
-            selectedIndex: 1
-        )
+    private func configureDetailTabs(selectedIndex: Int = 1) {
+        var items: [(String, String, NSViewController)] = [
+            ("Commit", "CommitSummary", commitDetailController),
+            ("Diff", "Diff", revisionDiffController),
+            ("File tree", "FileTree", fileTreeController),
+            ("GPG", "Key", gpgController)
+        ]
+        if showsBuildReportTab { items.append(("Build Report", "", buildReportController)) }
+        detailTabs.configure(items: items, selectedIndex: min(selectedIndex, items.count - 1))
+    }
+
+    private func updateBuildReportTab() {
+        let url = revisionGridController.buildStatus(for: selectedCommitID)?.url
+        buildReportController.url = url
+        let show = showBuildResultPage && url != nil
+        guard show != showsBuildReportTab else { return }
+        showsBuildReportTab = show
+        configureDetailTabs(selectedIndex: detailTabs.selectedTabIndex)
+    }
+
+    private func launchBuildServerWatcher() {
+        buildServerLaunchTask?.cancel()
+        buildServerWatcher.cancel()
+        guard let manager = repositoryModule as? any RepositoryRemoteManagingDataSource,
+              let settingsSource = repositoryModule as? any RepositorySettingsDataSource else { return }
+        let hosting = repositoryModule as? any RepositoryHostingDataSource
+        let current = repositoryReferences?.branches.first(where: \.isCurrent)?.remoteName
+        buildServerLaunchTask = Task { @MainActor [weak self] in
+            let remotes = (try? await manager.loadRemoteConfigurations()) ?? []
+            let locations = try? await DistributedSettings.loadLocations(from: settingsSource)
+            let settings = (try? BuildServerSettingsStore(locations: locations).values(.effective)) ?? [:]
+            let resolution = await BuildServerAdapterResolver.resolve(settings: settings, remotes: remotes, currentRemote: current,
+                credential: { url in await hosting?.hostCredentialPassword(for: url) })
+            guard let self, !Task.isCancelled else { return }
+            showBuildResultPage = BuildServerSettingsStore.bool(settings[BuildServerSettingKeys.showBuildResultPage]) ?? false
+            revisionGridController.setBuildStatusColumn(enabled: resolution.adapter != nil || resolution.explicitlyEnabled)
+            buildServerWatcher.onUpdate = { [weak self] infos in
+                self?.revisionGridController.applyBuildInfos(infos)
+                self?.updateBuildReportTab()
+            }
+            buildServerWatcher.onInitializationError = { [weak self] error in
+                BuildServerErrorPresenter.present(error, window: self?.view.window) { self?.uiCommands.startSettings() }
+            }
+            buildServerWatcher.launch(resolution.adapter)
+            updateBuildReportTab()
+        }
     }
 
     private func focusPane(_ command: String) {
@@ -923,6 +972,14 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             statusLabel.stringValue = preferences.showTagsInRevisionGrid
                 ? "Showing tags in revision grid"
                 : "Hiding tags in revision grid"
+        case .toggleBuildStatusIcon, .toggleBuildStatusText:
+            let store = AppSettingsStore.shared
+            let icon = store.showBuildStatusIconColumn != (command == .toggleBuildStatusIcon)
+            let text = store.showBuildStatusTextColumn != (command == .toggleBuildStatusText)
+            store.saveShowBuildStatus(icon: icon, text: text)
+            BrowserCommandAvailability.shared.showBuildStatusIcon = icon
+            BrowserCommandAvailability.shared.showBuildStatusText = text
+            revisionGridController.applyBuildStatusColumnSettings()
         case .commit: uiCommands.startCommit()
         case .pullFetch: uiCommands.startPull(action: AppSettingsStore.shared.pullPreferences.formAction, immediately: false)
         case .pull: uiCommands.startPull(action: AppSettingsStore.shared.pullPreferences.defaultAction, immediately: AppSettingsStore.shared.pullPreferences.defaultAction != .openDialog)
@@ -998,6 +1055,16 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             }
         case .scripts:
             uiCommands.startScripts()
+        case .plugins:
+            uiCommands.startPlugins()
+        case .viewHostedPullRequests:
+            uiCommands.startPullRequests()
+        case .createHostedPullRequest:
+            uiCommands.startCreatePullRequest()
+        case .addHostedUpstream:
+            uiCommands.startAddHostedUpstream()
+        case .executePlugin(let id):
+            uiCommands.startPlugin(id)
         case .settings:
             uiCommands.startSettings()
         case .showStatus(let message):
@@ -1037,6 +1104,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         let sameRepository = previousRepositoryID == state.identity.currentRepository.id
         let requestedSelection = preferredCommitID ?? openingSelection.first ?? (sameRepository ? selectedCommitID : nil)
         applyRepositoryState(state)
+        uiCommands.pluginsRepositoryLoaded()
         startRevisionRead(
             state.revisionReadRequest,
             preferredCommitID: requestedSelection,
@@ -1166,6 +1234,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
                     revisionGridController.selectCommits(ids: openingSelection)
                     openingSelection = []
                 }
+                launchBuildServerWatcher()
             } catch is CancellationError {
                 return
             } catch {
@@ -1212,6 +1281,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         fileTreeController.apply(commit: commit, files: [])
         gpgController.apply(commit: commit, info: nil)
         statusLabel.stringValue = commit.isArtificial ? "Selected \(commit.subject)" : "Selected \(commit.shortID): \(commit.subject)"
+        updateBuildReportTab()
 
         loadActiveDetailTab(commit: commit, comparisonCommit: comparisonCommit)
     }
@@ -2202,6 +2272,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             onClose: { [weak self] in
                 self?.commitWindowController = nil
                 self?.statusLabel.stringValue = "Commit window closed"
+                self?.uiCommands.pluginEvent("PostCommit", succeeded: true)
             }
         )
     }

@@ -14,6 +14,7 @@ package struct RepositoryCloneRequest: Sendable, Equatable {
     package let initializesSubmodules: Bool
     package let downloadsFullHistory: Bool
     package let branch: RepositoryCloneBranch
+    package let depth: Int?
 
     package init(
         source: String,
@@ -22,7 +23,8 @@ package struct RepositoryCloneRequest: Sendable, Equatable {
         isBare: Bool = false,
         initializesSubmodules: Bool = true,
         downloadsFullHistory: Bool = true,
-        branch: RepositoryCloneBranch = .remoteHEAD
+        branch: RepositoryCloneBranch = .remoteHEAD,
+        depth: Int? = nil
     ) {
         self.source = source
         self.destinationParent = destinationParent
@@ -31,6 +33,7 @@ package struct RepositoryCloneRequest: Sendable, Equatable {
         self.initializesSubmodules = initializesSubmodules
         self.downloadsFullHistory = downloadsFullHistory
         self.branch = branch
+        self.depth = depth
     }
 
     package var destinationURL: URL {
@@ -94,11 +97,13 @@ package enum GitRepositoryCreationCommands {
         isBare: Bool,
         initializesSubmodules: Bool,
         downloadsFullHistory: Bool,
-        branch: RepositoryCloneBranch
+        branch: RepositoryCloneBranch,
+        depth: Int? = nil
     ) -> GitCommand {
         var arguments = ["clone", "-v"]
         if isBare { arguments.append("--bare") }
         if initializesSubmodules { arguments.append("--recurse-submodules") }
+        if let depth { arguments.append(contentsOf: ["--depth", String(depth)]) }
         if !downloadsFullHistory {
             arguments.append(contentsOf: ["--depth", "1", "--no-single-branch"])
         }
@@ -234,7 +239,8 @@ package final class GitRepositoryCreator: RepositoryCreating, @unchecked Sendabl
             isBare: request.isBare,
             initializesSubmodules: request.initializesSubmodules,
             downloadsFullHistory: request.downloadsFullHistory,
-            branch: request.branch
+            branch: request.branch,
+            depth: request.depth
         )
         let result = try await git.runStreaming(command, in: parent, environment: environment, output: output)
         try requireSuccess(result)

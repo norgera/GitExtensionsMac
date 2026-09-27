@@ -15,12 +15,20 @@ enum BrowserCommand: Equatable, Sendable {
     case initializeRepository
     case settings
     case scripts
+    case plugins
+    case viewHostedPullRequests
+    case createHostedPullRequest
+    case forkHostedRepository
+    case addHostedUpstream
+    case executePlugin(UUID)
     case clearRecentRepositories
     case openRecentRepository(URL)
     case openRepositoryAtRevisions(URL, [RevisionID])
 
     case refresh
     case toggleRevisionTags
+    case toggleBuildStatusIcon
+    case toggleBuildStatusText
     case commit
     case pullFetch
     case pull
@@ -92,8 +100,16 @@ enum BrowserCommandCenter {
 @MainActor
 final class BrowserCommandAvailability: ObservableObject {
     static let shared = BrowserCommandAvailability()
+    struct PluginEntry: Identifiable {
+        let id: UUID
+        let title: String
+        let icon: NSImage?
+    }
+    @Published var plugins: [PluginEntry] = []
 
     @Published var canMerge = false
+    @Published var showBuildStatusIcon = AppSettingsStore.shared.showBuildStatusIconColumn
+    @Published var showBuildStatusText = AppSettingsStore.shared.showBuildStatusTextColumn
     @Published var canCreateBranch = false
     @Published var canDeleteBranch = false
     @Published var canCheckoutBranch = false

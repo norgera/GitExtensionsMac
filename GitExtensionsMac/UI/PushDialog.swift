@@ -14,6 +14,7 @@ enum PushDialog {
         scriptHooks: ApplicationScriptHooks? = nil,
         onRepositoryChanged: @escaping (RevisionID?) -> Void,
         onCompletion: ((Bool) -> Void)? = nil,
+        onCreatePullRequest: (() -> Void)? = nil,
         onClose: @escaping () -> Void
     ) -> NSWindowController {
         let controller = PushDialogViewController(
@@ -26,6 +27,7 @@ enum PushDialog {
             onRepositoryChanged: onRepositoryChanged
         )
         controller.scriptHooks = scriptHooks
+        controller.onCreatePullRequest = onCreatePullRequest
         let window = NSWindow(contentViewController: controller)
         window.title = "Push (\(context.repository.path))"
         window.styleMask = [.titled, .closable, .resizable]
@@ -64,6 +66,7 @@ private final class PushDialogViewController: NSViewController,
     private let settings = AppSettingsStore.shared
     private var remoteBranchesDirectly: Bool?
     private var pushState: RepositoryPushState?
+    var onCreatePullRequest: (() -> Void)?
     private var didClose = false
     private var didBecomeKeyOnce = false
     private var didAttemptImmediateExecution = false
@@ -402,7 +405,7 @@ private final class PushDialogViewController: NSViewController,
                 populateLocalBranches()
                 populateTags()
                 updateRemoteSelection(resetBranch: true)
-                createPullRequest.isEnabled = pullRequestURL(branch: selectedLocalBranch()) != nil
+                createPullRequest.isEnabled = canCreatePullRequest
                 pushButton.isEnabled = true
                 statusLabel.stringValue = state.isDetached ? "Detached HEAD — enter an explicit destination branch" : "Ready"
                 operationTask = nil
@@ -471,7 +474,6 @@ private final class PushDialogViewController: NSViewController,
         }
         destinationCombo.stringValue = remote.pushURL?.isEmpty == false ? remote.pushURL! : remote.fetchURL
         if resetBranch { updateRemoteBranchForLocalSelection() }
-        createPullRequest.isEnabled = pullRequestURL(branch: selectedLocalBranch()) != nil
         if tabs.selectedTabViewItem?.identifier as? String == "multiple" { populateMultipleBranches() }
     }
 
@@ -493,7 +495,6 @@ private final class PushDialogViewController: NSViewController,
             remoteBranchCombo.stringValue = state.defaultRemoteBranch(localBranch: local, remoteName: remoteName)
             remoteBranchCombo.isEnabled = true
         }
-        createPullRequest.isEnabled = pullRequestURL(branch: local) != nil
     }
 
     private func selectedLocalBranch() -> String {
@@ -1030,20 +1031,24 @@ private final class PushDialogViewController: NSViewController,
         return false
     }
 
-    private func openPullRequestIfRequested(request: RepositoryPushRequest) {
-        guard createPullRequest.state == .on,
-              let branch = selectedLocalBranch().nilIfPushSentinel,
-              let url = pullRequestURL(branch: branch)
-        else { return }
-        NSWorkspace.shared.open(url)
+    private var hasGitHubRemote: Bool {
+        !HostedRemote.gitHubRemotes(pushState?.remotes ?? []).isEmpty
+    }
+    private var canCreatePullRequest: Bool {
+        hasGitHubRemote || (pushState?.remotes ?? []).contains {
+            !$0.isDisabled && HostedRepositoryIdentity.parse($0.fetchURL)?.provider == .azureDevOps
+        }
     }
 
-    private func pullRequestURL(branch: String) -> URL? {
-        guard !branch.isEmpty,
-              let state = pushState,
-              let remote = state.remotes.first(where: { !$0.isDisabled && $0.name == remoteCombo.stringValue })
-        else { return nil }
-        return RepositoryPullRequestURLBuilder.url(remoteURL: remote.fetchURL, branch: branch)
+    private func openPullRequestIfRequested(request: RepositoryPushRequest) {
+        guard createPullRequest.state == .on, let state = pushState else { return }
+        if hasGitHubRemote { onCreatePullRequest?(); return }
+        let selected = selectedLocalBranch()
+        let branch = selected == Self.head || selected == Self.allRefs ? state.currentBranch ?? "" : selected
+        guard let remote = state.remotes.first(where: { !$0.isDisabled && $0.name == remoteCombo.stringValue }),
+              let identity = HostedRepositoryIdentity.parse(remote.fetchURL), identity.provider == .azureDevOps,
+              let url = identity.createPullRequestURL(branch: branch) else { return }
+        NSWorkspace.shared.open(url)
     }
 
     private func group(_ title: String, content: NSView, horizontalInset: CGFloat, verticalInset: CGFloat) -> NSBox {

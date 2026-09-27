@@ -140,6 +140,7 @@ package struct ScriptInvocation: Sendable {
 package enum ScriptExecutionOutcome: Sendable {
     case completed(GitCommandResult)
     case started(processID: Int32)
+    case pluginCompleted
 }
 
 package enum ScriptExecution {

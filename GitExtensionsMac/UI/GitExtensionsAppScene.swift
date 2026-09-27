@@ -119,6 +119,9 @@ private struct GitExtensionsMenuCommands: Commands {
         CommandGroup(after: .sidebar) {
             Button("Show/hide tags in revision grid") { perform(.toggleRevisionTags) }
                 .keyboardShortcut(hotkeys.shortcut("toggleRevisionTags"))
+            Divider()
+            Toggle("Show build status icon", isOn: Binding(get: { availability.showBuildStatusIcon }, set: { _ in perform(.toggleBuildStatusIcon) }))
+            Toggle("Show build status text", isOn: Binding(get: { availability.showBuildStatusText }, set: { _ in perform(.toggleBuildStatusText) }))
         }
 
         CommandMenu("Commands") {
@@ -188,16 +191,22 @@ private struct GitExtensionsMenuCommands: Commands {
                 .keyboardShortcut(hotkeys.shortcut("viewPatch"))
         }
 
-        CommandMenu("Repository hosts") {
-            Button("Fork/Clone repository…") { perform(.unavailable("Fork/Clone repository")) }
-            Button("View pull requests…") { perform(.unavailable("View pull requests")) }
-            Button("Create pull request…") { perform(.unavailable("Create pull request")) }
-            Button("Add upstream remote") { perform(.unavailable("Add upstream remote")) }
+        CommandMenu("GitHub") {
+            Button("Fork/Clone repository…") { perform(.forkHostedRepository) }
+            Button("View pull requests…") { perform(.viewHostedPullRequests) }
+            Button("Create pull requests…") { perform(.createHostedPullRequest) }
+            Button("Add upstream remote") { perform(.addHostedUpstream) }
         }
 
         CommandMenu("Plugins") {
-            Button("Plugin manager…") { perform(.unavailable("Plugin manager")) }
-            Button("Plugin settings…") { perform(.unavailable("Plugin settings")) }
+            ForEach(availability.plugins) { plugin in
+                Button { perform(.executePlugin(plugin.id)) } label: {
+                    if let icon = plugin.icon { Image(nsImage: icon) }
+                    Text(plugin.title)
+                }
+            }
+            if !availability.plugins.isEmpty { Divider() }
+            Button("Installed plugins…") { perform(.plugins) }
         }
 
         CommandMenu("Tools") {

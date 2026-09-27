@@ -5,8 +5,19 @@ import AppKit
 @MainActor
 final class GitUICommands {
     private static var commandLogWindow: CommandLogWindowController?
+    private static let globalPluginRegistry = ApplicationPluginRegistry()
+    private static var globalPluginWindows: [NSWindowController] = []
     private var scriptsWindow: ScriptsWindowController?
+    private var hostingWindows: [NSWindowController] = []
+    private static var forkCloneWindow: ForkAndCloneWindowController?
     private var scriptTask: Task<Void, Never>?
+    private let pluginRegistry = ApplicationPluginRegistry()
+    private let pluginSession = ApplicationPluginSession()
+    private var pluginWindows: [NSWindowController] = []
+    private var pluginsInitialized = false
+    private var pluginLoadTask: Task<Void, Never>?
+    private var pluginCloseObserver: NSObjectProtocol?
+    private var pluginMainObserver: NSObjectProtocol?
     private let repositoryModule: any RepositoryBrowsingDataSource
     private weak var browser: RepositoryBrowserViewController?
     let repositoryChangedNotifier: RepositoryChangedNotifier
@@ -50,6 +61,378 @@ final class GitUICommands {
         repositoryChangedNotifier.notify()
     }
 
+    func stopPlugins() {
+        if let pluginCloseObserver { NotificationCenter.default.removeObserver(pluginCloseObserver) }
+        if let pluginMainObserver { NotificationCenter.default.removeObserver(pluginMainObserver) }
+        pluginCloseObserver = nil
+        pluginMainObserver = nil
+        pluginLoadTask?.cancel(); pluginLoadTask = nil
+        pluginSession.close()
+        pluginWindows.forEach { $0.close() }
+        pluginWindows.removeAll()
+        pluginsInitialized = false
+        if NSApp.mainWindow == nil || NSApp.mainWindow === browser?.view.window {
+            BrowserCommandAvailability.shared.plugins = []
+        }
+    }
+
+    @discardableResult
+    func pluginEvent(_ event: String, succeeded: Bool? = nil) -> Bool {
+        for (_, host) in pluginSession.registered {
+            var context = host.context
+            if let browser {
+                for key in Array(context.keys) where key.hasPrefix("s") { context[key] = nil }
+                let selected = browser.workflowRevisionSelection.compactMap { id in browser.revisions.first { $0.id == id } }
+                context.merge(ScriptExecution.selectedRevisionOptions(selected), uniquingKeysWith: { _, new in new })
+                context.merge(browser.scriptFileContext, uniquingKeysWith: { _, new in new })
+            }
+            host.update(context: context, owner: browser?.view.window)
+            host.updateSelection(browser?.workflowRevisionSelection ?? [])
+        }
+        let previousFailures = pluginSession.failures.count
+        let result = pluginSession.dispatch(event, succeeded: succeeded)
+        if pluginSession.failures.count > previousFailures {
+            let alert = NSAlert(); alert.messageText = "Plugin event failed"
+            alert.informativeText = pluginSession.failures.dropFirst(previousFailures).joined(separator: "\n")
+            alert.runModal()
+        }
+        return result
+    }
+
+    func pluginsRepositoryLoaded() {
+        pluginLoadTask?.cancel()
+        pluginLoadTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let initial = !pluginsInitialized
+                try await initializePlugins()
+                let context = try await scriptOptions(for: ScriptDefinition())
+                try Task.checkCancellation()
+                for (_, host) in pluginSession.registered {
+                    host.update(context: context, owner: browser?.view.window)
+                    host.updateSelection(browser?.workflowRevisionSelection ?? [])
+                }
+                _ = pluginSession.dispatch(initial ? "PostBrowseInitialize" : "PostRepositoryChanged")
+            } catch is CancellationError { }
+            catch { NSAlert(error: error).runModal() }
+        }
+    }
+
+    func startPlugins() {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                try await initializePlugins()
+                let alert = NSAlert()
+                alert.messageText = "Plugins"
+                let entries = pluginSession.registered
+                let list = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 360, height: 28))
+                list.addItems(withTitles: entries.map { $0.0.name })
+                alert.accessoryView = list
+                alert.informativeText = (pluginRegistry.failures + pluginSession.failures).joined(separator: "\n")
+                if entries.isEmpty {
+                    alert.informativeText += "\nNo compatible native plugins are installed. Install trusted GitExtensions.*.bundle plugins in \(ApplicationPluginRegistry.userDirectory.path), then reopen the repository."
+                    alert.addButton(withTitle: "Close")
+                    alert.runModal(); return
+                }
+                alert.addButton(withTitle: "Run"); alert.addButton(withTitle: "Settings…"); alert.addButton(withTitle: "Cancel")
+                let action = alert.runModal()
+                guard list.indexOfSelectedItem >= 0 else { return }
+                let (plugin, host) = entries[list.indexOfSelectedItem]
+                host.update(context: try await scriptOptions(for: ScriptDefinition()), owner: browser?.view.window)
+                host.updateSelection(browser?.workflowRevisionSelection ?? [])
+                if action == .alertFirstButtonReturn {
+                    repositoryChangedNotifier.lock()
+                    defer { repositoryChangedNotifier.unlock(requestNotify: false) }
+                    if try await plugin.execute(in: host) { notifyRepositoryChanged() }
+                } else if action == .alertSecondButtonReturn {
+                    if let view = try plugin.settingsController(in: host) {
+                        let window = NSWindow(contentViewController: view)
+                        window.title = "Settings — \(plugin.name)"; window.isReleasedWhenClosed = false
+                        let controller = NSWindowController(window: window)
+                        pluginWindows.append(controller); controller.showWindow(nil)
+                    } else {
+                        let message = NSAlert(); message.messageText = "\(plugin.name) has no settings."; message.runModal()
+                    }
+                }
+            } catch { NSAlert(error: error).runModal() }
+        }
+    }
+
+    private func gitHubContext() async -> GitHubHostingContext? {
+        guard let manager = repositoryModule as? any RepositoryRemoteManagingDataSource,
+              let remotes = try? await manager.loadRemoteConfigurations() else { return nil }
+        let hosted = HostedRemote.gitHubRemotes(remotes)
+        guard !hosted.isEmpty else { return nil }
+        let current = browser?.networkContext?.branches.first(where: \.isCurrent)?.remoteName
+        let active = remotes.filter { !$0.isDisabled }
+        let protocolRemote = active.first { current == nil || current == "" || $0.name == current } ?? active.first
+        return GitHubHostingContext(
+            remotes: hosted, currentRemote: current, protocolRemoteURL: protocolRemote?.fetchURL,
+            source: repositoryModule as? any RepositoryHostingDataSource, saveRemote: { try await manager.saveRemote($0) },
+            client: { RepositoryHostClient(identity: $0, token: GitHubRepositoryPlugin.token) },
+            lockNotifier: { [weak self] in self?.repositoryChangedNotifier.lock() },
+            unlockNotifier: { [weak self] in self?.repositoryChangedNotifier.unlock(requestNotify: false) },
+            changed: { [weak self] in self?.notifyRepositoryChanged(preferredCommitID: self?.browser?.selectedCommitID) })
+    }
+
+    private func withRepositoryHost(_ action: @escaping @MainActor (GitHubHostingContext) -> Void, noHost: String) {
+        let owner = browser?.view.window
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            guard let context = await gitHubContext() else { HostingMessages.error(noHost); return }
+            let host = pluginSession.registered.first { $0.0 is GitHubRepositoryPlugin }?.1
+            guard await GitHubRepositoryPlugin.ensureConfigured(owner: owner, host: host) else { return }
+            action(context)
+        }
+    }
+
+    func startPullRequests() {
+        withRepositoryHost({ [weak self] context in
+            let controller = PullRequestsWindowController(context: context)
+            self?.hostingWindows.append(controller); controller.showWindow(nil)
+        }, noHost: "Could not find any relevant repository hosts for the currently open repository.")
+    }
+
+    func startCreatePullRequest(fromPush: Bool = false, chooseRemote: String? = nil) {
+        withRepositoryHost({ [weak self] context in
+            let controller = CreateHostedPullRequestWindowController(context: context, chooseRemote: chooseRemote)
+            self?.hostingWindows.append(controller); controller.showWindow(nil)
+        }, noHost: fromPush ? "Could not find any repo hosts for current working directory"
+            : "Could not find any relevant repository hosts for the currently open repository.")
+    }
+
+    func startForkHostedRepository() {
+        _ = browser?.onApplicationCommand?(.forkHostedRepository)
+    }
+
+    func startAddHostedUpstream() {
+        withRepositoryHost({ [weak self] context in
+            Task { @MainActor [weak self] in
+                guard let self, let manager = repositoryModule as? any RepositoryRemoteManagingDataSource else { return }
+                do {
+                    guard let first = context.remotes.first else { return }
+                    let login = try await context.client(first.identity).currentUser()
+                    guard let mine = context.remotes.first(where: { $0.identity.owner == login }) else { return }
+                    let repository = try await context.client(mine.identity).repository()
+                    guard repository.fork, let parent = repository.parent else { return }
+                    let url = mine.usesHTTPS ? parent.clone_url.absoluteString : parent.ssh_url
+                    let remotes = try await manager.loadRemoteConfigurations()
+                    guard !remotes.contains(where: { $0.name == "upstream" || $0.fetchURL == url }) else { return }
+                    try await manager.saveRemote(.init(originalName: nil, name: "upstream", fetchURL: url,
+                        pushURL: nil, puttyKeyFile: nil, color: nil, prefix: nil))
+                    notifyRepositoryChanged()
+                    fetchRemote(named: "upstream", prune: false)
+                } catch {
+                    HostingMessages.error("ERROR: Add upstream remote failed. Message: \(error.localizedDescription)", "Error! :(")
+                }
+            }
+        }, noHost: "Could not find any relevant repository hosts for the currently open repository.")
+    }
+
+    static func startForkAndClone(owner: NSWindow?, creator: any RepositoryCreating, initialDestination: String,
+                                  gitExecutable: URL, opened: @escaping (URL) -> Void) {
+        Task { @MainActor in
+            guard await GitHubRepositoryPlugin.ensureConfigured(owner: owner) else { return }
+            let environment = ForkAndCloneWindowController.Environment(
+                creator: creator,
+                addRemote: { directory, name, url in
+                    let module = GitRepositoryModule(repositoryURL: directory, git: GitProcess(executableURL: gitExecutable))
+                    _ = try await module.loadRepositoryState()
+                    try await module.saveRemote(.init(originalName: nil, name: name, fetchURL: url, pushURL: nil,
+                                                      puttyKeyFile: nil, color: nil, prefix: nil))
+                },
+                opened: opened, initialDestination: initialDestination)
+            let controller = ForkAndCloneWindowController(environment: environment)
+            forkCloneWindow = controller
+            controller.showWindow(nil)
+        }
+    }
+
+    func startPlugin(_ id: UUID) {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                try await initializePlugins()
+                guard let entry = pluginSession.registered.first(where: { $0.0.identifier == id }) else {
+                    throw PluginError.invalid("This plugin is no longer available.")
+                }
+                let context = try await scriptOptions(for: ScriptDefinition())
+                entry.1.update(context: context, owner: browser?.view.window)
+                entry.1.updateSelection(browser?.workflowRevisionSelection ?? [])
+                repositoryChangedNotifier.lock()
+                defer { repositoryChangedNotifier.unlock(requestNotify: false) }
+                if try await entry.0.execute(in: entry.1) { notifyRepositoryChanged() }
+            } catch { NSAlert(error: error).runModal() }
+        }
+    }
+
+    static func startPlugins(owner: NSWindow?) {
+        globalPluginRegistry.load()
+        let entries = globalPluginRegistry.entries.sorted {
+            $0.plugin.name.localizedCaseInsensitiveCompare($1.plugin.name) == .orderedAscending
+        }
+        let alert = NSAlert(); alert.messageText = "Plugins"
+        alert.informativeText = globalPluginRegistry.failures.joined(separator: "\n")
+        guard !entries.isEmpty else {
+            alert.informativeText += "\nNo compatible native plugins are installed in \(ApplicationPluginRegistry.userDirectory.path)."
+            alert.runModal(); return
+        }
+        let choices = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 360, height: 28))
+        choices.addItems(withTitles: entries.map { $0.plugin.name })
+        alert.accessoryView = choices
+        alert.addButton(withTitle: "Settings…"); alert.addButton(withTitle: "Run"); alert.addButton(withTitle: "Cancel")
+        let target = PluginSelectionTarget { alert.buttons[1].isEnabled = !entries[choices.indexOfSelectedItem].plugin.requiresRepository }
+        choices.target = target; choices.action = #selector(PluginSelectionTarget.changed)
+        target.changed()
+        let response = alert.runModal()
+        guard response != .alertThirdButtonReturn else { return }
+        let plugin = entries[choices.indexOfSelectedItem].plugin
+        let settings = ApplicationPluginSettings(identifier: plugin.identifier, legacyName: plugin.pluginDescription,
+            locations: nil, defaults: .standard)
+        let host = GitExtensionPluginHost(refresh: {}, navigate: { _ in throw PluginError.invalid("Open a repository first.") },
+            readSetting: { try settings.value($0, scope: DistributedSettingsScope(rawValue: $1.rawValue)!) },
+            writeSetting: { try settings.set($0, value: $1, scope: DistributedSettingsScope(rawValue: $2.rawValue)!) })
+        host.update(context: [:], owner: owner)
+        Task { @MainActor in
+            do {
+                if response == .alertFirstButtonReturn {
+                    if let controller = try plugin.settingsController(in: host) {
+                        let window = NSWindow(contentViewController: controller)
+                        window.title = "Settings — \(plugin.name)"; window.isReleasedWhenClosed = false
+                        let presentation = NSWindowController(window: window)
+                        globalPluginWindows.append(presentation); presentation.showWindow(nil)
+                    } else {
+                        let message = NSAlert(); message.messageText = "\(plugin.name) has no settings."; message.runModal()
+                    }
+                } else if !plugin.requiresRepository {
+                    defer { plugin.unregister(from: host) }
+                    try plugin.register(with: host)
+                    _ = try await plugin.execute(in: host)
+                }
+            } catch { NSAlert(error: error).runModal() }
+        }
+    }
+
+    private func executePlugin(named name: String, context: [String: [String]], module: (any RepositoryBrowsingDataSource)? = nil) async throws {
+        try await initializePlugins()
+        guard let (plugin, host) = pluginSession.registered.first(where: {
+            $0.0.name.caseInsensitiveCompare(name) == .orderedSame
+        }) else { throw PluginError.invalid("Plugin is not installed or failed registration: \(name)") }
+        if let module {
+            let child = type(of: plugin).init()
+            let locations: DistributedSettings?
+            if let source = module as? any RepositorySettingsDataSource {
+                locations = try await DistributedSettings.loadLocations(from: source)
+            } else { locations = nil }
+            let settings = ApplicationPluginSettings(identifier: child.identifier,
+                legacyName: child.pluginDescription, locations: locations, defaults: .standard)
+            let childHost = GitExtensionPluginHost(refresh: { [weak self] in self?.notifyRepositoryChanged() },
+                navigate: { _ in throw PluginError.invalid("Revision navigation is unavailable in a child-repository workflow.") },
+                readSetting: { try settings.value($0, scope: DistributedSettingsScope(rawValue: $1.rawValue)!) },
+                writeSetting: { try settings.set($0, value: $1, scope: DistributedSettingsScope(rawValue: $2.rawValue)!) },
+                executeCommand: { arguments, remote, mutation, input in
+                    guard let source = module as? any RepositoryPluginDataSource else {
+                        throw PluginError.invalid("Repository command execution is unavailable.")
+                    }
+                    let result = try await source.executePluginCommand(
+                        GitCommand(arguments: arguments, accessesRemote: remote, changesRepositoryState: mutation), standardInput: input)
+                    return (result.exitStatus, result.standardOutput, result.standardError)
+                })
+            childHost.update(context: context, owner: browser?.view.window)
+            repositoryChangedNotifier.lock()
+            defer { child.unregister(from: childHost); repositoryChangedNotifier.unlock(requestNotify: false) }
+            try child.register(with: childHost)
+            if try await child.execute(in: childHost) { notifyRepositoryChanged() }
+            return
+        }
+        host.update(context: context, owner: browser?.view.window)
+        host.updateSelection(browser?.workflowRevisionSelection ?? [])
+        repositoryChangedNotifier.lock()
+        defer { repositoryChangedNotifier.unlock(requestNotify: false) }
+        if try await plugin.execute(in: host) { notifyRepositoryChanged() }
+    }
+
+    private func initializePlugins() async throws {
+        guard !pluginsInitialized else { return }
+        pluginRegistry.load()
+        let locations: DistributedSettings?
+        if let source = repositoryModule as? any RepositorySettingsDataSource {
+            locations = try await DistributedSettings.loadLocations(from: source)
+        } else { locations = nil }
+        let context = try await scriptOptions(for: ScriptDefinition())
+        try Task.checkCancellation()
+        guard !pluginsInitialized else { return }
+        for entry in pluginRegistry.entries {
+            if entry.plugin.requiresRepository && context["WorkingDir"] == nil { continue }
+            let settings = ApplicationPluginSettings(identifier: entry.plugin.identifier,
+                legacyName: entry.plugin.pluginDescription, locations: locations, defaults: .standard)
+            let host = GitExtensionPluginHost(refresh: { [weak self] in self?.notifyRepositoryChanged() },
+                navigate: { [weak self] expression in
+                    guard let self, let source = repositoryModule as? any RepositoryScriptContextDataSource else { return }
+                    browser?.selectScriptRevision(try await source.scriptRevision(expression))
+                }, readSetting: { try settings.value($0, scope: DistributedSettingsScope(rawValue: $1.rawValue)!) },
+                writeSetting: { try settings.set($0, value: $1, scope: DistributedSettingsScope(rawValue: $2.rawValue)!) },
+                settingsChanged: { [weak self] in self?.pluginEvent("PostSettings", succeeded: true) },
+                launchWorkflow: { [weak self] workflow in
+                    guard let self else { throw PluginError.invalid("The repository window has closed.") }
+                    switch workflow {
+                    case .commit: startCommit()
+                    case .checkoutBranch: startCheckoutBranch(initialTarget: nil)
+                    case .pull: startPull(action: .openDialog, immediately: false)
+                    case .push: startPush()
+                    case .fetch: startPull(action: .fetch, immediately: false)
+                    case .merge: startMergeBranches(initialTarget: nil)
+                    case .stashes: startStashManagement()
+                    case .settings: startSettings()
+                    case .remoteManagement: startRemoteManagement()
+                    case .repositoryHosting: startPullRequests()
+                    case .reflog: startReflog()
+                    case .worktrees: startCreateWorktree()
+                    case .submodules: startSubmoduleManagement()
+                    case .clean: startCleanRepository()
+                    case .bisect: startBisect(browser?.workflowRevisionSelection.compactMap { id in self.browser?.revisions.first { $0.id == id } } ?? [])
+                    case .openRepository(let url): BrowserCommandCenter.perform(.openRecentRepository(url))
+                    }
+                },
+                executeCommand: { [weak self] arguments, remote, mutation, input in
+                    guard let source = self?.repositoryModule as? any RepositoryPluginDataSource else {
+                        throw PluginError.invalid("Repository command execution is unavailable.")
+                    }
+                    let result = try await source.executePluginCommand(
+                        GitCommand(arguments: arguments, accessesRemote: remote, changesRepositoryState: mutation),
+                        standardInput: input)
+                    return (result.exitStatus, result.standardOutput, result.standardError)
+                })
+            host.update(context: context, owner: browser?.view.window)
+            host.updateSelection(browser?.workflowRevisionSelection ?? [])
+            pluginSession.register(entry.plugin, host: host)
+        }
+        pluginsInitialized = true
+        if let owner = browser?.view.window, pluginCloseObserver == nil {
+            let session = pluginSession
+            pluginCloseObserver = NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification,
+                object: owner, queue: .main) { [weak self] _ in
+                    Task { @MainActor in
+                        if let self { self.stopPlugins() } else { session.close() }
+                    }
+                }
+            pluginMainObserver = NotificationCenter.default.addObserver(forName: NSWindow.didBecomeMainNotification,
+                object: owner, queue: .main) { [weak self] _ in
+                    Task { @MainActor in self?.publishPluginMenu() }
+                }
+        }
+        publishPluginMenu()
+        _ = pluginSession.dispatch("PostRegisterPlugin")
+    }
+
+    private func publishPluginMenu() {
+        guard browser?.view.window?.isMainWindow == true else { return }
+        BrowserCommandAvailability.shared.plugins = pluginSession.registered
+            .sorted { $0.0.name.localizedCaseInsensitiveCompare($1.0.name) == .orderedAscending }
+            .map { .init(id: $0.0.identifier, title: $0.0.name, icon: $0.0.icon) }
+    }
+
     func startArchive(selected: [Commit]) {
         guard let browser, let owner = browser.view.window,
               let source = repositoryModule as? any RepositoryArchivingDataSource else { return }
@@ -88,6 +471,10 @@ final class GitUICommands {
                         try ScriptExecution.validateContext(script.arguments, options: options, beforePrompts: true)
                         guard let script = await ScriptPrompts.resolve(script, options: options) else {
                             completion(.failure(CancellationError())); scriptTask = nil; return
+                        }
+                        if !script.isPowerShell, let name = ApplicationPluginRegistry.scriptPluginName(script.command) {
+                            try await executePlugin(named: name, context: options)
+                            completion(.success(.pluginCompleted)); scriptTask = nil; return
                         }
                         let invocation = try ScriptExecution.invocation(script, directory: directory, options: options,
                             gitExecutable: URL(fileURLWithPath: AppSettingsStore.shared.preferences.gitExecutablePath),
@@ -151,6 +538,10 @@ final class GitUICommands {
                 let options = try await scriptOptions(for: script, module: module, context: context)
                 try ScriptExecution.validateContext(script.arguments, options: options, beforePrompts: true)
                 guard let prepared = await ScriptPrompts.resolve(script, options: options) else { return false }
+                if !script.isPowerShell, let name = ApplicationPluginRegistry.scriptPluginName(script.command) {
+                    try await executePlugin(named: name, context: options, module: module)
+                    return true
+                }
                 guard let directory = options["WorkingDir"]?.first else { return false }
                 let invocation = try ScriptExecution.invocation(prepared,
                     directory: URL(fileURLWithPath: directory), options: options,
@@ -216,8 +607,9 @@ final class GitUICommands {
         guard let owner = browser?.view.window else { return }
         Task { @MainActor [weak self] in
             guard let self else { return }
-            await ApplicationShellDialogs.presentSettings(from: owner, source: repositoryModule as? any RepositorySettingsDataSource,
+            let accepted = await ApplicationShellDialogs.presentSettings(from: owner, source: repositoryModule as? any RepositorySettingsDataSource,
                 repositoryChanged: { [weak self] in self?.notifyRepositoryChanged() })
+            pluginEvent("PostSettings", succeeded: accepted)
         }
     }
 
@@ -300,6 +692,7 @@ final class GitUICommands {
         Task { @MainActor in
             let result = await SubmoduleDialogs.run(title: "Submodules", owner: owner) { output in try await source.performSubmoduleAction(action, output: output) }
             completeSubmoduleOperation(result)
+            if case .update = action { pluginEvent("PostUpdateSubmodules", succeeded: result.succeeded) }
         }
     }
 
@@ -353,6 +746,7 @@ final class GitUICommands {
                 try await source.updateSubmoduleTreeItem(item, output: output)
             }
             completeSubmoduleOperation(result)
+            pluginEvent("PostUpdateSubmodules", succeeded: result.succeeded)
         }
     }
 
@@ -537,6 +931,7 @@ final class GitUICommands {
 
         let head = browser.revisions.first(where: \.isHEAD)
             ?? browser.revisions.first(where: { !$0.isArtificial })
+        guard pluginEvent("PreCommit") else { return }
         browser.commitWindowController = browser.presentCommitDialog(
             source: source,
             pushSource: repositoryModule as? any RepositoryPushingDataSource,
@@ -729,6 +1124,7 @@ final class GitUICommands {
             onRepositoryChanged: { [weak self, weak browser] preferredCommitID in
                 self?.notifyRepositoryChanged(preferredCommitID: preferredCommitID ?? browser?.selectedCommitID)
             },
+            onCreatePullRequest: { [weak self] in self?.startCreatePullRequest(fromPush: true) },
             onClose: { [weak browser] in
                 browser?.pushWindowController = nil
             }
@@ -1451,6 +1847,7 @@ final class GitUICommands {
             }
         )
         coordinator.scriptHooks = scriptHooks
+        coordinator.pluginEvent = { [weak self] event, succeeded in self?.pluginEvent(event, succeeded: succeeded) ?? true }
         if retainOnBrowser { browser.checkoutBranchWorkflowCoordinator = coordinator }
         return coordinator
     }

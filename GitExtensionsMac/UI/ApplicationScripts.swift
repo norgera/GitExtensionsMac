@@ -351,6 +351,7 @@ final class ScriptsWindowController: NSWindowController, NSTableViewDataSource, 
             switch result {
             case .success(.completed(let result)): output.string = "Exit code: \(result.exitStatus)\n" + result.standardOutputString + result.standardErrorString
             case .success(.started(let pid)): output.string = "Started background process \(pid). Completion is not awaited."
+            case .success(.pluginCompleted): output.string = "Plugin completed."
             case .failure(let error): output.string = error is CancellationError ? "Cancelled" : error.localizedDescription
             }
         }

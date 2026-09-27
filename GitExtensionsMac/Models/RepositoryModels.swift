@@ -12,15 +12,15 @@ package enum ObjectIDError: LocalizedError, Sendable {
     }
 }
 
-package struct ObjectID: Hashable, Sendable, Comparable, CustomStringConvertible {
-    package let string: String
+public struct ObjectID: Hashable, Sendable, Comparable, CustomStringConvertible {
+    public let string: String
 
-    package init(parsing string: String) throws {
+    public init(parsing string: String) throws {
         guard Self.isValid(string) else { throw ObjectIDError.invalid(string) }
         self.string = string
     }
 
-    package static func parse(_ string: String) throws -> ObjectID {
+    public static func parse(_ string: String) throws -> ObjectID {
         try ObjectID(parsing: string)
     }
 
@@ -29,10 +29,10 @@ package struct ObjectID: Hashable, Sendable, Comparable, CustomStringConvertible
         return try parse(string)
     }
 
-    package var description: String { string }
-    package var shortString: String { String(string.prefix(8)) }
+    public var description: String { string }
+    public var shortString: String { String(string.prefix(8)) }
 
-    package static func < (lhs: ObjectID, rhs: ObjectID) -> Bool { lhs.string < rhs.string }
+    public static func < (lhs: ObjectID, rhs: ObjectID) -> Bool { lhs.string < rhs.string }
 
     private static func isValid(_ value: String) -> Bool {
         (value.count == 40 || value.count == 64)
@@ -42,17 +42,17 @@ package struct ObjectID: Hashable, Sendable, Comparable, CustomStringConvertible
     }
 }
 
-package enum RevisionID: Hashable, Sendable, CustomStringConvertible {
+public enum RevisionID: Hashable, Sendable, CustomStringConvertible {
     case object(ObjectID)
     case workingDirectory
     case index
 
-    package var objectID: ObjectID? {
+    public var objectID: ObjectID? {
         guard case .object(let objectID) = self else { return nil }
         return objectID
     }
 
-    package var description: String {
+    public var description: String {
         switch self {
         case .object(let objectID): objectID.string
         case .workingDirectory: "WORKTREE"

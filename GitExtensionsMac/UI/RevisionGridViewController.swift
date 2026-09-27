@@ -37,6 +37,9 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
     private var lastViewportSize = NSSize.zero
     private var graphWidthRefreshScheduled = false
     private var graphConfiguration = RevisionGraphLayout.Configuration.gitExtensionsDefault
+    private var buildStatuses: [RevisionID: BuildInfo] = [:]
+    private var buildColumnEnabled = false
+    private static let buildColumn = "Build Status"
 
     deinit {
         graphTask?.cancel()
@@ -84,6 +87,9 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
         addColumn("Author Name", width: 130, min: 25, max: 320, resizable: true)
         addColumn("Date", width: 130, min: 25, max: 220, resizable: true)
         addColumn("Commit ID", width: 60, min: 32, max: 330, resizable: true)
+        addColumn(Self.buildColumn, width: 150, min: 16, max: 800, resizable: true)
+        applyBuildStatusColumnSettings()
+        tableView.action = #selector(gridClicked)
 
         let menu = NSMenu()
         menu.delegate = self
@@ -135,7 +141,54 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
         allCommits = []
         commits = []
         graphRows = []
+        buildStatuses = [:]
         tableView.reloadData()
+    }
+
+    func setBuildStatusColumn(enabled: Bool) {
+        buildColumnEnabled = enabled
+        applyBuildStatusColumnSettings()
+    }
+    func applyBuildStatusColumnSettings() {
+        guard let column = tableView.tableColumn(withIdentifier: .init(Self.buildColumn)) else { return }
+        let icon = AppSettingsStore.shared.showBuildStatusIconColumn, text = AppSettingsStore.shared.showBuildStatusTextColumn
+        column.isHidden = !(buildColumnEnabled && (icon || text))
+        column.resizingMask = text ? .userResizingMask : []
+        if icon && !text { column.width = 16 } else if text && column.width == 16 { column.width = 150 }
+        tableView.reloadData()
+    }
+    func applyBuildInfos(_ infos: [BuildInfo]) {
+        var changed = IndexSet()
+        for info in infos {
+            for id in info.revisions where info.replaces(buildStatuses[id]) {
+                guard allCommits.contains(where: { $0.id == id }) else { continue }
+                buildStatuses[id] = info
+                if let row = commits.firstIndex(where: { $0.id == id }) { changed.insert(row) }
+            }
+        }
+        guard !changed.isEmpty, let column = tableView.tableColumns.firstIndex(where: { $0.identifier.rawValue == Self.buildColumn }) else { return }
+        tableView.reloadData(forRowIndexes: changed, columnIndexes: IndexSet(integer: column))
+    }
+    func buildStatus(for id: RevisionID?) -> BuildInfo? { id.flatMap { buildStatuses[$0] } }
+    static func buildStatusColor(_ status: BuildStatus) -> NSColor? {
+        switch status {
+        case .unknown: nil
+        case .success: .systemGreen
+        case .failure: .systemRed
+        case .inProgress: .systemBlue
+        case .unstable: .systemOrange
+        case .stopped: .systemGray
+        }
+    }
+    static func buildStatusText(_ info: BuildInfo, icon: Bool, text: Bool) -> String {
+        (icon ? info.status.symbol : "") + (text ? info.description ?? "" : "")
+    }
+    @objc private func gridClicked() {
+        guard tableView.clickedRow >= 0, tableView.clickedColumn >= 0,
+              tableView.tableColumns[tableView.clickedColumn].identifier.rawValue == Self.buildColumn,
+              commits.indices.contains(tableView.clickedRow),
+              let url = buildStatuses[commits[tableView.clickedRow].id]?.url else { return }
+        NSWorkspace.shared.open(url)
     }
 
     func appendIncrementalBatch(_ batch: [Commit]) {
@@ -357,6 +410,13 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
             return textCell(identifier, value: date, font: AppSettingsStore.shared.applicationFont(size: 11), isRelative: graphRows[row].isRelative)
         case "Commit ID":
             return textCell(identifier, value: commit.isArtificial ? "" : commit.shortID, font: AppSettingsStore.shared.fontPreferences.font(.monospace, fallback: .monospacedSystemFont(ofSize: 10.5, weight: .regular)), isRelative: graphRows[row].isRelative)
+        case Self.buildColumn:
+            let info = buildStatuses[commit.id]
+            let cell = textCell(identifier, value: info.map { Self.buildStatusText($0, icon: AppSettingsStore.shared.showBuildStatusIconColumn, text: AppSettingsStore.shared.showBuildStatusTextColumn) } ?? "",
+                                font: AppSettingsStore.shared.fontPreferences.font(.monospace, fallback: .monospacedSystemFont(ofSize: 10.5, weight: .regular)), isRelative: true)
+            if let info, let color = Self.buildStatusColor(info.status) { cell.textField?.textColor = color }
+            cell.toolTip = info.flatMap { $0.tooltip ?? $0.description }
+            return cell
         default:
             return nil
         }
@@ -578,9 +638,13 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
             isCherryPicking: isCherryPicking,
             cherryPickHasConflicts: cherryPickHasConflicts,
             isRebasing: isRebasing,
-            rebaseHasConflicts: rebaseHasConflicts
+            rebaseHasConflicts: rebaseHasConflicts,
+            buildStatus: buildStatuses[commits[row].id]
         )
         populatePlaceholderMenu(menu, with: RevisionContextMenuBuilder.build(context))
+        for identifier in ["revision.buildReport", "revision.pullRequestPage"] {
+            menuItem(withIdentifier: identifier, in: menu).map { $0.target = self; $0.action = #selector(openBuildLink(_:)) }
+        }
         menuFocusedCommitID = commits[row].id
         for identifier in [
             "revision.navigate.child",
@@ -626,6 +690,11 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
         menu.addItem(scripts)
         menuItem(withIdentifier: "revision.other.reflog", in: menu)?.state =
             AppSettingsStore.shared.showReflogReferences ? .on : .off
+    }
+
+    @objc private func openBuildLink(_ sender: NSMenuItem) {
+        guard let info = buildStatus(for: menuFocusedCommitID) else { return }
+        if let url = sender.identifier?.rawValue == "revision.buildReport" ? info.url : info.pullRequestURL { NSWorkspace.shared.open(url) }
     }
 
     @objc private func performMutationMenuCommand(_ sender: NSMenuItem) {

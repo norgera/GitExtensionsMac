@@ -18,6 +18,7 @@ final class RepositoryStartupViewController: NSViewController, NSTableViewDataSo
     var onOpenRepository: (() -> Void)?
     var onOpenRecentRepository: ((URL) -> Void)?
     var onCloneRepository: (() -> Void)?
+    var onCloneHostedRepository: (() -> Void)?
     var onInitializeRepository: (() -> Void)?
     var onSettings: (() -> Void)?
 
@@ -49,9 +50,10 @@ final class RepositoryStartupViewController: NSViewController, NSTableViewDataSo
         open.keyEquivalent = "o"
         open.keyEquivalentModifierMask = .command
         let clone = commandButton("Clone repository…", action: #selector(cloneRepository))
+        let cloneHosted = commandButton("Clone GitHub repository…", action: #selector(cloneHostedRepository))
         let create = commandButton("Create new repository…", action: #selector(initializeRepository))
         let settings = commandButton("Settings…", action: #selector(openSettings))
-        let leftStack = NSStackView(views: [logo, startTitle, open, clone, create, settings])
+        let leftStack = NSStackView(views: [logo, startTitle, open, clone, cloneHosted, create, settings])
         leftStack.orientation = .vertical
         leftStack.alignment = .leading
         leftStack.spacing = 9
@@ -173,6 +175,7 @@ final class RepositoryStartupViewController: NSViewController, NSTableViewDataSo
 
     @objc private func openRepository() { onOpenRepository?() }
     @objc private func cloneRepository() { onCloneRepository?() }
+    @objc private func cloneHostedRepository() { onCloneHostedRepository?() }
     @objc private func initializeRepository() { onInitializeRepository?() }
     @objc private func openSettings() { onSettings?() }
 
@@ -221,7 +224,8 @@ struct RepositoryNetworkRequest: Hashable, Sendable {
 
 @MainActor
 enum ApplicationShellDialogs {
-    static func presentSettings(from window: NSWindow, source: (any RepositorySettingsDataSource)? = nil, repositoryChanged: @escaping () -> Void = {}) async {
+    @discardableResult
+    static func presentSettings(from window: NSWindow, source: (any RepositorySettingsDataSource)? = nil, repositoryChanged: @escaping () -> Void = {}) async -> Bool {
         let controller = SettingsViewController(store: .shared, source: source, repositoryChanged: repositoryChanged)
         let panel = NSPanel(contentViewController: controller)
         panel.title = "Settings"
@@ -230,12 +234,13 @@ enum ApplicationShellDialogs {
         panel.minSize = NSSize(width: 900, height: 620)
         controller.panel = panel
         panel.delegate = controller
-        await withCheckedContinuation { continuation in
+        let response: NSApplication.ModalResponse = await withCheckedContinuation { continuation in
             controller.onClose = { response in
                 window.endSheet(panel, returnCode: response)
             }
-            window.beginSheet(panel) { _ in continuation.resume() }
+            window.beginSheet(panel) { continuation.resume(returning: $0) }
         }
+        return response == .OK
     }
 
     static func presentNetworkWindow(
@@ -985,6 +990,7 @@ private final class SettingsViewController: NSViewController, NSOutlineViewDataS
     private var hotkeyCategory = "Browse"
     private var hotkeyCommand = "openRepository"
     private var colorDraft: ApplicationColorPreferences?
+    private var buildServerPage: BuildServerSettingsPageController?
     private lazy var roots: [SettingsNode] = [
         SettingsNode("application", "Git Extensions", [
             SettingsNode("general", "General"),
@@ -993,7 +999,9 @@ private final class SettingsViewController: NSViewController, NSOutlineViewDataS
                 SettingsNode("fonts", "Fonts"), SettingsNode("console", "Console style")
             ]),
             SettingsNode("revision_links", "Revision links"),
+            SettingsNode("build_server", "Build server integration"),
             SettingsNode("scripts", "Scripts"),
+            SettingsNode("plugins", "Plugins"),
             SettingsNode("hotkeys", "Hotkeys"),
             SettingsNode("advanced", "Advanced", [SettingsNode("confirmations", "Confirmations")]),
             SettingsNode("detailed", "Detailed", [
@@ -1373,6 +1381,13 @@ private final class SettingsViewController: NSViewController, NSOutlineViewDataS
                 }
                 content.arrangedSubviews.dropFirst().forEach(disable)
             }
+        case "build_server":
+            showBuildServerSettings()
+        case "plugins":
+            content.addArrangedSubview(note("Native plugins are trusted application code. Plugin settings use stable plugin identifiers; repository preferences override global preferences."))
+            let button = CallbackButton(title: "Configure plugins…", target: nil, action: #selector(CallbackButton.invoke))
+            button.callback = { BrowserCommandCenter.perform(.plugins) }
+            content.addArrangedSubview(button)
         case "scripts":
             content.addArrangedSubview(note("Scripts are application preferences, shared across repositories. Configure event hooks, prompts, background execution and context-menu actions in the Scripts window. Keyboard assignments are under Hotkeys → Scripts."))
             let button = CallbackButton(title: "Configure scripts…", target: nil, action: #selector(CallbackButton.invoke))
@@ -1667,6 +1682,31 @@ private final class SettingsViewController: NSViewController, NSOutlineViewDataS
         content.addArrangedSubview(note("Capture groups use {0}, {1}, …; remote groups precede revision groups. %COMMIT_HASH% inserts the resolved commit ID. Effective shows definitions from all scopes read-only; select a writable scope to edit."))
     }
 
+    private func showBuildServerSettings() {
+        if let page = buildServerPage {
+            content.addArrangedSubview(page.view)
+            return
+        }
+        content.addArrangedSubview(note("Loading build server settings…"))
+        guard !loadingDistributed else { return }
+        loadingDistributed = true
+        Task {
+            defer { loadingDistributed = false }
+            do {
+                if let source, distributedSettings == nil { distributedSettings = try await DistributedSettings.loadLocations(from: source) }
+                let remotes = (try? await (source as? any RepositoryRemoteManagingDataSource)?.loadRemoteConfigurations()) ?? []
+                let working = try? await source?.settingsDirectories().working
+                buildServerPage = BuildServerSettingsPageController(
+                    store: BuildServerSettingsStore(locations: distributedSettings),
+                    remoteURLs: remotes.map { $0.pushURL?.isEmpty == false ? $0.pushURL! : $0.fetchURL },
+                    workingDirectoryName: working?.lastPathComponent)
+                if currentCategoryID == "build_server" { showCategory(SettingsNode("build_server", "Build server integration")) }
+            } catch {
+                if currentCategoryID == "build_server" { content.addArrangedSubview(note(error.localizedDescription)) }
+            }
+        }
+    }
+
     private func showDetailedSettings() {
         if let source, distributedSettings == nil {
             content.addArrangedSubview(note("Loading application settings scopes…"))
@@ -1876,6 +1916,7 @@ private final class SettingsViewController: NSViewController, NSOutlineViewDataS
                         changed = try DistributedSettings.write([RevisionLinkDefinition.settingKey: xml], to: url) || changed
                     }
                 }
+                if let buildServerPage { try buildServerPage.save(); changed = true }
                 if let distributedSettings {
                     for (scope, url) in [(DistributedSettingsScope.local, distributedSettings.localURL), (.distributed, distributedSettings.distributedURL)] {
                         let edits = distributedEdits[scope] ?? [:]

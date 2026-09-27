@@ -102,8 +102,10 @@ final class ApplicationHostViewController: NSViewController {
         case .openRepository: presentOpenRepositoryPanel()
         case .closeToDashboard: showDashboard()
         case .cloneRepository: presentCloneShell()
+        case .forkHostedRepository: presentForkAndClone()
         case .initializeRepository: presentInitializeRepository()
         case .settings: presentSettings()
+        case .plugins: GitUICommands.startPlugins(owner: view.window)
         case .viewPatch: GitUICommands.startPatchViewer(owner: view.window)
         case .clearRecentRepositories:
             store.clearRecentRepositories()
@@ -126,6 +128,7 @@ final class ApplicationHostViewController: NSViewController {
         controller.onOpenRepository = { [weak self] in self?.presentOpenRepositoryPanel() }
         controller.onOpenRecentRepository = { [weak self] url in self?.openRepository(url) }
         controller.onCloneRepository = { [weak self] in self?.presentCloneShell() }
+        controller.onCloneHostedRepository = { [weak self] in self?.presentForkAndClone() }
         controller.onInitializeRepository = { [weak self] in self?.presentInitializeRepository() }
         controller.onSettings = { [weak self] in self?.presentSettings() }
         install(controller)
@@ -141,6 +144,7 @@ final class ApplicationHostViewController: NSViewController {
             case .openRepository: self.presentOpenRepositoryPanel()
             case .closeToDashboard: self.showDashboard()
             case .cloneRepository: self.presentCloneShell()
+            case .forkHostedRepository: self.presentForkAndClone()
             case .initializeRepository: self.presentInitializeRepository()
             case .settings: return false // Browser supplies its existing module's Settings capability.
             case .clearRecentRepositories:
@@ -217,6 +221,20 @@ final class ApplicationHostViewController: NSViewController {
     private func presentSettings() {
         guard let window = view.window else { return }
         Task { await ApplicationShellDialogs.presentSettings(from: window) }
+    }
+
+    private func presentForkAndClone() {
+        let recent = store.recentRepositories.first.map { URL(fileURLWithPath: $0.path).deletingLastPathComponent().path } ?? ""
+        let configured = store.repositoryCreationPreferences.cloneDestinationPath
+        GitUICommands.startForkAndClone(
+            owner: view.window, creator: repositoryCreator(),
+            initialDestination: configured.isEmpty ? recent : configured,
+            gitExecutable: URL(fileURLWithPath: store.preferences.gitExecutablePath)
+        ) { [weak self] url in
+            guard let self else { return }
+            store.recordRecentRepository(url)
+            openRepository(url)
+        }
     }
 
     private func presentCloneShell() {

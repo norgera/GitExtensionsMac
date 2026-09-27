@@ -186,6 +186,7 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
     private var didComplete = false
     private var showOnlyMyMessages = false
     private var usingTemplate = false
+    private var registeredTemplatesObserver: NSObjectProtocol?
     private var noVerify = false
     private var gpgSigning: RepositoryCommitGPGSigning = .gitDefault
     private var gpgKey = ""
@@ -239,7 +240,10 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
     }
 
     required init?(coder: NSCoder) { nil }
-    deinit { loadTask?.cancel(); diffLoadTask?.cancel(); actionTask?.cancel() }
+    deinit {
+        loadTask?.cancel(); diffLoadTask?.cancel(); actionTask?.cancel()
+        if let registeredTemplatesObserver { NotificationCenter.default.removeObserver(registeredTemplatesObserver) }
+    }
 
     override func loadView() {
         let root = CommitRootView()
@@ -475,7 +479,23 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
 
     private func configureTemplatesMenu() {
         guard let menu = templatesMenu.menu else { return }
+        if registeredTemplatesObserver == nil {
+            registeredTemplatesObserver = NotificationCenter.default.addObserver(
+                forName: CommitTemplateRegistry.didChange, object: nil, queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor in self?.configureTemplatesMenu() }
+            }
+        }
         while menu.items.count > 1 { menu.removeItem(at: 1) }
+        let registered = CommitTemplateRegistry.templates.filter { !$0.name.isEmpty }
+        for template in registered {
+            let item = NSMenuItem(title: template.name, action: #selector(selectRegisteredTemplate(_:)), keyEquivalent: "")
+            item.target = self
+            item.image = template.icon
+            item.representedObject = template.name
+            menu.addItem(item)
+        }
+        if !registered.isEmpty { menu.addItem(.separator()) }
         let templates = settings.commitPreferences.templates.filter { !$0.name.isEmpty }
         for template in templates {
             let item = NSMenuItem(title: template.name, action: #selector(selectCommitTemplate(_:)), keyEquivalent: "")
@@ -630,6 +650,15 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
             forBranch: branch,
             enabled: value.template.expandsBranchRegularExpressions
         )
+        usingTemplate = true
+        commitWindow?.makeFirstResponder(messageView)
+    }
+
+    @objc private func selectRegisteredTemplate(_ sender: NSMenuItem) {
+        guard let name = sender.representedObject as? String,
+              let template = CommitTemplateRegistry.templates.first(where: { $0.name == name }) else { return }
+        let branch = commitState?.mutationState.currentBranch ?? ""
+        messageView.string = CommitTemplateExpander.expand(template.text(), forBranch: branch, enabled: template.isRegex)
         usingTemplate = true
         commitWindow?.makeFirstResponder(messageView)
     }
