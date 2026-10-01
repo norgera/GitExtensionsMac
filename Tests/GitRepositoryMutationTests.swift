@@ -216,7 +216,7 @@ enum GitRepositoryMutationTests {
             ), messageFile: path)
             throw MutationFixtureError("tags: specific-key signing accepted an empty key")
         } catch RepositoryTagError.missingSigningKey {
-            // Expected.
+
         }
         try require(
             specificallySigned.accessesRemote == false && specificallySigned.changesRepositoryState,
@@ -277,19 +277,19 @@ enum GitRepositoryMutationTests {
             _ = try await source.createTag(RepositoryCreateTagRequest(name: "movable", target: original))
             throw MutationFixtureError("tags: existing tag was overwritten without force")
         } catch is GitError {
-            // Git preserves the existing tag unless Force is selected.
+
         }
         do {
             _ = try await source.createTag(RepositoryCreateTagRequest(name: "bad tag", target: original))
             throw MutationFixtureError("tags: invalid ref name was accepted")
         } catch RepositoryTagError.invalidName {
-            // Expected.
+
         }
         do {
             _ = try await source.createTag(RepositoryCreateTagRequest(name: "   ", target: original))
             throw MutationFixtureError("tags: blank name was accepted")
         } catch RepositoryTagError.missingName {
-            // Expected.
+
         }
 
         try fixture.write("new tag target\n", to: repository.appendingPathComponent("tag-target.txt"))
@@ -474,7 +474,7 @@ enum GitRepositoryMutationTests {
             ))
             throw MutationFixtureError("remotes: blank name was accepted")
         } catch RepositoryRemoteManagementError.invalidName {
-            // Expected.
+
         }
         let unavailableURL = fixture.rootURL.appendingPathComponent("Missing remote.git").path
         try await source.saveRemote(RepositoryRemoteSaveRequest(
@@ -1340,7 +1340,7 @@ enum GitRepositoryMutationTests {
             ))
             throw MutationFixtureError("commit: an empty message was accepted")
         } catch RepositoryMutationError.emptyCommitMessage {
-            // Expected.
+
         }
         try require(try fixture.git(["rev-parse", "HEAD"], in: repository).trimmed == before, "commit: empty-message validation preserves HEAD")
 
@@ -1356,7 +1356,7 @@ enum GitRepositoryMutationTests {
             ))
             throw MutationFixtureError("commit: a normal commit without staged changes was accepted")
         } catch RepositoryMutationError.nothingStaged {
-            // Expected.
+
         }
         try require(try fixture.git(["rev-parse", "HEAD"], in: repository).trimmed == before, "commit: nothing-staged validation preserves HEAD")
     }
@@ -1760,7 +1760,7 @@ enum GitRepositoryMutationTests {
             _ = try await task.value
             throw MutationFixtureError("cancellation: cancelled commit completed")
         } catch is CancellationError {
-            // Expected.
+
         }
         try require(try fixture.git(["rev-parse", "HEAD"], in: repository).trimmed == before, "cancellation: HEAD is unchanged")
         try require(try fixture.git(["diff", "--cached", "--name-only"], in: repository).trimmed == "cancel.txt", "cancellation: index is preserved")
@@ -2371,7 +2371,7 @@ enum GitRepositoryMutationTests {
             )
             throw MutationFixtureError("merge command: an empty target was accepted")
         } catch RepositoryMergeError.missingTarget {
-            // Expected.
+
         }
     }
 
@@ -2778,7 +2778,7 @@ enum GitRepositoryMutationTests {
             _ = try await task.value
             throw MutationFixtureError("merge cancellation: cancelled operation completed")
         } catch is CancellationError {
-            // Expected.
+
         }
         try require(try fixture.git(["rev-parse", "HEAD"], in: repository).trimmed == before, "merge cancellation: HEAD is unchanged")
         try require(try fixture.git(["status", "--porcelain"], in: repository).trimmed.isEmpty, "merge cancellation: index and worktree are unchanged")
@@ -3365,7 +3365,7 @@ enum GitRepositoryMutationTests {
             _ = try await task.value
             throw MutationFixtureError("rebase cancellation: cancelled operation completed")
         } catch is CancellationError {
-            // Expected.
+
         }
         try require(try fixture.git(["rev-parse", "HEAD"], in: repository).trimmed == before, "rebase cancellation: HEAD is unchanged")
     }

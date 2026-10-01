@@ -199,9 +199,16 @@ final class CheckoutBranchWorkflowCoordinator {
         suggestedPrefix: String? = nil,
         checkoutAfterCreation: Bool? = nil,
         userCanChangeRevision: Bool = true,
-        couldBeOrphan: Bool = true
+        couldBeOrphan: Bool = true,
+        allowsBareRepository: Bool = false,
+        onFinished: ((Bool) -> Void)? = nil
     ) {
-        guard !context.repository.isBare, sourceRevision?.isArtificial != true, let owner else { return }
+
+        guard !context.repository.isBare || allowsBareRepository, sourceRevision?.isArtificial != true, let owner else {
+            onFinished?(false)
+            return
+        }
+        let checkoutAfterCreation = context.repository.isBare ? false : checkoutAfterCreation
         let startingContext = context
         let previousSelection = startingContext.headID.map(RevisionID.object)
         replaceTask { [weak self, weak owner] in
@@ -220,7 +227,7 @@ final class CheckoutBranchWorkflowCoordinator {
                     userCanChangeRevision: userCanChangeRevision,
                     couldBeOrphan: couldBeOrphan,
                     owner: owner
-                ) else { onStatus("Create branch cancelled"); return }
+                ) else { onStatus("Create branch cancelled"); onFinished?(false); return }
                 onStatus("Creating branch…")
                 var result = try await source.createBranch(request)
                 guard !Task.isCancelled else { return }
@@ -229,12 +236,15 @@ final class CheckoutBranchWorkflowCoordinator {
                     result = try await updateSubmodulesIfRequested(result, previousContext: startingContext, owner: owner)
                 }
                 onStatus(result.message)
+                onFinished?(true)
             } catch is CancellationError {
+                onFinished?(false)
                 return
             } catch {
                 await refreshAfterFailure(previousSelection: previousSelection)
                 onStatus(error.localizedDescription)
                 await showError(error, title: "Create branch failed", owner: owner)
+                onFinished?(false)
             }
         }
     }

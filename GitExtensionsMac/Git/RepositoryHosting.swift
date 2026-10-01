@@ -329,6 +329,17 @@ package struct RepositoryHostClient: Sendable {
 
     package func with(_ identity: HostedRepositoryIdentity) -> Self { Self(identity: identity, token: token, transport: transport) }
 
+
+
+    package static func publicUserAvatar(_ login: String, size: Int, transport: @escaping Transport = { try await HostHTTP.send($0) }) async throws -> URL? {
+        struct Profile: Decodable { let avatar_url: String? }
+        let client = Self(identity: .init(provider: .gitHub, host: "github.com", owner: "", project: nil, repository: ""), token: "", transport: transport)
+        let profile = try client.decode(Profile.self, await client.request(["users", login]))
+        guard let text = profile.avatar_url, var url = URLComponents(string: text), url.scheme == "https" else { return nil }
+        url.queryItems = (url.queryItems ?? []) + [.init(name: "s", value: String(size))]
+        return url.url
+    }
+
     private func request(_ segments: [String], method: String = "GET", body: [String: String]? = nil,
                          query: [URLQueryItem] = [], accept: String? = nil) async throws -> Data {
         guard identity.provider == .gitHub else { throw RepositoryHostError.unsupported }

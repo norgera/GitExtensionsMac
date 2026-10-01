@@ -14,16 +14,19 @@ struct BuildServerSettingsStore {
         guard let locations else { return scope == .effective || scope == .global ? globalValues() : [:] }
         return buildKeys(try locations.values(scope, global: globalValues()))
     }
-    func write(_ edits: [String: String?], scope: DistributedSettingsScope) throws {
+    @discardableResult
+    func write(_ edits: [String: String?], scope: DistributedSettingsScope) throws -> Bool {
         switch scope {
         case .global:
             var values = globalValues()
             for (key, value) in edits { values[key] = value }
+            guard values != globalValues() else { return false }
             defaults.set(values, forKey: Self.globalKey)
+            return true
         case .local, .distributed:
-            guard let locations else { return }
-            try DistributedSettings.write(edits, to: scope == .local ? locations.localURL : locations.distributedURL)
-        case .effective: break
+            guard let locations else { return false }
+            return try DistributedSettings.write(edits, to: scope == .local ? locations.localURL : locations.distributedURL)
+        case .effective: return false
         }
     }
     static func bool(_ value: String?) -> Bool? {
@@ -199,7 +202,11 @@ final class BuildServerSettingsPageController: NSViewController, NSTextFieldDele
         view = stack
         let scopes = store.locations == nil ? [DistributedSettingsScope.global] : DistributedSettingsScope.allCases
         if store.locations == nil { scope = .global }
-        scopePopup.addItems(withTitles: scopes.map(\.rawValue)); scopePopup.selectItem(withTitle: scope.rawValue)
+        for item in scopes {
+            scopePopup.addItem(withTitle: item.title)
+            scopePopup.lastItem?.representedObject = item
+        }
+        scopePopup.selectItem(withTitle: scope.title)
         scopePopup.target = self; scopePopup.action = #selector(scopeChanged)
         stack.addArrangedSubview(NSStackView(views: [NSTextField(labelWithString: "Settings source:"), scopePopup]))
         stack.addArrangedSubview(NSTextField(wrappingLabelWithString: "Git Extensions can integrate with build servers to supply per-commit Continuous Integration information."))
@@ -216,12 +223,17 @@ final class BuildServerSettingsPageController: NSViewController, NSTextFieldDele
     }
 
     private func current() throws -> [String: String] {
-        var values = try store.values(scope)
         if scope == .effective {
+            var values: [String: String] = [:]
             for layer in [DistributedSettingsScope.global, .distributed, .local] {
-                for (key, value) in edits[layer] ?? [:] { values[key] = value }
+                var layerValues = try store.values(layer)
+                for (key, value) in edits[layer] ?? [:] { layerValues[key] = value }
+                values.merge(layerValues, uniquingKeysWith: { _, new in new })
             }
-        } else { for (key, value) in edits[scope] ?? [:] { values[key] = value } }
+            return values
+        }
+        var values = try store.values(scope)
+        for (key, value) in edits[scope] ?? [:] { values[key] = value }
         return values
     }
     private func setTristate(_ button: NSButton, _ value: String?) {
@@ -294,7 +306,9 @@ final class BuildServerSettingsPageController: NSViewController, NSTextFieldDele
     func controlTextDidChange(_ notification: Notification) { captureAdapter(); if selectedType == .azureDevOps { updateAzureView() } }
 
     @objc private func scopeChanged() {
-        scope = DistributedSettingsScope(rawValue: scopePopup.titleOfSelectedItem ?? "") ?? .effective
+        view.window?.makeFirstResponder(nil)
+        capture()
+        scope = scopePopup.selectedItem?.representedObject as? DistributedSettingsScope ?? .effective
         reload()
     }
     @objc private func controlsChanged() { capture() }
@@ -330,15 +344,18 @@ final class BuildServerSettingsPageController: NSViewController, NSTextFieldDele
             if let token = tokenField?.stringValue, !token.isEmpty { tokenEdits[BuildServerSettingsStore.azureTokenKey(projectURL: settings.projectURL)] = token }
         }
     }
-    func save() throws {
+    @discardableResult
+    func save() throws -> Bool {
         capture()
+        var changed = false
         for scope in [DistributedSettingsScope.global, .distributed, .local] {
-            if let changes = edits[scope], !changes.isEmpty { try store.write(changes, scope: scope) }
+            if let changes = edits[scope], !changes.isEmpty { changed = try store.write(changes, scope: scope) || changed }
         }
         for (account, token) in tokenEdits {
             try RepositoryHostCredentials.save(token, for: account, service: RepositoryHostCredentials.buildServerService)
         }
         edits = [:]; tokenEdits = [:]
+        return changed
     }
 
     @objc private func openGitHubTokenPage() { NSWorkspace.shared.open(URL(string: "https://github.com/settings/personal-access-tokens/new")!) }

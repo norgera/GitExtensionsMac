@@ -5,6 +5,8 @@ import AppKit
 class RetainingSplitViewController: NSViewController, NSSplitViewDelegate {
     enum ResizeBehavior {
         case fixedLeadingPane
+
+        case fixedTrailingPane
         case proportional
     }
 
@@ -14,7 +16,7 @@ class RetainingSplitViewController: NSViewController, NSSplitViewDelegate {
     let splitView = NSSplitView()
     private(set) var splitViewItems: [NSSplitViewItem] = []
 
-    private let resizeBehavior: ResizeBehavior
+    var resizeBehavior: ResizeBehavior
     private var retainedPosition: CGFloat?
     private var retainedFraction: CGFloat?
     private var previousPrimaryLength: CGFloat = 0
@@ -107,7 +109,10 @@ class RetainingSplitViewController: NSViewController, NSSplitViewDelegate {
         scheduleRestoreAfterEnclosingResize()
     }
 
-    private var primaryLength: CGFloat {
+
+    var dividerPosition: CGFloat? { splitViewItems.count > 1 && !hasCollapsedItem ? leadingPaneThickness : nil }
+
+    var primaryLength: CGFloat {
         splitView.isVertical ? splitView.bounds.width : splitView.bounds.height
     }
 
@@ -127,6 +132,8 @@ class RetainingSplitViewController: NSViewController, NSSplitViewDelegate {
         switch resizeBehavior {
         case .fixedLeadingPane:
             retainedPosition = max(0, position)
+        case .fixedTrailingPane:
+            retainedPosition = max(0, length - position)
         case .proportional:
             retainedFraction = min(max(position / length, 0), 1)
         }
@@ -240,6 +247,9 @@ class RetainingSplitViewController: NSViewController, NSSplitViewDelegate {
         case .fixedLeadingPane:
             guard let retainedPosition else { return }
             requestedPosition = retainedPosition
+        case .fixedTrailingPane:
+            guard let retainedPosition else { return }
+            requestedPosition = length - retainedPosition
         case .proportional:
             guard let retainedFraction else { return }
             requestedPosition = length * retainedFraction

@@ -1,3 +1,4 @@
+import Combine
 import GitExtensionsCore
 import GitCommands
 import AppKit
@@ -5,9 +6,15 @@ import AppKit
 private final class BrowserShortcutRootView: NSView {
     var onFocusPane: ((String) -> Void)?
     var onScript: ((String) -> Void)?
+
+    var onBrowseCommand: ((String) -> Bool)?
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         if window?.attachedSheet == nil, let command = ApplicationHotkeys.shared.matching(event, category: "Scripts") {
             onScript?(command); return true
+        }
+        if window?.attachedSheet == nil, let command = ApplicationHotkeys.shared.matching(event, category: "Browse"),
+           ApplicationHotkeys.browseWindowCommands.contains(command), onBrowseCommand?(command) == true {
+            return true
         }
         guard window?.attachedSheet == nil,
               let command = ApplicationHotkeys.shared.matching(event, category: "Browse panes") else {
@@ -33,34 +40,58 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
     private let commitDetailController = CommitDetailViewController()
     private var revisionLinksTask: Task<Void, Never>?
     private let revisionDiffController = RevisionDiffViewController()
-    private let fileTreeController = FileTreeViewController()
+
+    private let fileTreeController = RevisionDiffViewController(mode: .fileTree)
+    private var activationObserver: NSObjectProtocol?
     private let gpgController = GPGInfoViewController()
     private let detailTabs = DetailTabsViewController()
+    let outputHistoryController = OutputHistoryViewController()
+    private let leftPanelSplitController = RetainingSplitViewController(resizeBehavior: .fixedTrailingPane)
+    private lazy var outlineSplitItem = NSSplitViewItem(viewController: outlineController)
+    private let outputPanelPlaceholder = NSViewController()
+    private lazy var outputSplitItem = NSSplitViewItem(viewController: outputPanelPlaceholder)
+    private var outputLayoutObserver: NSObjectProtocol?
+    private var outputTabEnabled = AppSettingsStore.shared.preferences.showOutputHistoryAsTab
+    private var outputHistoryEnabled = AppSettingsStore.shared.preferences.outputHistoryDepth > 0
     private let buildReportController = BuildReportViewController()
     private var showsBuildReportTab = false
     private var showBuildResultPage = false
     private let buildServerWatcher = BuildServerWatcher()
     private var buildServerLaunchTask: Task<Void, Never>?
 
+
+
     private let mainSplitController = RetainingSplitViewController(resizeBehavior: .fixedLeadingPane)
     private let rightSplitController = RetainingSplitViewController(resizeBehavior: .proportional)
-    private lazy var leftSplitItem = NSSplitViewItem(viewController: outlineController)
+    private let revisionsSplitController = RetainingSplitViewController(resizeBehavior: .fixedTrailingPane)
+    private lazy var leftSplitItem = NSSplitViewItem(viewController: leftPanelSplitController)
     private lazy var gridSplitItem = NSSplitViewItem(viewController: revisionGridController)
+    private lazy var commitInfoSplitItem = NSSplitViewItem(viewController: commitDetailController)
+    private lazy var revisionsSplitItem = NSSplitViewItem(viewController: revisionsSplitController)
     private lazy var detailsSplitItem = NSSplitViewItem(viewController: detailTabs)
+    private var layout = AppSettingsStore.shared.browserLayoutPreferences
+    private let toggleLeftPanelButton = AppKitFactory.resourceButton("LayoutSidebarLeft", tooltip: "Toggle left panel", target: nil, action: nil)
+    private let toggleSplitViewButton = AppKitFactory.resourceButton("LayoutFooter", tooltip: "Toggle split view layout", target: nil, action: nil)
+    private let commitPositionButton = AppKitFactory.resourceButton("LayoutFooterTab", tooltip: "Commit info below graph", target: nil, action: nil)
+    private static let commitPositionItems: [(title: String, image: String)] = [
+        ("Commit info below graph", "LayoutFooterTab"),
+        ("Commit info left of graph", "LayoutSidebarTopLeft"),
+        ("Commit info right of graph", "LayoutSidebarTopRight")
+    ]
 
     let statusLabel = NSTextField(labelWithString: "Loading repository…")
     private let repositoryStateLabel = NSTextField(labelWithString: "")
-    private let branchFilterField = NSTextField()
-    private let revisionFilterField = NSTextField()
+    let filterToolbar = RevisionFilterToolbar()
     private let workingDirectoryPopUp = NSPopUpButton()
     private let branchPopUp = NSPopUpButton()
-    private let commitPositionPopUp = NSPopUpButton()
     private let pullPopUp = NSPopUpButton()
     private let stashSplitButton = NSSegmentedControl()
     private let stashMenu = NSMenu(title: "Stash")
     private let pushButton = NSButton()
+    private let levelUpButton = AppKitFactory.resourceButton("SubmodulesManage", tooltip: "Submodules", width: 32, target: nil, action: nil)
+    private let worktreeButton = AppKitFactory.resourceButton("WorkTree", tooltip: "Worktrees", width: 32, target: nil, action: nil)
+    private let worktreeDropdownButton = NSButton(title: "⌄", target: nil, action: nil)
     private let commitButton = NSButton()
-    private let reflogReferencesButton = NSButton()
     private var workingDirectoryWidthConstraint: NSLayoutConstraint?
     private var branchWidthConstraint: NSLayoutConstraint?
     private(set) var repositoryIdentity: RepositoryIdentityState?
@@ -117,12 +148,17 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         return RepositoryRebaseContext(branches: repositoryReferences.branches, tags: repositoryReferences.tags)
     }
     private var placeholderObserver: NSObjectProtocol?
+    private var commitInfoChildren: [ObjectID] = []
+    private var commitInfoFilledFor: RevisionID?
+    private var historyMenuObserver: AnyCancellable?
+    private var annotatedTagsObserver: NSObjectProtocol?
     private var windowScreenObserver: NSObjectProtocol?
     private weak var configuredWindow: NSWindow?
     private var didSetInitialDividerPositions = false
     private var repositoryStateLoadTask: Task<Void, Never>?
     private var activeRevisionReader: RevisionReader?
     private var revisionReadTask: Task<Void, Never>?
+    private var labelContextTask: Task<Void, Never>?
     private var appliedMaximumRevisionCount = AppSettingsStore.shared.browseDisplayPreferences.maximumRevisionCount
     private(set) var revisions: [Commit] = []
     var revisionDetailsTask: Task<Void, Never>?
@@ -141,6 +177,10 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
     private let rebaseBanner = NSView()
     private let rebaseBannerLabel = NSTextField(labelWithString: "")
     private let rebaseResolveButton = NSButton(title: "Resolve…", target: nil, action: nil)
+    private let gitActionAbortButton = NSButton(title: "Abort", target: nil, action: nil)
+    private let gitActionMoreButton = NSButton(title: "More…", target: nil, action: nil)
+    private let gitActionIcon = NSImageView()
+    private var gitAction = BrowserGitAction.none
     private let rebaseContinueButton = NSButton(title: "Continue", target: nil, action: nil)
     private var rebaseBannerHeightConstraint: NSLayoutConstraint?
     private var preferencesObserver: NSObjectProtocol?
@@ -150,14 +190,27 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
     var selectedCommitID: RevisionID?
     var commitDraft: CommitDialogDraft?
     private var openingSelection: [RevisionID]
+    private let fileHistory: FileHistoryBrowseRequest?
+    private var fileHistoryLeftPanelStartupState: Bool?
     var workflowRevisionSelection: [RevisionID] { revisionGridController.selectedRevisionIDs }
-    var scriptFileContext: [String: [String]] { revisionDiffController.scriptFileContext }
+    var scriptFileContext: [String: [String]] {
+        (selectedDetailController === fileTreeController ? fileTreeController : revisionDiffController).scriptFileContext
+    }
     func selectScriptRevision(_ id: ObjectID) { revisionGridController.selectCommit(id: .object(id)) }
 
-    init(repositoryModule: any RepositoryBrowsingDataSource, openingSelection: [RevisionID] = []) {
+    init(repositoryModule: any RepositoryBrowsingDataSource, openingSelection: [RevisionID] = [], fileHistory: FileHistoryBrowseRequest? = nil) {
         self.repositoryModule = repositoryModule
         self.openingSelection = openingSelection
+        self.fileHistory = fileHistory
         super.init(nibName: nil, bundle: nil)
+        if let fileHistory {
+            revisionGridController.updateFilter(refresh: false) {
+                $0.byPathFilter = true
+                $0.pathFilter = "\"" + fileHistory.path.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\""
+                if let revision = fileHistory.filterRevision { $0.byBranchFilter = true; $0.branchFilter = revision.string }
+            }
+            fileTreeController.requestsBlameForFollowedFile = true
+        }
         uiCommands = GitUICommands(repositoryModule: repositoryModule, browser: self)
         repositoryChangeSubscription = uiCommands.repositoryChangedNotifier.subscribe { [weak self] _, _ in
             guard let self else { return }
@@ -188,20 +241,29 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             NotificationCenter.default.removeObserver(pullPreferencesObserver)
         }
         repositoryChangeSubscription?.cancel()
+        if let outputLayoutObserver { NotificationCenter.default.removeObserver(outputLayoutObserver) }
+        layoutSaveObservers.forEach(NotificationCenter.default.removeObserver)
     }
 
     override func loadView() {
-        configureDetailTabs()
+        outputPanelPlaceholder.view = NSView()
+        configureDetailTabs(selecting: layout.commitInfoPosition == .belowList ? commitDetailController : revisionDiffController)
         configureSplitHierarchy()
 
         let root = BrowserShortcutRootView()
         root.onFocusPane = { [weak self] in self?.focusPane($0) }
+        root.onBrowseCommand = { [weak self] identifier in
+            guard let self, repositoryIdentity != nil, let command = BrowserCommand.browseHotkey(identifier) else { return false }
+            performTopLevelCommand(command)
+            return true
+        }
         root.onScript = { [weak self] identifier in
             guard let script = try? ApplicationScriptsStore.shared.load().first(where: { "script.\($0.hotkeyCommandIdentifier)" == identifier }) else { return }
             self?.uiCommands.startScript(script)
         }
         revisionGridController.onScript = { [weak self] in self?.uiCommands.startScript($0) }
         revisionDiffController.onScript = { [weak self] in self?.uiCommands.startScript($0) }
+        fileTreeController.onScript = { [weak self] in self?.uiCommands.startScript($0) }
         let browserToolbar = makeBrowserToolbar()
         let bisectBanner = makeBisectBanner()
         let rebaseBanner = makeRebaseBanner()
@@ -250,6 +312,10 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         ])
 
         view = root
+        if !outputTabEnabled && outputHistoryEnabled { attachOutputPanel() }
+        outputLayoutObserver = NotificationCenter.default.addObserver(forName: NSSplitView.didResizeSubviewsNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.updateOutputPanelLayout() }
+        }
         bindInteractions()
         observePlaceholderActions()
         applyPreferences()
@@ -267,12 +333,13 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         rebaseBanner.layer?.backgroundColor = NSColor.systemBlue.withAlphaComponent(0.22).cgColor
         let icon = NSImageView(image: NSImage(systemSymbolName: "info.circle.fill", accessibilityDescription: "Rebase in progress") ?? NSImage())
         rebaseBannerLabel.font = AppSettingsStore.shared.applicationFont(size: 12)
-        let abort = NSButton(title: "Abort", target: self, action: #selector(abortRebaseFromBanner))
-        let more = NSButton(title: "More…", target: self, action: #selector(showRebaseManager))
-        rebaseContinueButton.target = self; rebaseContinueButton.action = #selector(continueRebaseFromBanner)
-        rebaseResolveButton.target = self; rebaseResolveButton.action = #selector(resolveRebaseFromBanner)
+        gitActionAbortButton.target = self; gitActionAbortButton.action = #selector(abortGitActionFromBanner)
+        gitActionMoreButton.target = self; gitActionMoreButton.action = #selector(showGitActionMore)
+        rebaseContinueButton.target = self; rebaseContinueButton.action = #selector(continueGitActionFromBanner)
+        rebaseResolveButton.target = self; rebaseResolveButton.action = #selector(resolveGitActionFromBanner)
+        gitActionIcon.image = NSImage(systemSymbolName: "info.circle.fill", accessibilityDescription: "Git action in progress")
         let spacer = NSView(); spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let stack = NSStackView(views: [icon, rebaseBannerLabel, spacer, rebaseResolveButton, rebaseContinueButton, abort, more])
+        let stack = NSStackView(views: [gitActionIcon, rebaseBannerLabel, spacer, rebaseResolveButton, rebaseContinueButton, gitActionAbortButton, gitActionMoreButton])
         stack.orientation = .horizontal; stack.alignment = .centerY; stack.spacing = 7; stack.translatesAutoresizingMaskIntoConstraints = false
         rebaseBanner.addSubview(stack)
         NSLayoutConstraint.activate([
@@ -280,7 +347,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             stack.trailingAnchor.constraint(equalTo: rebaseBanner.trailingAnchor, constant: -8),
             stack.topAnchor.constraint(equalTo: rebaseBanner.topAnchor, constant: 3),
             stack.bottomAnchor.constraint(equalTo: rebaseBanner.bottomAnchor, constant: -3),
-            icon.widthAnchor.constraint(equalToConstant: 22)
+            gitActionIcon.widthAnchor.constraint(equalToConstant: 22)
         ])
         rebaseBanner.isHidden = true
         return rebaseBanner
@@ -316,6 +383,25 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
 
     private func applyPreferences() {
         let settings = AppSettingsStore.shared.preferences
+        CommandLog.shared.setOutputHistoryDepth(settings.outputHistoryDepth)
+        let outputChanged = outputTabEnabled != settings.showOutputHistoryAsTab || outputHistoryEnabled != (settings.outputHistoryDepth > 0)
+        if outputChanged {
+
+            if leftPanelSplitController.splitViewItems.contains(where: { $0 === outputSplitItem }) {
+                leftPanelSplitController.removeSplitViewItem(outputSplitItem)
+            }
+            if outputHistoryController.parent === self {
+                outputHistoryController.view.removeFromSuperview()
+                outputHistoryController.removeFromParent()
+            }
+            outputTabEnabled = settings.showOutputHistoryAsTab
+            outputHistoryEnabled = settings.outputHistoryDepth > 0
+            outputHistoryController.view.isHidden = false
+            configureDetailTabs()
+            configureOutputPanel()
+            if !outputTabEnabled && outputHistoryEnabled { attachOutputPanel() }
+        }
+        updateOutputPanelLayout()
         let maximum = AppSettingsStore.shared.browseDisplayPreferences.maximumRevisionCount
         if maximum != appliedMaximumRevisionCount {
             appliedMaximumRevisionCount = maximum
@@ -323,9 +409,9 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         }
         revisionGridController.setGraphConfiguration(
             mergeCommonParentLanes: settings.mergeCommonParentLanes,
-            straightenDiagonals: settings.straightenGraphDiagonals
+            straightenDiagonals: settings.straightenGraphDiagonals,
+            renderWithDiagonals: settings.renderGraphWithDiagonals
         )
-        reflogReferencesButton.state = AppSettingsStore.shared.showReflogReferences ? .on : .off
         revisionGridController.setShowsTagReferences(AppSettingsStore.shared.tagPreferences.showTagsInRevisionGrid)
         revisionGridController.reloadAppearance()
         if let repositoryIdentity, let repositoryReferences, let repositoryNavigation {
@@ -340,13 +426,26 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
 
     override func viewDidAppear() {
         super.viewDidAppear()
-        view.window?.title = "gitextensions — Git Extensions"
+        updateWindowTitle()
         configureWindowSizing()
         setInitialDividerPositionsIfNeeded()
+        refreshLayoutToggleButtonStates()
+        if layoutSaveObservers.isEmpty {
+
+            layoutSaveObservers = [NSWindow.willCloseNotification, NSApplication.willTerminateNotification].map { name in
+                NotificationCenter.default.addObserver(forName: name, object: name == NSWindow.willCloseNotification ? view.window : nil,
+                                                       queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.saveLayout() }
+                }
+            }
+        }
     }
+    private var layoutSaveObservers: [NSObjectProtocol] = []
 
     override func viewWillDisappear() {
         super.viewWillDisappear()
+        saveLayout()
+        BrowserCommandAvailability.shared.hasRepository = false
         uiCommands.stopPlugins()
         buildServerLaunchTask?.cancel()
         buildServerWatcher.repositoryChanged()
@@ -358,17 +457,32 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         if !didSetInitialDividerPositions {
             setInitialDividerPositionsIfNeeded()
         }
+        updateOutputPanelLayout()
     }
 
-    private func configureDetailTabs(selectedIndex: Int = 1) {
-        var items: [(String, String, NSViewController)] = [
-            ("Commit", "CommitSummary", commitDetailController),
+
+    private func configureDetailTabs(selecting controller: NSViewController? = nil) {
+        let selected = controller ?? selectedDetailController ?? revisionDiffController
+        var items: [(String, String, NSViewController)] = layout.commitInfoPosition == .belowList
+            ? [("Commit", "CommitSummary", commitDetailController)] : []
+        items += [
             ("Diff", "Diff", revisionDiffController),
             ("File tree", "FileTree", fileTreeController),
             ("GPG", "Key", gpgController)
         ]
         if showsBuildReportTab { items.append(("Build Report", "", buildReportController)) }
-        detailTabs.configure(items: items, selectedIndex: min(selectedIndex, items.count - 1))
+        if outputHistoryEnabled && outputTabEnabled { items.append(("Output", "GitCommandLog", outputHistoryController)) }
+        detailTabControllers = items.map(\.2)
+        detailTabs.configure(items: items, selectedIndex: detailTabControllers.firstIndex { $0 === selected } ?? 0)
+    }
+
+    private var detailTabControllers: [NSViewController] = []
+    private var selectedDetailController: NSViewController? {
+        detailTabControllers.indices.contains(detailTabs.selectedTabIndex) ? detailTabControllers[detailTabs.selectedTabIndex] : nil
+    }
+    private func selectDetailTab(_ controller: NSViewController) {
+        guard let index = detailTabControllers.firstIndex(where: { $0 === controller }) else { return }
+        detailTabs.selectTab(at: index)
     }
 
     private func updateBuildReportTab() {
@@ -377,7 +491,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         let show = showBuildResultPage && url != nil
         guard show != showsBuildReportTab else { return }
         showsBuildReportTab = show
-        configureDetailTabs(selectedIndex: detailTabs.selectedTabIndex)
+        configureDetailTabs()
     }
 
     private func launchBuildServerWatcher() {
@@ -409,25 +523,32 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
     }
 
     private func focusPane(_ command: String) {
+        if command == "focus.output" { uiCommands.startOutputHistory(); return }
         let target: NSView
         switch command {
         case "focus.tree":
-            mainSplitController.setCollapsed(false, for: leftSplitItem)
+
+            guard !mainSplitController.isCollapsed(leftSplitItem) else { return }
             target = outlineController.view
         case "focus.grid":
-            rightSplitController.setCollapsed(false, for: gridSplitItem)
             target = revisionGridController.view
+        case "focus.details" where layout.commitInfoPosition != .belowList:
+            target = commitDetailController.view
         default:
-            let index: Int
+            let controller: NSViewController
             switch command {
-            case "focus.details": index = 0; target = commitDetailController.view
-            case "focus.diff": index = 1; target = revisionDiffController.view
-            case "focus.files": index = 2; target = fileTreeController.view
-            case "focus.gpg": index = 3; target = gpgController.view
+            case "focus.details": controller = commitDetailController
+            case "focus.diff": controller = revisionDiffController
+            case "focus.files": controller = fileTreeController
+            case "focus.gpg": controller = gpgController
+            case "focus.build":
+                guard showsBuildReportTab else { return }
+                controller = buildReportController
             default: return
             }
-            rightSplitController.setCollapsed(false, for: detailsSplitItem)
-            detailTabs.selectTab(at: index)
+            target = controller.view
+            if !layout.showSplitViewLayout { setShowSplitViewLayout(true) }
+            selectDetailTab(controller)
         }
         func focusable(_ node: NSView) -> NSView? {
             guard !node.isHidden else { return nil }
@@ -440,6 +561,12 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
     }
 
     private func configureSplitHierarchy() {
+        leftPanelSplitController.splitView.isVertical = false
+        leftPanelSplitController.splitView.dividerStyle = .paneSplitter
+        outlineSplitItem.minimumThickness = Self.collapsedPaneThickness
+        outputSplitItem.minimumThickness = Self.collapsedPaneThickness
+        leftPanelSplitController.addSplitViewItem(outlineSplitItem)
+        configureOutputPanel()
         mainSplitController.splitView.isVertical = true
         mainSplitController.splitView.dividerStyle = .paneSplitter
         leftSplitItem.minimumThickness = Self.collapsedPaneThickness
@@ -449,19 +576,174 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
 
         rightSplitController.splitView.isVertical = false
         rightSplitController.splitView.dividerStyle = .paneSplitter
-        gridSplitItem.minimumThickness = Self.collapsedPaneThickness
+        revisionsSplitItem.minimumThickness = Self.collapsedPaneThickness
         detailsSplitItem.minimumThickness = Self.collapsedPaneThickness
-        gridSplitItem.preferredThicknessFraction = 209.0 / 502.0
-        gridSplitItem.holdingPriority = NSLayoutConstraint.Priority(rawValue: 260)
+        revisionsSplitItem.holdingPriority = NSLayoutConstraint.Priority(rawValue: 260)
         detailsSplitItem.holdingPriority = .defaultLow
-        rightSplitController.addSplitViewItem(gridSplitItem)
+        rightSplitController.addSplitViewItem(revisionsSplitItem)
         rightSplitController.addSplitViewItem(detailsSplitItem)
+
+        revisionsSplitController.splitView.isVertical = true
+        revisionsSplitController.splitView.dividerStyle = .paneSplitter
+        gridSplitItem.minimumThickness = Self.collapsedPaneThickness
+        commitInfoSplitItem.minimumThickness = Self.collapsedPaneThickness
+        layoutRevisionInfo()
 
         let browserItem = NSSplitViewItem(viewController: rightSplitController)
         browserItem.minimumThickness = Self.collapsedMainContentThickness
         browserItem.holdingPriority = .defaultLow
         mainSplitController.addSplitViewItem(leftSplitItem)
         mainSplitController.addSplitViewItem(browserItem)
+        if layout.leftPanelCollapsed { mainSplitController.setCollapsed(true, for: leftSplitItem) }
+        if !layout.showSplitViewLayout { rightSplitController.setCollapsed(true, for: detailsSplitItem) }
+    }
+
+
+    private func layoutRevisionInfo() {
+        let selected = selectedDetailController
+        revisionsSplitController.removeSplitViewItem(gridSplitItem)
+        revisionsSplitController.removeSplitViewItem(commitInfoSplitItem)
+        let sideWidth: CGFloat = 490 + NSScroller.scrollerWidth(for: .regular, scrollerStyle: .legacy)
+        switch layout.commitInfoPosition {
+        case .belowList:
+            configureDetailTabs(selecting: commitDetailController)
+            revisionsSplitController.addSplitViewItem(gridSplitItem)
+        case .rightwardFromList:
+            configureDetailTabs(selecting: selected === commitDetailController ? revisionDiffController : selected)
+            revisionsSplitController.resizeBehavior = .fixedTrailingPane
+            revisionsSplitController.addSplitViewItem(gridSplitItem)
+            revisionsSplitController.addSplitViewItem(commitInfoSplitItem)
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                revisionsSplitController.setRetainedPosition(max(0, revisionsSplitController.primaryLength - sideWidth))
+            }
+        case .leftwardFromList:
+            configureDetailTabs(selecting: selected === commitDetailController ? revisionDiffController : selected)
+            revisionsSplitController.resizeBehavior = .fixedLeadingPane
+            revisionsSplitController.addSplitViewItem(commitInfoSplitItem)
+            revisionsSplitController.addSplitViewItem(gridSplitItem)
+            DispatchQueue.main.async { [weak self] in self?.revisionsSplitController.setRetainedPosition(sideWidth) }
+        }
+        refreshLayoutToggleButtonStates()
+        loadActiveDetailTab()
+    }
+
+
+    private func refreshLayoutToggleButtonStates() {
+        toggleLeftPanelButton.state = mainSplitController.isCollapsed(leftSplitItem) ? .off : .on
+        toggleSplitViewButton.state = layout.showSplitViewLayout ? .on : .off
+        let item = Self.commitPositionItems[layout.commitInfoPosition.rawValue]
+        commitPositionButton.image = AppKitFactory.resourceImage(item.image, accessibilityDescription: item.title)
+        commitPositionButton.toolTip = item.title
+        BrowserCommandAvailability.shared.layout = layout
+    }
+
+
+    var layoutSnapshot: (leftPanelCollapsed: Bool, detailsCollapsed: Bool, commitTabShown: Bool, commitInfoBesideGraph: Bool,
+                         visibleToolbarItems: Set<String>) {
+        (mainSplitController.isCollapsed(leftSplitItem), rightSplitController.isCollapsed(detailsSplitItem),
+         detailTabControllers.contains { $0 === commitDetailController },
+         revisionsSplitController.splitViewItems.contains { $0 === commitInfoSplitItem },
+         Set(toolbarItems.filter { item in !item.views.isEmpty && item.views.allSatisfy { !$0.isHidden } }.map(\.key)))
+    }
+
+
+    private func updateWindowTitle() {
+        guard let window = view.window else { return }
+        let branch = repositoryReferences?.branches.first(where: \.isCurrent)?.name
+        let path = repositoryIdentity.map { URL(fileURLWithPath: $0.currentRepository.path, isDirectory: true) }
+        window.title = BrowserPresentation.windowTitle(repositoryURL: path, branch: branch,
+                                                       pathFilter: revisionGridController.currentFilter.effectivePathFilter)
+    }
+
+    private func saveLayout() {
+        layout.leftPanelCollapsed = fileHistoryLeftPanelStartupState ?? mainSplitController.isCollapsed(leftSplitItem)
+        for (name, controller) in splitterControllers {
+            guard let position = controller.dividerPosition else { continue }
+            layout.splitters[name] = .init(distance: Double(position), size: Double(controller.primaryLength))
+        }
+        AppSettingsStore.shared.saveBrowserLayoutPreferences(layout)
+    }
+
+    private var splitterControllers: [(String, RetainingSplitViewController)] {
+        [("MainSplitContainer", mainSplitController), ("RightSplitContainer", rightSplitController),
+         ("OutputHistorySplitContainer", leftPanelSplitController),
+         ("RevisionsSplitContainer.\(layout.commitInfoPosition.rawValue)", revisionsSplitController)]
+    }
+
+    private func configureOutputPanel() {
+        guard outputHistoryEnabled && !outputTabEnabled else { return }
+        leftPanelSplitController.addSplitViewItem(outputSplitItem)
+        leftPanelSplitController.setCollapsed(!AppSettingsStore.shared.preferences.outputHistoryPanelVisible, for: outputSplitItem)
+        if !restoreSplitter(("OutputHistorySplitContainer", leftPanelSplitController)) {
+            leftPanelSplitController.setRetainedPosition(max(80, leftPanelSplitController.primaryLength - 160))
+        }
+    }
+
+    private func attachOutputPanel() {
+        addChild(outputHistoryController)
+        outputHistoryController.view.translatesAutoresizingMaskIntoConstraints = true
+        view.addSubview(outputHistoryController.view)
+        updateOutputPanelLayout()
+    }
+
+
+
+    private func updateOutputPanelLayout() {
+        guard isViewLoaded else { return }
+        let shown = outputHistoryEnabled && !outputTabEnabled && !mainSplitController.isCollapsed(leftSplitItem)
+            && !leftPanelSplitController.isCollapsed(outputSplitItem)
+        if outputHistoryController.parent === self { outputHistoryController.view.isHidden = !shown }
+        let height = shown ? outputPanelPlaceholder.view.bounds.height : 0
+        let diffVisible = layout.showSplitViewLayout && selectedDetailController === revisionDiffController
+        let treeVisible = layout.showSplitViewLayout && selectedDetailController === fileTreeController
+        revisionDiffController.reserveOutputHistoryPanel(height: diffVisible ? height : 0)
+        fileTreeController.reserveOutputHistoryPanel(height: treeVisible ? height : 0)
+        guard shown, outputHistoryController.parent === self else { return }
+        var frame = view.convert(outputPanelPlaceholder.view.bounds, from: outputPanelPlaceholder.view)
+        let active = diffVisible ? revisionDiffController : treeVisible ? fileTreeController : nil
+        if let active, active.isViewLoaded {
+            let filesFrame = view.convert(active.filesController.view.bounds, from: active.filesController.view)
+            frame.size.width = max(frame.width, filesFrame.maxX - frame.minX)
+        }
+        outputHistoryController.view.frame = frame
+    }
+
+    func focusOutputHistory() {
+        guard outputHistoryEnabled else { return }
+        if outputTabEnabled {
+            if !layout.showSplitViewLayout { setShowSplitViewLayout(true) }
+            selectDetailTab(outputHistoryController)
+            outputHistoryController.focus()
+        } else {
+            let show = leftPanelSplitController.isCollapsed(outputSplitItem)
+            leftPanelSplitController.setCollapsed(!show, for: outputSplitItem)
+            if show && mainSplitController.isCollapsed(leftSplitItem) { toggleLeftPanel() }
+            var settings = AppSettingsStore.shared.preferences
+            settings.outputHistoryPanelVisible = show
+            AppSettingsStore.shared.save(settings)
+            updateOutputPanelLayout()
+            if show { outputHistoryController.focus() }
+        }
+    }
+
+    var outputHistoryPresentation: (enabled: Bool, tab: Bool, panelVisible: Bool) {
+        (outputHistoryEnabled, outputTabEnabled, !outputTabEnabled && outputHistoryEnabled && !leftPanelSplitController.isCollapsed(outputSplitItem))
+    }
+
+    func setShowSplitViewLayout(_ show: Bool) {
+        layout.showSplitViewLayout = show
+        rightSplitController.setCollapsed(!show, for: detailsSplitItem)
+        refreshLayoutToggleButtonStates()
+        saveLayout()
+    }
+
+    func setCommitInfoPosition(_ position: BrowserLayoutPreferences.CommitInfoPosition) {
+        saveLayout()
+        layout.commitInfoPosition = position
+        layoutRevisionInfo()
+        restoreSplitter(("RevisionsSplitContainer.\(position.rawValue)", revisionsSplitController))
+        saveLayout()
     }
 
     private func makeBrowserToolbar() -> NSView {
@@ -474,34 +756,45 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
 
         stack.addArrangedSubview(AppKitFactory.resourceButton("ReloadRevisions", tooltip: "Refresh", target: self, action: #selector(refresh)))
         stack.addArrangedSubview(AppKitFactory.separator())
-        stack.addArrangedSubview(AppKitFactory.resourceButton("LayoutSidebarLeft", tooltip: "Toggle left panel", target: self, action: #selector(toggleLeftPanel)))
-        stack.addArrangedSubview(AppKitFactory.resourceButton("LayoutFooter", tooltip: "Toggle split view layout", target: self, action: #selector(toggleSplitLayout)))
-
-        configureImagePopUp(
-            commitPositionPopUp,
-            imageName: "LayoutFooterTab",
-            items: ["Commit info below graph", "Commit info left of graph", "Commit info right of graph"],
-            width: 32,
-            action: #selector(changeCommitInfoPosition)
-        )
-        commitPositionPopUp.toolTip = "Commit info position"
-        stack.addArrangedSubview(commitPositionPopUp)
+        for (button, action) in [(toggleLeftPanelButton, #selector(toggleLeftPanel)), (toggleSplitViewButton, #selector(toggleSplitLayout))] {
+            button.target = self
+            button.action = action
+            button.setButtonType(.pushOnPushOff)
+            button.bezelStyle = .recessed
+            button.isBordered = true
+            stack.addArrangedSubview(button)
+        }
+        commitPositionButton.target = self
+        commitPositionButton.action = #selector(cycleCommitInfoPosition)
+        stack.addArrangedSubview(commitPositionButton)
+        let commitPositionDropdown = NSButton(title: "⌄", target: self, action: #selector(showCommitInfoPositionMenu(_:)))
+        commitPositionDropdown.isBordered = false
+        commitPositionDropdown.toolTip = "Commit info position"
+        commitPositionDropdown.translatesAutoresizingMaskIntoConstraints = false
+        commitPositionDropdown.widthAnchor.constraint(equalToConstant: 12).isActive = true
+        stack.addArrangedSubview(commitPositionDropdown)
         stack.addArrangedSubview(AppKitFactory.separator())
 
-        stack.addArrangedSubview(AppKitFactory.resourceButton("SubmodulesManage", tooltip: "Submodules", width: 32, target: self, action: #selector(manageSubmodulesToolbar)))
+        levelUpButton.target = self
+        levelUpButton.action = #selector(levelUpToolbar)
+        stack.addArrangedSubview(levelUpButton)
         let submoduleDropdown = NSButton(title: "⌄", target: self, action: #selector(showSubmodulesMenu(_:)))
         submoduleDropdown.isBordered = false
         submoduleDropdown.toolTip = "Navigate submodules and superprojects"
         stack.addArrangedSubview(submoduleDropdown)
-        stack.addArrangedSubview(AppKitFactory.resourceButton("WorkTree", tooltip: "Worktrees", width: 32, target: self, action: #selector(manageWorktreesToolbar(_:))))
-        let worktreeDropdown = NSButton(title: "⌄", target: self, action: #selector(showWorktreesMenu(_:)))
-        worktreeDropdown.isBordered = false
-        worktreeDropdown.toolTip = "Switch worktree"
-        worktreeDropdown.widthAnchor.constraint(equalToConstant: 12).isActive = true
-        stack.addArrangedSubview(worktreeDropdown)
+        worktreeButton.target = self
+        worktreeButton.action = #selector(manageWorktreesToolbar(_:))
+        stack.addArrangedSubview(worktreeButton)
+        worktreeDropdownButton.target = self
+        worktreeDropdownButton.action = #selector(showWorktreesMenu(_:))
+        worktreeDropdownButton.isBordered = false
+        worktreeDropdownButton.toolTip = "Switch worktree"
+        worktreeDropdownButton.widthAnchor.constraint(equalToConstant: 12).isActive = true
+        stack.addArrangedSubview(worktreeDropdownButton)
 
         workingDirectoryWidthConstraint = configureCompactPopUp(workingDirectoryPopUp, items: ["gitextensions"], width: 83, action: #selector(selectWorkingDirectory))
-        workingDirectoryPopUp.toolTip = "Working directory"
+        workingDirectoryPopUp.pullsDown = true
+        workingDirectoryPopUp.toolTip = "Change working directory"
         stack.addArrangedSubview(workingDirectoryPopUp)
 
         branchWidthConstraint = configureCompactPopUp(branchPopUp, items: ["main"], width: 60, action: #selector(selectBranch), imageName: "Branch")
@@ -517,6 +810,12 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             action: #selector(selectPullAction)
         )
         rebuildPullMenu()
+        for (key, title, imageName, command) in Self.pullShortcutButtons {
+            let button = AppKitFactory.resourceButton(imageName, tooltip: title, target: self, action: #selector(pullShortcutButton(_:)))
+            button.identifier = NSUserInterfaceItemIdentifier(key)
+            pullShortcutViews[key] = button
+            stack.addArrangedSubview(button)
+        }
         stack.addArrangedSubview(pullPopUp)
         configureDynamicToolbarButton(pushButton, imageName: "Push", tooltip: "Push", action: #selector(pushToolbarButton(_:)))
         stack.addArrangedSubview(pushButton)
@@ -535,8 +834,8 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         configureStashSplitButton()
         stack.addArrangedSubview(stashSplitButton)
         stack.addArrangedSubview(AppKitFactory.separator())
-        stack.addArrangedSubview(AppKitFactory.resourceButton("BrowseFileExplorer", tooltip: "File Explorer", target: self, action: #selector(placeholderToolbarButton(_:))))
-        stack.addArrangedSubview(AppKitFactory.resourceButton("GitForWindows", tooltip: "Git bash", target: self, action: #selector(placeholderToolbarButton(_:))))
+        stack.addArrangedSubview(AppKitFactory.resourceButton("BrowseFileExplorer", tooltip: "File Explorer (Finder)", target: self, action: #selector(fileExplorerToolbar(_:))))
+        stack.addArrangedSubview(AppKitFactory.resourceButton("GitForWindows", tooltip: "Terminal", target: self, action: #selector(terminalToolbar(_:))))
         stack.addArrangedSubview(AppKitFactory.resourceButton("Settings", tooltip: "Settings", target: self, action: #selector(settingsToolbarButton(_:))))
 
         let toolbarGap = NSView()
@@ -544,57 +843,9 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         toolbarGap.widthAnchor.constraint(equalToConstant: 10).isActive = true
         stack.addArrangedSubview(toolbarGap)
 
-        stack.addArrangedSubview(AppKitFactory.resourceButton("FunnelPencil", tooltip: "Advanced filter", width: 32, target: self, action: #selector(placeholderToolbarButton(_:))))
-        configureDynamicToolbarButton(
-            reflogReferencesButton,
-            imageName: "Book",
-            tooltip: "Show reflog references",
-            action: #selector(toggleReflogReferences(_:))
-        )
-        reflogReferencesButton.setButtonType(.toggle)
-        reflogReferencesButton.setAccessibilityLabel("Show reflog references")
-        reflogReferencesButton.state = AppSettingsStore.shared.showReflogReferences ? .on : .off
-        stack.addArrangedSubview(reflogReferencesButton)
-
-        let branchScope = NSPopUpButton()
-        branchScope.removeAllItems()
-        branchScope.addItems(withTitles: ["All branches", "Current branch only", "Filtered branches"])
-        compactImagePopUp(branchScope, imageName: "BranchLocal", width: 32)
-        branchScope.target = self
-        branchScope.action = #selector(changeBranchScope(_:))
-        stack.addArrangedSubview(branchScope)
-        let branchesLabel = AppKitFactory.label("Branches:")
-        branchesLabel.alignment = .right
-        branchesLabel.widthAnchor.constraint(equalToConstant: 58).isActive = true
-        stack.addArrangedSubview(branchesLabel)
-
-        configureFilterField(branchFilterField, placeholder: "", width: 100)
-        stack.addArrangedSubview(branchFilterField)
-
-        let branchType = NSPopUpButton()
-        branchType.removeAllItems()
-        branchType.addItems(withTitles: ["Local", "Remote", "Tag"])
-        compactImagePopUp(branchType, imageName: "EditFilter", width: 29)
-        branchType.target = self
-        branchType.action = #selector(placeholderPopUp(_:))
-        stack.addArrangedSubview(branchType)
-        stack.addArrangedSubview(AppKitFactory.separator())
-        let filterLabel = AppKitFactory.label("Filter:")
-        filterLabel.alignment = .right
-        filterLabel.widthAnchor.constraint(equalToConstant: 42).isActive = true
-        stack.addArrangedSubview(filterLabel)
-
-        configureFilterField(revisionFilterField, placeholder: "", width: 100)
-        stack.addArrangedSubview(revisionFilterField)
-
-        let filterType = NSPopUpButton()
-        filterType.removeAllItems()
-        filterType.addItems(withTitles: ["Commit message", "Committer", "Author", "Diff contains (SLOW)"])
-        compactImagePopUp(filterType, imageName: "EditFilter", width: 29)
-        filterType.target = self
-        filterType.action = #selector(placeholderPopUp(_:))
-        stack.addArrangedSubview(filterType)
-        stack.addArrangedSubview(AppKitFactory.resourceButton("ShowOnlyFirstParent", tooltip: "Show only first parent", target: self, action: #selector(toggleFirstParent(_:))))
+        standardToolbarViews = stack.arrangedSubviews
+        filterToolbar.views.forEach(stack.addArrangedSubview)
+        filtersToolbarViews = filterToolbar.views
 
         let spacer = NSView()
         spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
@@ -605,6 +856,8 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             execute: { [weak self] in self?.uiCommands.startScript($0) },
             manage: { [weak self] in self?.uiCommands.startScripts() })
         stack.addArrangedSubview(scripts)
+        scriptsToolbarViews = [scripts]
+        registerToolbarItems(scripts: scripts)
 
         background.addSubview(stack)
         NSLayoutConstraint.activate([
@@ -900,53 +1153,128 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
     }
 
     private func bindInteractions() {
+        revisionGridController.onRefreshRequested = { [weak self] in self?.restartRevisionReadForFilterChange() }
+        revisionGridController.onFilterChanged = { [weak self] filter in
+            self?.filterToolbar.filterChanged(filter)
+            self?.updateWindowTitle()
+
+            var path = filter.effectivePathFilter
+            if path.count > 1, path.hasPrefix("\""), path.hasSuffix("\"") { path = String(path.dropFirst().dropLast()) }
+            if !path.trimmingCharacters(in: .whitespaces).isEmpty {
+                self?.revisionDiffController.fallbackFollowedFile = path
+                self?.fileTreeController.fallbackFollowedFile = path
+            }
+        }
+        filterToolbar.grid = revisionGridController
+        filterToolbar.references = { [weak self] in
+            let branches = self?.repositoryReferences?.branches ?? []
+            return .init(local: branches.filter { !$0.isRemote }.map(\.name),
+                         remote: branches.filter(\.isRemote).map(\.name),
+                         tags: self?.repositoryReferences?.tags.map(\.name) ?? [])
+        }
+        let gridSource = repositoryModule as? any RepositoryRevisionGridDataSource
+        revisionGridController.dataSource = gridSource
+        revisionGridController.referenceNames = { [weak self] in
+            (self?.repositoryReferences?.branches.filter { !$0.isRemote }.map(\.name) ?? [],
+             self?.repositoryReferences?.tags.map(\.name) ?? [])
+        }
+        filterToolbar.resolveRevision = { expression in await gridSource?.resolveRevision(expression) }
+        filterToolbar.showAdvancedFilter = { [weak self] in self?.showRevisionFilterDialog() }
+        filterToolbar.filterChanged(revisionGridController.currentFilter)
         revisionGridController.onSelection = { [weak self] commit in
             self?.select(commit: commit)
         }
-        commitDetailController.onSelectRevision = { [weak self] objectID in
-            self?.revisionGridController.selectCommit(id: .object(objectID))
+
+        commitDetailController.onGoToRevision = { [weak self] id in self?.revisionGridController.goToRevision(id) }
+        commitDetailController.onNavigate = { [weak self] backward in
+            if backward { self?.revisionGridController.navigateBackward() } else { self?.revisionGridController.navigateForward() }
         }
+        commitDetailController.source = repositoryModule as? any RepositoryCommitInfoDataSource
         outlineController.onSelection = { [weak self] node in
             self?.select(treeNode: node)
         }
         outlineController.onCommand = { [weak self] identifier, node in
             self?.performRepositoryCommand(identifier, node: node)
         }
+        outlineController.selectedRevisions = { [weak self] in self?.revisionGridController.selectedCommits ?? [] }
+        outlineController.onCopyRevisionValue = { [weak self] identifier in self?.revisionGridController.copyToClipboard(identifier) }
+        outlineController.onScript = { [weak self] in self?.uiCommands.startScript($0) }
         outlineController.onFilterReferences = { [weak self] references in
             guard let self else { return }
-            let filter = references.joined(separator: " ")
-            branchFilterField.stringValue = filter
-            revisionGridController.setBranchFilter(filter)
-            restartRevisionReadForFilterChange()
+            filterToolbar.setBranchFilter(references.joined(separator: " "))
         }
         revisionGridController.onCommand = { [weak self] identifier, selected, focused in
             self?.performRevisionCommand(identifier, selected: selected, focused: focused)
         }
-        revisionDiffController.onFileMutation = { [weak self] identifier, files, scope in
-            self?.performFileMutation(identifier, files: files, scope: scope)
-        }
+        revisionGridController.onViewSelected = { [weak self] selected in self?.uiCommands.startViewRevisions(selected) }
+        revisionGridController.onDeleteBranch = { [weak self] name in self?.uiCommands.deleteBranches(initiallySelected: [name]) }
+        revisionGridController.onApplyPatch = { [weak self] url in self?.uiCommands.startPatch(.apply, file: url) }
+        revisionGridController.onShowAdvancedFilter = { [weak self] in self?.showRevisionFilterDialog() }
+        revisionGridController.onEmptyRepositoryCommit = { [weak self] in self?.uiCommands.startCommit() }
+        revisionGridController.onEmptyRepositoryEditGitIgnore = { [weak self] in self?.uiCommands.startEditGitIgnore(localExclude: false) }
+        revisionGridController.onMenuStateChanged = { [weak self] in self?.publishGridMenuState() }
         revisionDiffController.onHunkMutation = { [weak self] selection in
             self?.performHunkMutation(selection)
         }
         detailTabs.onSelectionChanged = { [weak self] _ in
-            self?.loadActiveDetailTab()
+            guard let self else { return }
+            if let commit = revisions.first(where: { $0.id == self.selectedCommitID }) { fillCommitInfo(commit) }
+            loadActiveDetailTab()
+            updateOutputPanelLayout()
         }
         let source = repositoryModule
-        revisionDiffController.diffProvider = { commit, file, options in
-            try await source.loadDiff(for: commit, file: file, options: options)
+        for controller in [revisionDiffController, fileTreeController] {
+            controller.fileStatusSource = source as? any RepositoryFileStatusDataSource
+            controller.blameSource = source as? any RepositoryBlameDataSource
+            controller.blameController.onShowChanges = { [weak self] in self?.uiCommands.startBlameCommitDiff($0) }
+            controller.blameContext = .init(revisionInGrid: { [weak self] id in
+                self?.revisionGridController.visibleRevision(id)
+            }, selectFileInRevision: { [weak self, weak controller] id, path in
+                guard let self, let controller, revisionGridController.visibleRevision(id) != nil else { return false }
+                controller.selectFileOrFolder(path, requestBlame: true)
+                revisionGridController.selectCommit(id: .object(id))
+                return true
+            }, hostedRemotes: {
+                guard let manager = source as? any RepositoryRemoteManagingDataSource,
+                      let remotes = try? await manager.loadRemoteConfigurations() else { return [] }
+                return HostedRemote.gitHubRemotes(remotes)
+            })
+            controller.onBlameInFileTree = { [weak self] path, line in
+                guard let self else { return }
+                fileTreeController.selectFileOrFolder(path, requestBlame: true, line: line)
+                if !layout.showSplitViewLayout { setShowSplitViewLayout(true) }
+                selectDetailTab(fileTreeController)
+            }
+            controller.contentProvider = { commit, file, encoding in
+                try await source.loadFilePresentation(for: commit, file: file, encoding: encoding)
+            }
+            controller.treeEntriesProvider = { commit in try await source.loadRepositoryFiles(for: commit) }
+            controller.parentsOf = { [weak self] revision in self?.parents(of: revision) ?? [] }
+            controller.onCommand = { [weak self, weak controller] command in
+                guard let self, let controller else { return }
+                performFileStatusCommand(command, from: controller)
+            }
+            controller.onFileCommand = { [weak self] identifier, item in
+                self?.performFileViewerCommand(identifier, item: item)
+            }
+            controller.onFileHistory = { [weak self] path, revision in
+                guard let self else { return }
+                uiCommands.startFileHistory(file: path, revision: revisions.first { $0.id == revision })
+            }
+            controller.onRefreshArtificial = { [weak self] in self?.refreshArtificialRevisions() }
         }
-        revisionDiffController.onFileCommand = { [weak self] identifier, commit, file in
-            self?.performFileViewerCommand(identifier, commit: commit, file: file)
-        }
-        fileTreeController.contentProvider = { commit, file, encoding in
-            try await source.loadFilePresentation(for: commit, file: file, encoding: encoding)
-        }
-        fileTreeController.onFileCommand = { [weak self] identifier, commit, file in
-            self?.performFileTreeCommand(identifier, commit: commit, file: file)
+        activationObserver = NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.applicationActivated() }
         }
     }
 
     private func observePlaceholderActions() {
+        annotatedTagsObserver = NotificationCenter.default.addObserver(forName: .commitInfoAnnotatedTagsSettingChanged, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.revisionGridController.reloadAppearance() }
+        }
+        historyMenuObserver = RepositoryHistoryUIService.shared.objectWillChange.sink { [weak self] _ in
+            DispatchQueue.main.async { self?.rebuildWorkingDirectoryMenu() }
+        }
         placeholderObserver = NotificationCenter.default.addObserver(
             forName: .browserCommand,
             object: nil,
@@ -964,7 +1292,51 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         switch command {
         case .openRepository: presentOpenRepositoryPanel()
         case .refresh: reloadRepositoryState()
+        case .undoLastCommit: uiCommands.startUndoLastCommit()
+        case .fileListCommand(let identifier):
+            performFileListHotkey(identifier)
+        case .addNotes:
+
+            guard let commit = revisions.first(where: { $0.id == selectedCommitID }), !commit.isArtificial else { return }
+            if commitDetailController.commit?.id != commit.id { commitDetailController.apply(commit: commit, children: commitInfoChildren) }
+            commitDetailController.addNotes()
+        case .openFileExplorer: uiCommands.openFileExplorer()
+        case .openTerminal: uiCommands.openTerminal()
+        case .deleteIndexLock: uiCommands.deleteIndexLock()
+        case .compressGitDatabase: uiCommands.compressGitDatabase()
+        case .editGitIgnore: uiCommands.startEditGitIgnore(localExclude: false)
+        case .editGitInfoExclude: uiCommands.startEditGitIgnore(localExclude: true)
+        case .editGitAttributes: uiCommands.startEditGitAttributes()
+        case .editMailMap: uiCommands.startEditMailMap()
+        case .editGitConfig: uiCommands.startEditGitConfig()
+        case .sparseWorkingCopy: uiCommands.startSparseWorkingCopy()
+        case .recoverLostObjects: uiCommands.startRecoverLostObjects()
+        case .toggleLeftPanel: toggleLeftPanel()
+        case .outputHistory: uiCommands.startOutputHistory()
+        case .toggleSplitViewLayout: toggleSplitLayout()
+        case .commitInfoPosition(let raw): setCommitInfoPosition(.init(rawValue: raw) ?? .belowList)
+        case .toolbarVisibility(let name): toggleToolbar(name)
+        case .toolbarItemVisibility(let key): toggleToolbarItem(key)
+        case .stash: beginQuickStash()
+        case .stashPop: performLatestStashPop()
+        case .stashStaged: beginStashStaged()
+        case .quickPull: uiCommands.startPull(action: .merge, immediately: true)
+        case .quickFetch: uiCommands.startPull(action: .fetch, immediately: true)
+        case .quickPullOrFetch:
+            let action = AppSettingsStore.shared.pullPreferences.defaultAction
+            uiCommands.startPull(action: action, immediately: action != .openDialog)
+        case .quickPush: uiCommands.startPush(immediately: true)
+        case .focusFilter: filterToolbar.focus(in: view.window)
+        case .focusNextTab(let forward):
+            let count = detailTabControllers.count
+            guard count > 0 else { return }
+            detailTabs.selectTab(at: (detailTabs.selectedTabIndex + (forward ? 1 : count - 1)) % count)
+        case .goToSuperproject:
+            if let superproject = superprojectURL { _ = onApplicationCommand?(.openRecentRepository(superproject)) }
+        case .revisionGrid(let id):
+            revisionGridController.performGridCommand(id)
         case .toggleRevisionTags:
+            defer { publishGridMenuState() }
             var preferences = AppSettingsStore.shared.tagPreferences
             preferences.showTagsInRevisionGrid.toggle()
             AppSettingsStore.shared.saveTagPreferences(preferences)
@@ -980,6 +1352,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             BrowserCommandAvailability.shared.showBuildStatusIcon = icon
             BrowserCommandAvailability.shared.showBuildStatusText = text
             revisionGridController.applyBuildStatusColumnSettings()
+            publishGridMenuState()
         case .commit: uiCommands.startCommit()
         case .pullFetch: uiCommands.startPull(action: AppSettingsStore.shared.pullPreferences.formAction, immediately: false)
         case .pull: uiCommands.startPull(action: AppSettingsStore.shared.pullPreferences.defaultAction, immediately: AppSettingsStore.shared.pullPreferences.defaultAction != .openDialog)
@@ -1067,6 +1440,8 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             uiCommands.startPlugin(id)
         case .settings:
             uiCommands.startSettings()
+        case .repositorySettings:
+            uiCommands.startSettings(initialPage: "detailed", initialScope: .local)
         case .showStatus(let message):
             statusLabel.stringValue = message
         case .unavailable(let title):
@@ -1099,11 +1474,22 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
     }
 
     private func apply(state: RepositoryLoadState, preferredCommitID: RevisionID?) {
+        commitDetailController.repositoryChanged()
         let previousRevisions = revisions
         let previousRepositoryID = repositoryIdentity?.currentRepository.id
         let sameRepository = previousRepositoryID == state.identity.currentRepository.id
-        let requestedSelection = preferredCommitID ?? openingSelection.first ?? (sameRepository ? selectedCommitID : nil)
+        var requestedSelection = preferredCommitID ?? openingSelection.first ?? (sameRepository ? selectedCommitID : nil)
+
+        if sameRepository, openingSelection.isEmpty, let head = state.identity.headID, head != repositoryIdentity?.headID {
+            requestedSelection = .object(head)
+        }
+        if !sameRepository {
+
+            revisionDiffController.repositoryChanged()
+            fileTreeController.repositoryChanged()
+        }
         applyRepositoryState(state)
+        loadDiffTools()
         uiCommands.pluginsRepositoryLoaded()
         startRevisionRead(
             state.revisionReadRequest,
@@ -1119,6 +1505,8 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         repositoryStatus = state.status
         revisionGridController.applyStatus(state.status)
         BrowserCommandAvailability.shared.canMerge = false
+        BrowserCommandAvailability.shared.hasRepository = true
+        BrowserCommandAvailability.shared.isBareRepository = state.identity.currentRepository.isBare
         let canManageBranches = !state.identity.currentRepository.isBare
             && repositoryModule is any RepositoryCheckoutBranchDataSource
         BrowserCommandAvailability.shared.canCreateBranch = canManageBranches
@@ -1149,20 +1537,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             navigation: state.navigation
         )
 
-        workingDirectoryPopUp.removeAllItems()
-        state.identity.repositories.forEach { repository in
-            workingDirectoryPopUp.addItem(withTitle: repository.id == state.identity.currentRepository.id
-                ? repositoryDisplayTitle(repository)
-                : repository.name)
-        }
-        workingDirectoryPopUp.selectItem(at: state.identity.repositories.firstIndex(where: { $0.id == state.identity.currentRepository.id }) ?? 0)
-        updatePopUpWidth(
-            workingDirectoryPopUp,
-            constraint: workingDirectoryWidthConstraint,
-            title: workingDirectoryPopUp.titleOfSelectedItem ?? state.identity.currentRepository.name,
-            minimum: 83,
-            includesLeadingImage: false
-        )
+        refreshToolbarNavigationState()
 
         branchPopUp.removeAllItems()
         branchPopUp.addItem(withTitle: "Checkout branch…")
@@ -1190,7 +1565,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             return "   \(branch.name)\(counts)"
         } ?? "   Detached HEAD"
         repositoryStateLabel.stringValue = "\(revisionCount) revisions\(branchState)"
-        view.window?.title = "\(state.identity.currentRepository.name) — Git Extensions"
+        updateWindowTitle()
         refreshOperationIndicators()
         setInitialDividerPositionsIfNeeded()
     }
@@ -1203,15 +1578,19 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         revisionReadTask?.cancel()
         let oldRevisions = previousRevisions ?? revisions
         revisions = []
+        revisionGridController.resetNavigationHistory()
         revisionGridController.beginIncrementalLoad(preferredCommitID: preferredCommitID)
+        revisionGridController.showLoading(spinner: true)
+        loadGridLabelContext()
+        publishGridMenuState()
         activeRevisionReader = request.reader
         revisionReadTask = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
                 await request.reader.cancel()
-                let context = request.context.showingReflogReferences(
-                    AppSettingsStore.shared.showReflogReferences
-                )
+                var options = revisionGridController.readOptions
+                if fileHistory != nil { options.followRenamesExactOnly = AppSettingsStore.shared.revisionGridPreferences.followRenamesInFileHistoryExactOnly }
+                let context = request.context.with(options)
                 let batches = await request.reader.read(context, maximumCount: AppSettingsStore.shared.browseDisplayPreferences.maximumRevisionCount)
                 for try await batch in batches {
                     guard !Task.isCancelled, activeRevisionReader === request.reader else { return }
@@ -1224,12 +1603,21 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
                     updateRevisionCount()
                 }
                 guard !Task.isCancelled, activeRevisionReader === request.reader else { return }
-                let restored = RevisionSelectionRestorer.restoredID(
+                revisionGridController.finishLoading(isBareRepository: repositoryIdentity?.currentRepository.isBare ?? false)
+                var restored = RevisionSelectionRestorer.restoredID(
                     requestedID: preferredCommitID,
                     previousCommits: oldRevisions,
                     refreshedCommits: revisions
                 )
-                if let restored { revisionGridController.selectCommit(id: restored) }
+
+                if let requested = preferredCommitID?.objectID, !revisions.contains(where: { $0.id == preferredCommitID }),
+                   let gridSource = repositoryModule as? any RepositoryRevisionGridDataSource {
+                    let listed = Set(revisions.map(\.id))
+                    let ancestors = await gridSource.ancestors(of: requested)
+                    guard !Task.isCancelled, activeRevisionReader === request.reader else { return }
+                    if let ancestor = ancestors.first(where: { listed.contains(.object($0)) }) { restored = .object(ancestor) }
+                }
+                if let restored, !revisionGridController.userSelectedDuringLoad { revisionGridController.selectCommit(id: restored) }
                 if !openingSelection.isEmpty {
                     revisionGridController.selectCommits(ids: openingSelection)
                     openingSelection = []
@@ -1239,6 +1627,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
                 return
             } catch {
                 guard !Task.isCancelled else { return }
+                revisionGridController.finishLoading(failed: true)
                 statusLabel.stringValue = error.localizedDescription
             }
         }
@@ -1270,20 +1659,28 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             && !repositoryIdentity.currentRepository.isBare
             && revisionGridController.selectedCommitCount == 1
             && repositoryModule is any RepositoryBisectingDataSource
+        BrowserCommandAvailability.shared.selectionEligibility = .make(
+            selected: revisionGridController.selectedCommits.isEmpty ? [commit] : revisionGridController.selectedCommits,
+            isBare: repositoryIdentity.currentRepository.isBare)
         revisionDetailsTask?.cancel()
         let relations = CommitRelationsResolver.resolve(commit: commit, history: revisions)
-        let comparisonCommit = commit.parentIDs.first.flatMap { parentID in
-            revisions.first(where: { $0.id == .object(parentID) })
-        }
-        commitDetailController.apply(commit: commit, relations: relations, history: revisions)
-        loadRevisionLinks(for: commit)
-        revisionDiffController.apply(commit: commit, comparisonCommit: comparisonCommit, files: [], diffsByFile: [:])
-        fileTreeController.apply(commit: commit, files: [])
+        commitInfoChildren = relations.childIDs
+        commitInfoFilledFor = nil
+        fillCommitInfo(commit)
         gpgController.apply(commit: commit, info: nil)
         statusLabel.stringValue = commit.isArtificial ? "Selected \(commit.subject)" : "Selected \(commit.shortID): \(commit.subject)"
         updateBuildReportTab()
 
-        loadActiveDetailTab(commit: commit, comparisonCommit: comparisonCommit)
+        loadActiveDetailTab(commit: commit)
+    }
+
+
+    private func fillCommitInfo(_ commit: Commit) {
+        guard layout.commitInfoPosition != .belowList || selectedDetailController === commitDetailController else { return }
+        guard commitInfoFilledFor != commit.id else { return }
+        commitInfoFilledFor = commit.id
+        commitDetailController.apply(commit: commit, children: commitInfoChildren)
+        loadRevisionLinks(for: commit)
     }
 
     private func loadRevisionLinks(for commit: Commit) {
@@ -1322,55 +1719,40 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         }
     }
 
-    private func loadActiveDetailTab(
-        commit: Commit? = nil,
-        comparisonCommit: Commit? = nil
-    ) {
+    private func loadActiveDetailTab(commit: Commit? = nil) {
         guard repositoryIdentity != nil else { return }
         guard let activeCommit = commit ?? revisions.first(where: { $0.id == selectedCommitID }) else { return }
-        let activeComparisonCommit = comparisonCommit ?? activeCommit.parentIDs.first.flatMap { parentID in
-            revisions.first(where: { $0.id == .object(parentID) })
-        }
 
         revisionDetailsTask?.cancel()
-        switch detailTabs.selectedTabIndex {
-        case 1: // Diff
+        if fileHistory != nil, let reader = activeRevisionReader,
+           let id = activeCommit.objectID ?? repositoryIdentity?.headID,
+           !revisionGridController.currentFilter.effectivePathFilter.isEmpty {
+            var path = revisionGridController.currentFilter.effectivePathFilter
+            if path.hasPrefix("\""), path.hasSuffix("\"") { path = String(path.dropFirst().dropLast()).replacingOccurrences(of: "\\\"", with: "\"").replacingOccurrences(of: "\\\\", with: "\\") }
             revisionDetailsTask = Task { @MainActor [weak self] in
-                guard let self else { return }
-                do {
-                    let details = try await repositoryModule.loadRevisionDetails(for: activeCommit)
-                    guard !Task.isCancelled, selectedCommitID == activeCommit.id else { return }
-                    revisionDiffController.apply(
-                        commit: activeCommit,
-                        comparisonCommit: activeComparisonCommit,
-                        files: details.files,
-                        diffsByFile: details.diffsByFile
-                    )
-                    let revisionCount = revisions.filter { !$0.isArtificial }.count
-                    repositoryStateLabel.stringValue = "\(details.files.count) changed files   \(revisionCount) revisions"
-                } catch is CancellationError {
-                    return
-                } catch {
-                    guard !Task.isCancelled, selectedCommitID == activeCommit.id else { return }
-                    statusLabel.stringValue = error.localizedDescription
-                }
+                let historicalPath = await reader.fileName(at: id, path: path, exactOnly: AppSettingsStore.shared.revisionGridPreferences.followRenamesInFileHistoryExactOnly)
+                guard let self, !Task.isCancelled, selectedCommitID == activeCommit.id, activeRevisionReader === reader else { return }
+                revisionDiffController.fallbackFollowedFile = historicalPath
+                fileTreeController.fallbackFollowedFile = historicalPath
+                fillFileStatusTab(activeCommit)
             }
-        case 2: // File tree
-            revisionDetailsTask = Task { @MainActor [weak self] in
-                guard let self else { return }
-                do {
-                    let files = try await repositoryModule.loadRepositoryFiles(for: activeCommit)
-                    guard !Task.isCancelled, selectedCommitID == activeCommit.id else { return }
-                    fileTreeController.apply(commit: activeCommit, files: files)
-                    let revisionCount = revisions.filter { !$0.isArtificial }.count
-                    repositoryStateLabel.stringValue = "\(files.count) files   \(revisionCount) revisions"
-                } catch is CancellationError {
-                    return
-                } catch {
-                    guard !Task.isCancelled, selectedCommitID == activeCommit.id else { return }
-                    statusLabel.stringValue = error.localizedDescription
-                }
-            }
+            return
+        }
+        fillFileStatusTab(activeCommit)
+    }
+
+    private func fillFileStatusTab(_ activeCommit: Commit) {
+        switch selectedDetailController {
+        case let controller? where controller === revisionDiffController:
+
+            let selected = revisionGridController.selectedRevisionIDsBySelectionOrder.compactMap { id in revisions.first { $0.id == id } }
+            let ordered = [activeCommit] + selected.filter { $0.id != activeCommit.id }
+            configureFileStatusController(revisionDiffController)
+            revisionDiffController.setDiffs(revisions: ordered, headID: repositoryIdentity?.headID)
+        case let controller? where controller === fileTreeController:
+
+            configureFileStatusController(fileTreeController)
+            fileTreeController.setDiffs(revisions: [activeCommit], headID: repositoryIdentity?.headID)
         default:
             break
         }
@@ -1480,61 +1862,81 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         window.setFrame(fittedFrame, display: true)
     }
 
+
     private func setInitialDividerPositionsIfNeeded() {
         guard !didSetInitialDividerPositions,
-              mainSplitController.view.bounds.width > 800,
-              rightSplitController.view.bounds.height > 350 else { return }
+              mainSplitController.view.bounds.width > 400,
+              rightSplitController.view.bounds.height > 200 else { return }
         didSetInitialDividerPositions = true
-        mainSplitController.setRetainedPosition(220)
-        let graphHeight = rightSplitController.splitView.bounds.height * (209.0 / 502.0)
-        rightSplitController.setRetainedPosition(graphHeight)
+        if let fileHistory {
+            fileHistoryLeftPanelStartupState = mainSplitController.isCollapsed(leftSplitItem)
+            mainSplitController.setCollapsed(true, for: leftSplitItem)
+            revisionDiffController.fallbackFollowedFile = fileHistory.path
+            fileTreeController.fallbackFollowedFile = fileHistory.path
+        }
+        if !restoreSplitter(("MainSplitContainer", mainSplitController)) { mainSplitController.setRetainedPosition(260) }
+        if outputHistoryEnabled && !outputTabEnabled {
+            if !restoreSplitter(("OutputHistorySplitContainer", leftPanelSplitController)) {
+                leftPanelSplitController.setRetainedPosition(max(80, leftPanelSplitController.primaryLength - 160))
+            }
+        }
+        if !restoreSplitter(("RightSplitContainer", rightSplitController)) {
+            rightSplitController.setRetainedPosition(rightSplitController.splitView.bounds.height * (209.0 / 502.0))
+        }
+        restoreSplitter(("RevisionsSplitContainer.\(layout.commitInfoPosition.rawValue)", revisionsSplitController))
+    }
+
+    @discardableResult
+    private func restoreSplitter(_ splitter: (String, RetainingSplitViewController)) -> Bool {
+        let (name, controller) = splitter
+        guard let distance = BrowserLayoutPreferences.restoredDistance(layout.splitters[name], size: Double(controller.primaryLength),
+                                                                       fixed: controller.resizeBehavior),
+              distance > 0, distance < Double(controller.primaryLength) else { return false }
+        controller.setRetainedPosition(CGFloat(distance))
+        return true
     }
 
     @objc private func refresh() {
         reloadRepositoryState()
     }
 
-    @objc private func toggleLeftPanel() {
+    @objc func toggleLeftPanel() {
         let willShowLeftPanel = mainSplitController.isCollapsed(leftSplitItem)
         mainSplitController.setCollapsed(!willShowLeftPanel, for: leftSplitItem)
-        showPlaceholderStatus(for: willShowLeftPanel ? "Left panel shown" : "Left panel hidden")
+        refreshLayoutToggleButtonStates()
+        saveLayout()
     }
 
-    @objc private func toggleSplitLayout() {
-        let targetIndex = rightSplitController.splitView.isVertical ? 0 : 2
-        commitPositionPopUp.selectItem(at: targetIndex)
-        changeCommitInfoPosition()
+
+    @objc func toggleSplitLayout() {
+        setShowSplitViewLayout(!layout.showSplitViewLayout)
     }
 
-    @objc private func changeCommitInfoPosition() {
-        let selection = commitPositionPopUp.indexOfSelectedItem
-        rightSplitController.removeSplitViewItem(gridSplitItem)
-        rightSplitController.removeSplitViewItem(detailsSplitItem)
-        switch selection {
-        case 1:
-            rightSplitController.splitView.isVertical = true
-            rightSplitController.addSplitViewItem(detailsSplitItem)
-            rightSplitController.addSplitViewItem(gridSplitItem)
-        case 2:
-            rightSplitController.splitView.isVertical = true
-            rightSplitController.addSplitViewItem(gridSplitItem)
-            rightSplitController.addSplitViewItem(detailsSplitItem)
-        default:
-            rightSplitController.splitView.isVertical = false
-            rightSplitController.addSplitViewItem(gridSplitItem)
-            rightSplitController.addSplitViewItem(detailsSplitItem)
+
+    @objc private func cycleCommitInfoPosition() {
+        let next = (layout.commitInfoPosition.rawValue + 1) % BrowserLayoutPreferences.CommitInfoPosition.allCases.count
+        setCommitInfoPosition(.init(rawValue: next) ?? .belowList)
+    }
+
+    @objc private func showCommitInfoPositionMenu(_ sender: NSButton) {
+        let menu = NSMenu()
+        for (index, item) in Self.commitPositionItems.enumerated() {
+            let menuItem = NSMenuItem(title: item.title, action: #selector(chooseCommitInfoPosition(_:)), keyEquivalent: "")
+            menuItem.target = self
+            menuItem.tag = index
+            menuItem.image = AppKitFactory.resourceImage(item.image, accessibilityDescription: item.title)
+            menuItem.state = index == layout.commitInfoPosition.rawValue ? .on : .off
+            menu.addItem(menuItem)
         }
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            let length = rightSplitController.splitView.isVertical ? rightSplitController.view.bounds.width : rightSplitController.view.bounds.height
-            rightSplitController.setRetainedPosition(length * 0.55)
-        }
-        showPlaceholderStatus(for: commitPositionPopUp.titleOfSelectedItem ?? "Commit info position")
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.maxY + 2), in: sender)
     }
 
-    @objc private func selectWorkingDirectory() {
-        showPlaceholderStatus(for: "Working directory: \(workingDirectoryPopUp.titleOfSelectedItem ?? "")")
+    @objc private func chooseCommitInfoPosition(_ sender: NSMenuItem) {
+        setCommitInfoPosition(.init(rawValue: sender.tag) ?? .belowList)
     }
+
+
+    @objc private func selectWorkingDirectory() {}
 
     @objc private func selectBranch() {
         guard let repositoryReferences,
@@ -1610,21 +2012,223 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         uiCommands.startPush(immediately: NSEvent.modifierFlags.contains(.shift))
     }
 
-    @objc private func placeholderToolbarButton(_ sender: NSButton) {
-        let title = sender.toolTip ?? sender.title
-        BrowserCommandCenter.perform(.unavailable(title))
+    @objc private func fileExplorerToolbar(_ sender: NSButton) { uiCommands.openFileExplorer() }
+
+
+
+
+    private static let pullShortcutButtons: [(String, String, String, BrowserCommand)] = [
+        ("pull_shortcut_fetchToolStripMenuItem", "Fetch", "PullFetch", .fetch),
+        ("pull_shortcut_fetchAllToolStripMenuItem", "Fetch all", "PullFetchAll", .fetchAll),
+        ("pull_shortcut_fetchPruneAllToolStripMenuItem", "Fetch and prune all", "PullFetchPruneAll", .fetchAndPruneAll),
+        ("pull_shortcut_mergeToolStripMenuItem", "Pull - merge", "PullMerge", .pullMerge),
+        ("pull_shortcut_rebaseToolStripMenuItem1", "Pull - rebase", "PullRebase", .pullRebase),
+        ("pull_shortcut_pullToolStripMenuItem1", "Open pull dialog...", "Pull", .openPullDialog)
+    ]
+    private var pullShortcutViews: [String: NSView] = [:]
+    private var standardToolbarViews: [NSView] = []
+    private var filtersToolbarViews: [NSView] = []
+    private var scriptsToolbarViews: [NSView] = []
+    private var toolbarVisible: [String: Bool] = ["Standard": true, "Filters": true, "Scripts": true]
+
+    private var toolbarItems: [(toolbar: String, key: String, title: String, views: [NSView], defaultVisible: Bool)] = []
+
+    @objc private func pullShortcutButton(_ sender: NSButton) {
+        guard let key = sender.identifier?.rawValue,
+              let command = Self.pullShortcutButtons.first(where: { $0.0 == key })?.3 else { return }
+        performTopLevelCommand(command)
     }
 
-    @objc private func toggleReflogReferences(_ sender: NSButton) {
-        setShowsReflogReferences(sender.state == .on)
+    private func registerToolbarItems(scripts: NSView) {
+        func view(_ tooltip: String) -> [NSView] {
+            standardToolbarViews.filter { $0.toolTip == tooltip }
+        }
+        var items: [(String, String, String, [NSView], Bool)] = [
+            ("Standard", "RefreshButton", "Refresh", view("Refresh"), true),
+            ("Standard", "toggleLeftPanel", "Toggle left panel", [toggleLeftPanelButton], true),
+            ("Standard", "toggleSplitViewLayout", "Toggle split view layout", [toggleSplitViewButton], true),
+            ("Standard", "menuCommitInfoPosition", "Commit info position", [commitPositionButton] + view("Commit info position"), true),
+            ("Standard", "toolStripButtonLevelUp", "Submodules", [levelUpButton] + view("Navigate submodules and superprojects"), true),
+            ("Standard", "toolStripWorktrees", "Worktrees", [worktreeButton, worktreeDropdownButton], true),
+            ("Standard", "_NO_TRANSLATE_WorkingDir", "Change working directory", [workingDirectoryPopUp], true),
+            ("Standard", "branchSelect", "Change current branch", [branchPopUp], true)
+        ]
+        items += Self.pullShortcutButtons.map { ("Standard", $0.0, $0.1, [pullShortcutViews[$0.0]].compactMap { $0 }, false) }
+        items += [
+            ("Standard", "toolStripButtonPull", "Pull", [pullPopUp], true),
+            ("Standard", "toolStripButtonPush", "Push", [pushButton], true),
+            ("Standard", "toolStripButtonCommit", "Commit", [commitButton], true),
+            ("Standard", "toolStripSplitStash", "Manage stashes", [stashSplitButton], true),
+            ("Standard", "toolStripFileExplorer", "File Explorer", view("File Explorer (Finder)"), true),
+            ("Standard", "userShell", "Git bash", view("Terminal"), true),
+            ("Standard", "EditSettings", "Settings", view("Settings"), true)
+        ]
+        items += filterToolbar.customizableItems.map { ("Filters", $0.key, $0.title, $0.views, true) }
+        items.append(("Scripts", "Scripts", "Scripts", [scripts], true))
+        toolbarItems = items.map { (toolbar: $0.0, key: $0.1, title: $0.2, views: $0.3, defaultVisible: $0.4) }
+        applyToolbarVisibility()
     }
 
-    private func setShowsReflogReferences(_ show: Bool) {
-        guard AppSettingsStore.shared.showReflogReferences != show else { return }
-        AppSettingsStore.shared.saveShowReflogReferences(show)
-        reflogReferencesButton.state = show ? .on : .off
-        statusLabel.stringValue = show ? "Showing reflog references" : "Hiding reflog references"
-        restartRevisionReadForFilterChange()
+    private func isToolbarItemVisible(_ key: String) -> Bool {
+        layout.toolbarItemVisibility[key] ?? (toolbarItems.first { $0.key == key }?.defaultVisible ?? true)
+    }
+
+    private func applyToolbarVisibility() {
+        for item in toolbarItems {
+            let visible = (toolbarVisible[item.toolbar] ?? true) && isToolbarItemVisible(item.key)
+            item.views.forEach { $0.isHidden = !visible }
+        }
+        refreshToolbarNavigationStateVisibility()
+        BrowserCommandAvailability.shared.toolbars = ["Standard", "Filters", "Scripts"].map { toolbar in
+            BrowserToolbarState(id: toolbar, isVisible: toolbarVisible[toolbar] ?? true,
+                                items: toolbarItems.filter { $0.toolbar == toolbar }
+                                    .map { .init(id: $0.key, title: $0.title, isVisible: isToolbarItemVisible($0.key)) })
+        }
+    }
+
+
+    private func toggleToolbar(_ name: String) {
+        toolbarVisible[name] = !(toolbarVisible[name] ?? true)
+        applyToolbarVisibility()
+    }
+
+
+    private func toggleToolbarItem(_ key: String) {
+        guard let item = toolbarItems.first(where: { $0.key == key }) else { return }
+        let visible = !isToolbarItemVisible(key)
+        layout.toolbarItemVisibility[key] = visible == item.defaultVisible ? nil : visible
+        AppSettingsStore.shared.saveBrowserLayoutPreferences(layout)
+        applyToolbarVisibility()
+    }
+    @objc private func terminalToolbar(_ sender: NSButton) { uiCommands.openTerminal() }
+
+
+    @objc private func levelUpToolbar() {
+        if let superproject = superprojectURL {
+            _ = onApplicationCommand?(.openRecentRepository(superproject))
+        } else {
+            showSubmodulesMenu(levelUpButton)
+        }
+    }
+
+    private var superprojectURL: URL? {
+        guard let current = repositoryNavigation?.submoduleTree.first(where: \.isCurrent), !current.isTop else { return nil }
+        return current.parentURL
+    }
+
+
+    private func refreshToolbarNavigationState() {
+        let inSubmodule = superprojectURL != nil
+        levelUpButton.image = AppKitFactory.resourceImage(inSubmodule ? "NavigateUp" : "SubmodulesManage",
+                                                          accessibilityDescription: inSubmodule ? "Go to superproject" : "Submodules")
+        levelUpButton.toolTip = inSubmodule ? "Go to superproject" : "Submodules"
+        levelUpButton.isEnabled = !(repositoryIdentity?.currentRepository.isBare ?? true)
+        refreshToolbarNavigationStateVisibility()
+        rebuildWorkingDirectoryMenu()
+    }
+
+
+    private func refreshToolbarNavigationStateVisibility() {
+        let showsWorktrees = (repositoryNavigation?.worktrees.count ?? 0) > 1
+            && (toolbarVisible["Standard"] ?? true) && isToolbarItemVisible("toolStripWorktrees")
+        worktreeButton.isHidden = !showsWorktrees
+        worktreeDropdownButton.isHidden = !showsWorktrees
+    }
+
+
+    private func rebuildWorkingDirectoryMenu() {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        let path = repositoryIdentity?.currentRepository.path
+
+        var caption = "No working directory"
+        if let path {
+            let settings = AppSettingsStore.shared.recentRepositorySettings
+            let history = RepositoryHistory.addAsMostRecent(path, to: AppSettingsStore.shared.recentRepositories)
+            let split = RecentRepoSplitter(settings: settings, measure: RepositoryHistoryUIService.menuMeasure).split(history)
+            let info = (split.top + split.recent).first { RepositoryHistory.samePath($0.repo.path, path) }
+            caption = RepositoryHistory.displayPath(info?.caption ?? path)
+        }
+        menu.addItem(withTitle: caption, action: nil, keyEquivalent: "")
+        let search = NSSearchField(frame: NSRect(x: 0, y: 0, width: 240, height: 22))
+        search.placeholderString = "Search repositories..."
+        search.target = self
+        search.action = #selector(filterWorkingDirectoryMenu(_:))
+        let searchItem = NSMenuItem()
+        searchItem.view = search
+        menu.addItem(searchItem)
+        menu.addItem(.separator())
+        let service = RepositoryHistoryUIService.shared
+        service.reload()
+        func historyItem(_ item: RepositoryHistoryUIService.MenuItem) -> NSMenuItem {
+            let menuItem = NSMenuItem(title: item.title, action: #selector(openWorkingDirectoryItem(_:)), keyEquivalent: "")
+            menuItem.target = self
+            menuItem.representedObject = item.path
+            menuItem.toolTip = item.toolTip
+            if let branch = item.branch, #available(macOS 14.4, *) { menuItem.subtitle = branch }
+            if item.anchored { menuItem.image = AppKitFactory.resourceImage("Pin", accessibilityDescription: "Pinned") }
+            menuItem.tag = 1
+            return menuItem
+        }
+        if !service.favourites.isEmpty {
+            let favourites = NSMenuItem(title: "Favorite repositories", action: nil, keyEquivalent: "")
+            let submenu = NSMenu()
+            for category in service.favourites {
+                let categoryItem = NSMenuItem(title: category.id, action: nil, keyEquivalent: "")
+                categoryItem.submenu = NSMenu()
+                category.items.forEach { categoryItem.submenu?.addItem(historyItem($0)) }
+                submenu.addItem(categoryItem)
+            }
+            favourites.submenu = submenu
+            menu.addItem(favourites)
+        }
+        service.pinned.forEach { menu.addItem(historyItem($0)) }
+        if !service.recent.isEmpty {
+            if !service.pinned.isEmpty { menu.addItem(.separator()) }
+            service.recent.forEach { menu.addItem(historyItem($0)) }
+        }
+        menu.addItem(.separator())
+        for (title, command) in [("Open...", BrowserCommand.openRepository), ("Close (go to Dashboard)", .closeToDashboard)] {
+            let item = NSMenuItem(title: title, action: #selector(workingDirectoryCommand(_:)), keyEquivalent: "")
+            item.target = self
+            BrowserCommandCenter.assign(command, to: item)
+            menu.addItem(item)
+        }
+        menu.addItem(.separator())
+        let configure = menu.addItem(withTitle: "Configure this menu...", action: #selector(configureWorkingDirectoryMenu), keyEquivalent: "")
+        configure.target = self
+        workingDirectoryPopUp.menu = menu
+        workingDirectoryPopUp.toolTip = """
+            Change working directory
+            Left click opens the drop-down menu.
+            Then hold Command (or Control) in order to open the selected repository in a new instance.
+            """
+        updatePopUpWidth(workingDirectoryPopUp, constraint: workingDirectoryWidthConstraint, title: caption, minimum: 83, includesLeadingImage: false)
+    }
+
+    @objc private func configureWorkingDirectoryMenu() {
+        guard let window = view.window else { return }
+        RecentRepositoriesSettingsDialog.present(owner: window) { [weak self] _ in self?.rebuildWorkingDirectoryMenu() }
+    }
+
+    @objc private func filterWorkingDirectoryMenu(_ sender: NSSearchField) {
+        let text = sender.stringValue
+        for item in workingDirectoryPopUp.menu?.items ?? [] where item.tag == 1 {
+            item.isHidden = !text.isEmpty && !item.title.localizedCaseInsensitiveContains(text)
+        }
+    }
+
+    @objc private func openWorkingDirectoryItem(_ sender: NSMenuItem) {
+        guard let path = sender.representedObject as? String else { return }
+        let modifiers = NSEvent.modifierFlags
+        guard modifiers.contains(.command) || modifiers.contains(.control) || path != repositoryIdentity?.currentRepository.path else { return }
+        RepositoryHistoryUIService.shared.open(path, owner: view.window)
+    }
+
+    @objc private func workingDirectoryCommand(_ sender: NSMenuItem) {
+        guard let command = BrowserCommandCenter.command(from: sender) else { return }
+        if onApplicationCommand?(command) == true { return }
+        performTopLevelCommand(command)
     }
 
     @objc private func settingsToolbarButton(_ sender: NSButton) {
@@ -1635,35 +2239,42 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         showPlaceholderStatus(for: sender.titleOfSelectedItem ?? "Option")
     }
 
-    @objc private func changeBranchScope(_ sender: NSPopUpButton) {
-        if sender.indexOfSelectedItem == 1, let current = repositoryReferences?.branches.first(where: \.isCurrent) {
-            branchFilterField.stringValue = current.name
-            revisionGridController.setBranchFilter(current.name)
-            restartRevisionReadForFilterChange()
-        } else if sender.indexOfSelectedItem == 0 {
-            branchFilterField.stringValue = ""
-            revisionGridController.setBranchFilter("")
-            restartRevisionReadForFilterChange()
+
+    func showRevisionFilterDialog() {
+        guard let window = view.window else { return }
+        RevisionFilterDialogController.present(filter: revisionGridController.currentFilter,
+            defaultLimit: AppSettingsStore.shared.browseDisplayPreferences.maximumRevisionCount, window: window) { [weak self] result in
+            guard let result else { return }
+            self?.revisionGridController.updateFilter { $0 = result }
         }
-        showPlaceholderStatus(for: sender.titleOfSelectedItem ?? "Branch scope")
     }
 
-    @objc private func toggleFirstParent(_ sender: NSButton) {
-        sender.state = sender.state == .on ? .off : .on
-        showPlaceholderStatus(for: sender.state == .on ? "Showing first-parent history" : "Showing complete history")
+
+    private func loadGridLabelContext() {
+        labelContextTask?.cancel()
+        let gridSource = repositoryModule as? any RepositoryRevisionGridDataSource
+        let remoteSource = repositoryModule as? any RepositoryRemoteManagingDataSource
+        labelContextTask = Task { @MainActor [weak self] in
+            let preferences = AppSettingsStore.shared.revisionGridPreferences
+            var context = RevisionLabelContext()
+            if AppSettingsStore.shared.browseDisplayPreferences.showAheadBehind {
+                context.aheadBehindByLocal = await gridSource?.aheadBehindData() ?? [:]
+            }
+            context.superproject = await gridSource?.superprojectInfo(branches: preferences.showSuperprojectBranches,
+                                                                      remoteBranches: preferences.showSuperprojectRemoteBranches,
+                                                                      tags: preferences.showSuperprojectTags)
+            for remote in (try? await remoteSource?.loadRemoteConfigurations()) ?? [] where !remote.isDisabled {
+                if let color = remote.color.flatMap(NSColor.init(hexString:)) { context.remoteColors[remote.name] = color }
+                if let prefix = remote.prefix, !prefix.isEmpty { context.remotePrefixes[remote.name] = prefix }
+            }
+            guard !Task.isCancelled, let self else { return }
+            revisionGridController.labelContext = context
+        }
     }
 
-    func controlTextDidChange(_ obj: Notification) {
-        guard let field = obj.object as? NSTextField else { return }
-        if field === branchFilterField {
-            revisionGridController.setBranchFilter(field.stringValue)
-            restartRevisionReadForFilterChange()
-            showPlaceholderStatus(for: field.stringValue.isEmpty ? "Branch filter cleared" : "Branch filter: \(field.stringValue)")
-        } else if field === revisionFilterField {
-            revisionGridController.setTextFilter(field.stringValue)
-            restartRevisionReadForFilterChange()
-            showPlaceholderStatus(for: field.stringValue.isEmpty ? "Revision filter cleared" : "Revision filter: \(field.stringValue)")
-        }
+
+    func publishGridMenuState() {
+        BrowserCommandAvailability.shared.gridMenuState = revisionGridController.menuState
     }
 
     private func restartRevisionReadForFilterChange() {
@@ -1740,6 +2351,12 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         uiCommands.startOpenSubmodule(item, newWindow: item.isCurrent)
     }
 
+
+
+    private func refRevision(_ id: ObjectID, label: String) -> Commit {
+        revisions.first { $0.id == .object(id) } ?? RevisionCommitBuilder.placeholderRevision(id: id, subject: label)
+    }
+
     private func performRepositoryCommand(_ identifier: String, node: RepositoryTreeNode) {
         switch identifier {
         case "repository.submodules.manage": uiCommands.startSubmoduleManagement(); return
@@ -1770,7 +2387,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         case ("repository.branch.checkout", .branch(let branch)):
             uiCommands.checkout(.local(branch), confirmDirectCheckout: true)
         case ("repository.branch.create", .branch(let branch)):
-            guard let commit = revisions.first(where: { $0.id == .object(branch.commitID) }) else { return }
+            let commit = refRevision(branch.commitID, label: branch.name)
             uiCommands.createBranch(sourceRevision: commit)
         case ("repository.branch.rename", .branch(let branch)):
             uiCommands.renameBranch(branch.name)
@@ -1787,7 +2404,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         case ("repository.remoteBranch.checkout", .remoteBranch(let branch)):
             uiCommands.checkout(.remote(branch), confirmDirectCheckout: true)
         case ("repository.remoteBranch.create", .remoteBranch(let branch)):
-            guard let commit = revisions.first(where: { $0.id == .object(branch.commitID) }) else { return }
+            let commit = refRevision(branch.commitID, label: branch.name)
             uiCommands.createBranch(sourceRevision: commit)
         case ("repository.remoteBranch.merge", .remoteBranch(let branch)):
             guard let remote = branch.remoteName else { return }
@@ -1830,10 +2447,10 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         case ("repository.remotes.prune", _):
             uiCommands.startFetchAll(prune: true)
         case ("repository.tag.checkout", .tag(let tag)):
-            guard let commit = revisions.first(where: { $0.id == .object(tag.commitID) }) else { return }
+            let commit = refRevision(tag.commitID, label: tag.name)
             uiCommands.checkout(.revision(commit))
         case ("repository.tag.createBranch", .tag(let tag)):
-            guard let commit = revisions.first(where: { $0.id == .object(tag.commitID) }) else { return }
+            let commit = refRevision(tag.commitID, label: tag.name)
             uiCommands.createBranch(sourceRevision: commit)
         case ("repository.folder.create", .folder(let prefix, false)):
             uiCommands.createBranch(sourceRevision: nil, suggestedPrefix: prefix + "/")
@@ -1845,10 +2462,10 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             uiCommands.startResetCurrentBranch(to: tag.commitID, label: tag.name)
         case ("repository.branch.rebase", .branch(let branch)),
              ("repository.remoteBranch.rebase", .remoteBranch(let branch)):
-            guard let commit = revisions.first(where: { $0.id == .object(branch.commitID) }) else { return }
+            let commit = refRevision(branch.commitID, label: branch.name)
             uiCommands.startRebase(on: commit, interactive: false)
         case ("repository.tag.rebase", .tag(let tag)):
-            guard let commit = revisions.first(where: { $0.id == .object(tag.commitID) }) else { return }
+            let commit = refRevision(tag.commitID, label: tag.name)
             uiCommands.startRebase(on: commit, interactive: false)
         case ("repository.tag.delete", .tag(let tag)):
             uiCommands.startDeleteTag(initialName: tag.name)
@@ -1905,7 +2522,19 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         )
     }
 
-    private func performRevisionCommand(_ identifier: String, selected: [Commit], focused: Commit) {
+    func performRevisionCommand(_ identifier: String, selected: [Commit], focused: Commit) {
+        if identifier.hasPrefix("revision.compare.") {
+            uiCommands.startRevisionComparison(identifier, selected: selected, base: revisionGridController.comparisonBase)
+            return
+        }
+        if identifier == "revision.artificial.resetChanges" {
+            uiCommands.startResetChanges(onlyWorkTree: focused.kind == .workingDirectory)
+            return
+        }
+        if identifier == "revision.artificial.commit" {
+            uiCommands.startCommit()
+            return
+        }
         if identifier == "revision.commit.archive" {
             uiCommands.startArchive(selected: selected)
             return
@@ -1915,7 +2544,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             return
         }
         if identifier == "revision.other.reflog" {
-            setShowsReflogReferences(!AppSettingsStore.shared.showReflogReferences)
+            revisionGridController.toggleShowReflogReferences()
             return
         }
         let selectPrefix = "revision.selectInLeftPanel.ref."
@@ -2151,14 +2780,14 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         }
     }
 
-    private func performFileViewerCommand(_ identifier: String, commit: Commit, file: ChangedFile) {
+
+    private func performFileViewerCommand(_ identifier: String, item: FileStatusListItem) {
         guard let repository = repositoryIdentity?.currentRepository else { return }
-        let fileURL = URL(fileURLWithPath: repository.path, isDirectory: true).appendingPathComponent(file.path)
+        let fileURL = URL(fileURLWithPath: repository.path, isDirectory: true).appendingPathComponent(item.file.path)
         switch identifier {
-        case "file.difftool":
-            uiCommands.startDifftool(commit: commit, file: file)
+        case "file.history": uiCommands.startFileHistory(file: item.file.path, revision: revisions.first { $0.id == item.second })
         case "file.open.local":
-            guard file.changeType != .deleted else { return }
+            guard FileManager.default.fileExists(atPath: fileURL.path) else { return }
             NSWorkspace.shared.open(fileURL)
         case "file.showFinder":
             NSWorkspace.shared.activateFileViewerSelecting([fileURL])
@@ -2167,34 +2796,114 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         }
     }
 
-    private func performFileTreeCommand(_ identifier: String, commit: Commit, file: RepositoryFileEntry) {
+
+    private func configureFileStatusController(_ controller: RevisionDiffViewController) {
         guard let repository = repositoryIdentity?.currentRepository else { return }
-        let workingURL = URL(fileURLWithPath: repository.path, isDirectory: true).appendingPathComponent(file.path)
+        controller.isBareRepository = repository.isBare
+        controller.repositoryURL = URL(fileURLWithPath: repository.path, isDirectory: true)
+        let snapshot = revisions
+        controller.describe = { id in
+            guard let commit = snapshot.first(where: { $0.id == .object(id) }) else { return id.shortString }
+            return RevisionDescription.describe(commit)
+        }
+    }
+
+
+    func describeRevision(_ revision: RevisionID?) -> String {
+        switch revision {
+        case .object(let id)?: revisions.first { $0.id == .object(id) }.map(RevisionDescription.describe) ?? id.shortString
+        case .workingDirectory?: "Working directory"
+        case .index?: "Commit index"
+        case nil: ""
+        }
+    }
+
+
+    private func loadDiffTools() {
+        guard let source = repositoryModule as? any RepositoryFileStatusDataSource else { return }
+        Task { @MainActor [weak self] in
+            let tools = (try? await source.loadDiffTools()) ?? []
+            self?.revisionDiffController.diffTools = tools
+            self?.fileTreeController.diffTools = tools
+        }
+    }
+
+
+    private func parents(of revision: RevisionID) -> [RevisionID] {
+        switch revision {
+        case .workingDirectory: [.index]
+        case .index: repositoryIdentity?.headID.map { [.object($0)] } ?? []
+        case .object: revisions.first { $0.id == revision }?.parentIDs.map { .object($0) } ?? []
+        }
+    }
+
+
+    private func refreshArtificialRevisions() {
+        guard revisions.contains(where: \.isArtificial) else { return }
+        reloadRepositoryState(preferredCommitID: selectedCommitID)
+    }
+
+
+    private func applicationActivated() {
+        guard AppSettingsStore.shared.commitPreferences.refreshOnFocus, repositoryIdentity != nil else { return }
+        if selectedDetailController === revisionDiffController { revisionDiffController.refreshArtificial() }
+        else if selectedDetailController === fileTreeController { fileTreeController.refreshArtificial() }
+    }
+
+
+    private func performFileListHotkey(_ identifier: String) {
+        let diffVisible = selectedDetailController === revisionDiffController
+        let treeVisible = selectedDetailController === fileTreeController
         switch identifier {
-        case "tree.open" where commit.kind == .workingDirectory:
-            NSWorkspace.shared.open(workingURL)
-        case "tree.reveal" where commit.kind == .workingDirectory:
-            NSWorkspace.shared.activateFileViewerSelecting([workingURL])
-        case "tree.copyPath":
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(workingURL.path, forType: .string)
-        case "tree.open":
-            let source = repositoryModule
-            Task { @MainActor in
-                do {
-                    let content = try await source.loadFilePresentation(for: commit, file: file, encoding: .automatic)
-                    let folder = FileManager.default.temporaryDirectory
-                        .appendingPathComponent("GitExtensionsMac-FileViewer", isDirectory: true)
-                    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-                    let target = folder.appendingPathComponent(URL(fileURLWithPath: file.path).lastPathComponent)
-                    try content.data.write(to: target, options: .atomic)
-                    NSWorkspace.shared.open(target)
-                } catch {
-                    statusLabel.stringValue = "Open file failed: \(error.localizedDescription)"
-                }
+        case "openWithDifftool":
+            if diffVisible { revisionDiffController.filesController.perform("file.difftool") }
+            else if treeVisible { fileTreeController.filesController.perform("file.difftool") }
+        case "openWithDifftoolFirstToLocal" where diffVisible: revisionDiffController.filesController.perform("file.difftool.firstToLocal")
+        case "openWithDifftoolSelectedToLocal" where diffVisible: revisionDiffController.filesController.perform("file.difftool.selectedToLocal")
+        case "openAsTempFile" where treeVisible: fileTreeController.filesController.perform("file.open.revision")
+        case "openAsTempFileWith" where treeVisible: fileTreeController.filesController.perform("file.open.revisionWith")
+        case "editFile":
+
+            if diffVisible { revisionDiffController.filesController.performIfEnabled("file.edit.local") }
+            else if treeVisible { fileTreeController.filesController.performIfEnabled("file.edit.local") }
+        case "findFileInSelectedCommit":
+
+            if let commit = revisions.first(where: { $0.id == selectedCommitID }), commit.isArtificial, let head = repositoryIdentity?.headID {
+                revisionGridController.selectCommit(id: .object(head))
             }
+            if !layout.showSplitViewLayout { setShowSplitViewLayout(true) }
+            selectDetailTab(fileTreeController)
+            fileTreeController.filesController.perform("file.find")
         default:
             break
+        }
+    }
+
+
+    private func performFileStatusCommand(_ command: FileStatusListCommand, from controller: RevisionDiffViewController) {
+        switch command.identifier {
+        case "file.blame": controller.toggleBlame()
+        case "file.stage":
+            let files = command.items.filter { $0.file.staged == .workTree }.map(\.file)
+            if !files.isEmpty { performFileMutation("file.stage", files: files, scope: .workingTree) }
+        case "file.unstage":
+            let files = command.items.filter { $0.file.staged == .index }.map(\.file)
+            if !files.isEmpty { performFileMutation("file.unstage", files: files, scope: .index) }
+        case "file.showFileTree":
+
+            guard let path = command.folder ?? command.items.first?.file.path else { return }
+            fileTreeController.selectFileOrFolder(path)
+            if !layout.showSplitViewLayout { setShowSplitViewLayout(true) }
+            selectDetailTab(fileTreeController)
+            fileTreeController.focusFileList()
+        case "file.filterGrid":
+
+            let filter = command.folder ?? command.items.map { "\"\($0.file.path)\"" }.joined(separator: " ")
+            revisionGridController.setAndApplyPathFilter(filter)
+        case "file.goToFirstParent": revisionGridController.goToParent(first: true); controller.focusFileList()
+        case "file.goToLastParent": revisionGridController.goToParent(last: true); controller.focusFileList()
+        default:
+            uiCommands.performFileStatusCommand(command)
         }
     }
 
@@ -2262,7 +2971,12 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
                 )
             },
             onDifftool: { [weak self] commit, file in self?.uiCommands.startDifftool(commit: commit, file: file) },
+            onBlame: { [weak self] file, window in self?.uiCommands.startFileHistory(file: file.path, revision: head, showBlame: true, owner: window) },
+            onFileHistory: { [weak self] file, window in self?.uiCommands.startFileHistory(file: file.path, revision: head, owner: window) },
             scriptHooks: uiCommands.scriptHooks,
+            onEditIgnoredFiles: { [weak self] localExclude, window, completion in
+                self?.uiCommands.startEditGitIgnore(localExclude: localExclude, owner: window, onClosed: completion)
+            },
             onRepositoryChanged: { [weak self] selected in
                 guard let self else { return }
                 commitDraft = nil
@@ -2614,7 +3328,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             revisionGridController.setRebaseInProgress(false, hasConflicts: false)
             revisionGridController.setBisectInProgress(false)
             updateBisectBanner(inProgress: false)
-            updateRebaseBanner(inProgress: false, hasConflicts: false)
+            updateGitActionBanner(.none, hasConflicts: false)
             return
         }
         operationStateTask = Task { @MainActor [weak self] in
@@ -2636,10 +3350,15 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             )
             revisionGridController.setBisectInProgress(bisectState?.isActive == true)
             updateBisectBanner(inProgress: bisectState?.isActive == true)
-            updateRebaseBanner(
-                inProgress: state?.rebaseInProgress == true,
-                hasConflicts: !(state?.conflictedPaths.isEmpty ?? true)
-            )
+            let patchApplying: Bool = if let patches = repositoryModule as? any RepositoryPatchingDataSource {
+                (try? await patches.loadPatchState())?.isApplying == true
+            } else {
+                false
+            }
+            guard !Task.isCancelled else { return }
+            updateGitActionBanner(.detect(rebase: state?.rebaseInProgress == true, merge: state?.mergeInProgress == true,
+                                          patch: patchApplying),
+                                  hasConflicts: !(state?.conflictedPaths.isEmpty ?? true))
         }
     }
 
@@ -2655,16 +3374,92 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         uiCommands.startBisect([commit])
     }
 
-    private func updateRebaseBanner(inProgress: Bool, hasConflicts: Bool) {
-        rebaseBanner.isHidden = !inProgress
-        rebaseBannerHeightConstraint?.constant = inProgress ? 34 : 0
-        rebaseBannerLabel.stringValue = hasConflicts
-            ? "Rebase is currently in progress with merge conflicts."
-            : "Rebase is currently in progress."
-        rebaseResolveButton.isHidden = !hasConflicts
-        rebaseContinueButton.isHidden = hasConflicts
+
+    private func updateGitActionBanner(_ action: BrowserGitAction, hasConflicts: Bool) {
+        gitAction = action
+        let presentation = action.presentation(hasConflicts: hasConflicts)
+        rebaseBanner.isHidden = presentation == nil
+        rebaseBannerHeightConstraint?.constant = presentation == nil ? 0 : 34
+        guard let presentation else { return }
+        rebaseBannerLabel.stringValue = presentation.message
+        rebaseResolveButton.isHidden = !presentation.buttons.contains(.resolve)
+        rebaseContinueButton.isHidden = !presentation.buttons.contains(.continue)
+        gitActionAbortButton.isHidden = !presentation.buttons.contains(.abort)
+        gitActionMoreButton.isHidden = !presentation.buttons.contains(.more)
+        gitActionIcon.image = NSImage(systemSymbolName: hasConflicts ? "exclamationmark.triangle.fill" : "info.circle.fill",
+                                      accessibilityDescription: presentation.message)
         rebaseBanner.layer?.backgroundColor = (hasConflicts ? NSColor.systemOrange : NSColor.systemBlue)
             .withAlphaComponent(0.22).cgColor
+    }
+
+    @objc private func continueGitActionFromBanner() {
+        switch gitAction {
+        case .rebase: continueRebaseFromBanner()
+        case .merge:
+            guard let source = repositoryModule as? any RepositoryConflictDataSource else { return }
+            runBannerMutation(errorTitle: "Continue merge failed") { try await source.continueMerge() }
+        case .patch: continuePatchFromBanner(.resolved)
+        case .none: break
+        }
+    }
+
+    @objc private func abortGitActionFromBanner() {
+        switch gitAction {
+        case .rebase: abortRebaseFromBanner()
+        case .merge:
+            guard let source = repositoryModule as? any RepositoryConflictDataSource else { return }
+            runBannerMutation(errorTitle: "Abort merge failed") { try await source.abortMerge() }
+        case .patch: continuePatchFromBanner(.abort)
+        case .none: break
+        }
+    }
+
+    @objc private func resolveGitActionFromBanner() {
+        if gitAction == .rebase { resolveRebaseFromBanner() } else { uiCommands.startConflictResolution() }
+    }
+
+    @objc private func showGitActionMore() {
+        switch gitAction {
+        case .rebase: showRebaseManager()
+        case .patch: uiCommands.startPatch(.apply)
+        default: break
+        }
+    }
+
+    private func runBannerMutation(errorTitle: String, _ operation: @escaping @Sendable () async throws -> RepositoryMutationResult) {
+        let previousSelection = selectedCommitID
+        mutationTask?.cancel()
+        mutationTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let result = try await operation()
+                uiCommands.notifyRepositoryChanged(preferredCommitID: result.selectedCommitID ?? previousSelection)
+                statusLabel.stringValue = result.message
+            } catch is CancellationError {
+                return
+            } catch {
+                uiCommands.notifyRepositoryChanged(preferredCommitID: previousSelection)
+                if let window = view.window { await MutationDialogs.showError(error, title: errorTitle, window: window) }
+            }
+        }
+    }
+
+    private func continuePatchFromBanner(_ action: PatchContinuation) {
+        guard let source = repositoryModule as? any RepositoryPatchingDataSource else { return }
+        let previousSelection = selectedCommitID
+        mutationTask?.cancel()
+        mutationTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                _ = try await source.continuePatches(action) { _ in }
+                uiCommands.notifyRepositoryChanged(preferredCommitID: previousSelection)
+            } catch {
+                uiCommands.notifyRepositoryChanged(preferredCommitID: previousSelection)
+                if let window = view.window {
+                    await MutationDialogs.showError(error, title: action == .abort ? "Abort patch failed" : "Continue patch failed", window: window)
+                }
+            }
+        }
     }
 
     @objc private func continueRebaseFromBanner() {

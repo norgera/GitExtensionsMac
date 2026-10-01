@@ -420,7 +420,7 @@ enum GitPushTests {
             _ = try await task.value
             throw PullFixtureError("cancellation: cancelled Push completed")
         } catch is CancellationError {
-            // Expected.
+
         }
         try require(Date().timeIntervalSince(started) < 3, "cancellation: Push terminates Git and its remote child process promptly")
         let remoteID = try fixture.git(["rev-parse", "refs/heads/main"], in: fixture.originURL).trimmedPush

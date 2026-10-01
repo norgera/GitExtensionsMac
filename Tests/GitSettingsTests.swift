@@ -24,6 +24,7 @@ enum GitSettingsTests {
 
     static func run() async throws {
         try testArtificialRevisionCounts()
+        testChecklistRules()
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("GitExtensionsMac-Settings-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -66,6 +67,19 @@ enum GitSettingsTests {
             try require(rejected, "invalid/effective writes must be rejected")
         }
         try require(try await load(.effective)["user.name"]?.last == "Global", "rejected writes preserve existing identity")
+        try await save("user.email", "settings@example.invalid", .global)
+        try await save("core.editor", "fixture-editor", .global)
+        try await save("merge.tool", "fixture-merge", .local)
+        try await save("mergetool.fixture-merge.cmd", "fixture merge", .local)
+        try await save("diff.guitool", "fixture-diff", .local)
+        try await save("difftool.fixture-diff.cmd", "fixture diff", .local)
+        let beforeChecks = try await load(.effective)
+        let checks = try await GitSettingsChecklist.load(executableURL: URL(fileURLWithPath: "/usr/bin/git"), directory: directory, git: git, environment: environment)
+        try require(checks.map(\.kind) == [.git, .identity, .editor, .mergeTool, .diffTool], "checklist order")
+        try require(checks.dropFirst().allSatisfy { $0.status == .valid }, "real global identity/editor and effective custom tools")
+        try require(try await load(.effective) == beforeChecks, "checklist does not write Git config")
+        let missingGit = try await GitSettingsChecklist.load(executableURL: directory.appendingPathComponent("missing-git"))
+        try require(missingGit.count == 1 && missingGit[0].kind == .git && missingGit[0].status == .invalid, "missing executable diagnostic")
         try await save("i18n.filesencoding", "WINDOWS-1252", .local)
         let module = GitRepositoryModule(repositoryURL: directory)
         _ = try await module.loadRepositoryState()
@@ -102,5 +116,28 @@ enum GitSettingsTests {
         try require(linkedDirectories.commonGit.resolvingSymlinksInPath() == directories.commonGit.resolvingSymlinksInPath(), "local app settings share common Git directory across worktrees")
         try require(linkedDirectories.working.resolvingSymlinksInPath() == linked.resolvingSymlinksInPath(), "distributed settings are specific to each worktree")
         print("GitSettingsTests: passed")
+    }
+
+    private static func testChecklistRules() {
+        for (version, status) in [("git version 2.42.9", GitSettingsCheck.Status.invalid),
+                                  ("git version 2.43.0", .warning), ("git version 2.52.9", .warning),
+                                  ("git version 2.53.0", .valid), ("git version 3.0.0", .valid),
+                                  ("git version 2.50.1 (Apple Git-155)", .warning), ("garbage", .invalid)] {
+            precondition(GitSettingsChecklist.versionCheck(version).status == status, version)
+        }
+        let local = ["user.name": ["Local"], "user.email": ["local@example.invalid"], "core.editor": ["local-editor"],
+                     "diff.tool": ["known"], "merge.tool": ["known"]]
+        let checks = GitSettingsChecklist.configurationChecks(global: [:], effective: local, environment: [:], knownTools: ["known"])
+        precondition(checks.map(\.status) == [.invalid, .invalid, .valid, .invalid], "identity/editor must be global; only Merge falls back to .tool")
+        let global = ["user.name": ["Global"], "user.email": ["global@example.invalid"], "core.editor": ["global-editor"]]
+        let configured = GitSettingsChecklist.configurationChecks(global: global,
+            effective: local.merging(["merge.guitool": ["custom"], "diff.guitool": ["known"]], uniquingKeysWith: { _, new in new }),
+            environment: ["GIT_EDITOR": "env-editor", "VISUAL": "visual"], knownTools: ["known"])
+        precondition(configured.map(\.status) == [.valid, .valid, .invalid, .valid])
+        precondition(configured[1].message.contains("env-editor"), "Git editor precedence")
+        for (environment, expected) in [(["VISUAL": "visual", "EDITOR": "editor"], "visual"), (["EDITOR": "editor"], "editor")] {
+            let check = GitSettingsChecklist.configurationChecks(global: [:], effective: [:], environment: environment, knownTools: [])
+            precondition(check[1].message.hasSuffix(expected))
+        }
     }
 }

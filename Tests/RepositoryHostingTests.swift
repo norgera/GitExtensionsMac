@@ -315,13 +315,14 @@ enum RepositoryHostingTests {
         func titles(_ status: BuildInfo?) -> [String] {
             var context = RevisionContextMenuContext(focusedCommit: commit, selectedCommits: [commit], history: [commit], currentBranchName: nil)
             context.buildStatus = status
+            context.scripts = [(id: "s1", title: "Script", direct: true)]
             return RevisionContextMenuBuilder.build(context).compactMap { if case .command(let id, _, _) = $0 { return id } else { return nil } }
         }
         precondition(!titles(nil).contains("revision.buildReport") && !titles(nil).contains("revision.pullRequestPage"))
         let info = BuildInfo(status: .failure, description: "CI #1", revisions: [commit.id], url: URL(string: "https://ci/1"), pullRequestURL: URL(string: "https://pr/1"))
         let ids = titles(info)
         precondition(ids.contains("revision.buildReport") && ids.contains("revision.pullRequestPage"))
-        precondition(ids.firstIndex(of: "revision.script")! < ids.firstIndex(of: "revision.buildReport")!)
+        precondition(ids.firstIndex(of: "revision.script.run.s1")! < ids.firstIndex(of: "revision.buildReport")!)
 
         precondition(RevisionGridViewController.buildStatusText(info, icon: true, text: false) == "❌")
         precondition(RevisionGridViewController.buildStatusText(info, icon: true, text: true) == "❌CI #1")

@@ -1,6 +1,97 @@
 import Foundation
 import GitExtensionsCore
 
+
+package struct GitSettingsCheck: Equatable, Sendable {
+    package enum Kind: String, Sendable { case git, identity, editor, mergeTool, diffTool }
+    package enum Status: Sendable { case valid, warning, invalid }
+    package let kind: Kind
+    package let status: Status
+    package let message: String
+
+    package init(kind: Kind, status: Status, message: String) {
+        self.kind = kind
+        self.status = status
+        self.message = message
+    }
+}
+
+package enum GitSettingsChecklist {
+
+    package static func versionCheck(_ output: String) -> GitSettingsCheck {
+        let version = output.split(whereSeparator: \.isWhitespace).dropFirst(2).first.map(String.init) ?? ""
+        let parts = version.split(separator: ".").prefix(3).compactMap { Int($0.prefix(while: \.isNumber)) }
+        guard parts.count >= 2 else { return .init(kind: .git, status: .invalid, message: "Git not found. Set the correct path in settings.") }
+        let numbers = parts + Array(repeating: 0, count: 3 - parts.count)
+        if numbers.lexicographicallyPrecedes([2, 43, 0]) {
+            return .init(kind: .git, status: .invalid, message: "Git found but version \(version) is not supported. Upgrade to version 2.53.0 or later.")
+        }
+        if numbers.lexicographicallyPrecedes([2, 53, 0]) {
+            return .init(kind: .git, status: .warning, message: "Git found but version \(version) is older than recommended. Upgrade to version 2.53.0 or later.")
+        }
+        return .init(kind: .git, status: .valid, message: "Git \(version) is found on your computer.")
+    }
+
+    package static func configurationChecks(global: [String: [String]], effective: [String: [String]],
+                                             environment: [String: String], knownTools: Set<String>) -> [GitSettingsCheck] {
+        func value(_ key: String) -> String { effective[key]?.last ?? "" }
+        let identity = !(global["user.name"]?.last ?? "").isEmpty && !(global["user.email"]?.last ?? "").isEmpty
+        let editor = [environment["GIT_EDITOR"], global["core.editor"]?.last, environment["VISUAL"], environment["EDITOR"]]
+            .compactMap { $0 }.first { !$0.isEmpty }
+        var checks: [GitSettingsCheck] = [
+            .init(kind: .identity, status: identity ? .valid : .invalid,
+                  message: identity ? "A username and an email address are configured." : "You need to configure a username and an email address."),
+            .init(kind: .editor, status: editor == nil ? .invalid : .valid,
+                  message: editor.map { "An editor is configured: \($0)" } ?? "You need to configure an editor.")
+        ]
+        for merge in [true, false] {
+            let prefix = merge ? "mergetool" : "difftool"
+            let key = merge ? "merge" : "diff"
+            let gui = value("\(key).guitool")
+
+            let tool = merge && gui.isEmpty ? value("merge.tool") : gui
+            let configured = !tool.isEmpty && (!value("\(prefix).\(tool).cmd").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || knownTools.contains(tool))
+            let message: String
+            if configured { message = "There is a \(prefix) configured: \(tool)" }
+            else if merge && !tool.isEmpty { message = "\(tool) is configured as mergetool; this custom tool needs a custom command." }
+            else { message = merge ? "You need to configure a merge tool in order to solve merge conflicts." : "You should configure a diff tool to show file differences in an external program." }
+            checks.append(.init(kind: merge ? .mergeTool : .diffTool, status: configured ? .valid : .invalid, message: message))
+        }
+        return checks
+    }
+
+    package static func load(executableURL: URL, directory: URL = FileManager.default.temporaryDirectory,
+                             git: (any GitCommandRunning)? = nil, environment: [String: String] = [:]) async throws -> [GitSettingsCheck] {
+        let runner = git ?? GitProcess(executableURL: executableURL)
+        let version: GitSettingsCheck
+        do {
+            let result = try await runner.run(GitCommand(arguments: ["--version"], accessesRemote: false, changesRepositoryState: false), in: directory, environment: environment)
+            version = versionCheck(result.succeeded ? result.standardOutputString : "")
+        } catch is CancellationError { throw CancellationError() }
+        catch { return [.init(kind: .git, status: .invalid, message: "Git not found. Set the correct path in settings.\n\(error.localizedDescription)")] }
+        let global = try await GitSettingsConfiguration.load(.global, in: directory, git: runner, environment: environment)
+        let effective = try await GitSettingsConfiguration.load(.effective, in: directory, git: runner, environment: environment)
+
+        let execPath = try await runner.run(GitCommand(arguments: ["--exec-path"], accessesRemote: false, changesRepositoryState: false), in: directory, environment: environment)
+        let toolsURL = URL(fileURLWithPath: execPath.standardOutputString.trimmingCharacters(in: .whitespacesAndNewlines)).appendingPathComponent("mergetools")
+        let tools = execPath.succeeded ? Set((try? FileManager.default.contentsOfDirectory(atPath: toolsURL.path)) ?? []) : []
+        let ambient = ProcessInfo.processInfo.environment.merging(environment, uniquingKeysWith: { _, value in value })
+        return [version] + configurationChecks(global: global, effective: effective, environment: ambient, knownTools: tools)
+    }
+
+
+    package static func locateGit(environment: [String: String] = ProcessInfo.processInfo.environment) async -> URL? {
+        let directories = (environment["PATH"] ?? "").split(separator: ":").map(String.init) + ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"]
+        var seen = Set<String>()
+        for directory in directories {
+            let url = URL(fileURLWithPath: directory).appendingPathComponent("git")
+            guard seen.insert(url.path).inserted, FileManager.default.isExecutableFile(atPath: url.path) else { continue }
+            if let result = try? await GitProcess(executableURL: url).run(GitCommand(arguments: ["--version"], accessesRemote: false, changesRepositoryState: false), in: FileManager.default.temporaryDirectory), result.succeeded { return url }
+        }
+        return nil
+    }
+}
+
 package enum GitSettingsScope: String, CaseIterable, Sendable {
     case effective, local, global, system
     var arguments: [String] { self == .effective ? [] : ["--\(rawValue)"] }

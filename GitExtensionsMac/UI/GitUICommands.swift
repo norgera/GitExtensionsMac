@@ -28,10 +28,16 @@ final class GitUICommands {
     private var submodulePullWindowController: NSWindowController?
     private var submoduleRemoteWindowController: NSWindowController?
     private var submoduleCommitWindowController: NSWindowController?
+    private var pendingSubmoduleCommits: [any RepositoryBrowsingDataSource] = []
     private var submoduleSources: [String: any RepositoryBrowsingDataSource] = [:]
     private var reflogBranchWorkflowCoordinator: CheckoutBranchWorkflowCoordinator?
     private var archiveWindows: [UUID: ArchiveWindowController] = [:]
     private var patchWindows: [UUID: PatchWindowController] = [:]
+    private var blameWindows: [UUID: NSWindowController] = [:]
+    private var fileHistoryWindows: [UUID: FileHistoryWindowController] = [:]
+    private var comparisonWindows: [UUID: RevisionComparisonWindowController] = [:]
+
+    private(set) var fileEditorWindows: [String: NSWindowController] = [:]
     private static var standalonePatchWindows: [UUID: PatchWindowController] = [:]
 
     init(
@@ -49,7 +55,7 @@ final class GitUICommands {
     ) async throws -> Bool {
         repositoryChangedNotifier.lock()
         defer { repositoryChangedNotifier.unlock(requestNotify: false) }
-        let succeeded = try await action()
+        let succeeded = try await OutputHistoryRecording.perform { try await action() }
         if succeeded && changesRepositoryState {
             repositoryChangedNotifier.notify()
         }
@@ -592,6 +598,48 @@ final class GitUICommands {
             })
     }
 
+
+    static func launchBrowse(_ url: URL, selection: [RevisionID] = [], fileHistory: FileHistoryBrowseRequest? = nil, onError: @escaping @MainActor (Error) -> Void = { _ in }) {
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.createsNewApplicationInstance = true
+        configuration.arguments = ["--repository", url.path] + RepositoryOpeningSelection.arguments(selection) + (fileHistory?.arguments ?? [])
+        NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: configuration) { _, error in
+            if let error { Task { @MainActor in onError(error) } }
+        }
+    }
+
+
+    static func runGitGui(workingDirectory: URL, owner: NSWindow?) {
+        let git = GitProcess(executableURL: URL(fileURLWithPath: AppSettingsStore.shared.preferences.gitExecutablePath))
+        runExternalTool("Git GUI", git: git, arguments: ["gui"], workingDirectory: workingDirectory, owner: owner)
+    }
+
+
+    static func runGitK(workingDirectory: URL, owner: NSWindow?) {
+        let gitDirectory = URL(fileURLWithPath: AppSettingsStore.shared.preferences.gitExecutablePath).deletingLastPathComponent().path
+        let path = ProcessInfo.processInfo.environment["PATH"]?.split(separator: ":").map(String.init) ?? []
+        let candidates = [gitDirectory, "/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin"] + path
+        guard let gitk = candidates.map({ URL(fileURLWithPath: $0).appendingPathComponent("gitk") })
+            .first(where: { FileManager.default.isExecutableFile(atPath: $0.path) }) else {
+            if let owner { Task { await MutationDialogs.showError(GitError.executableUnavailable("gitk"), title: "GitK", window: owner) } }
+            return
+        }
+        runExternalTool("GitK", git: GitProcess(executableURL: gitk), arguments: [], workingDirectory: workingDirectory, owner: owner)
+    }
+
+    private static func runExternalTool(_ title: String, git: GitProcess, arguments: [String], workingDirectory: URL, owner: NSWindow?) {
+        Task { @MainActor in
+            do {
+                let result = try await git.run(GitCommand(arguments: arguments, accessesRemote: false, changesRepositoryState: false),
+                                               in: workingDirectory)
+                guard !result.succeeded else { return }
+                throw GitError.commandFailed(arguments: result.arguments, status: result.exitStatus, stderr: result.standardErrorString)
+            } catch {
+                if let owner { await MutationDialogs.showError(error, title: title, window: owner) }
+            }
+        }
+    }
+
     static func startCommandLog() {
         if commandLogWindow == nil {
             let controller = CommandLogWindowController()
@@ -603,13 +651,38 @@ final class GitUICommands {
         commandLogWindow?.window?.makeKeyAndOrderFront(nil)
     }
 
-    func startSettings() {
+    func startOutputHistory() { browser?.focusOutputHistory() }
+
+    func startSettings(initialPage: String? = nil, initialScope: DistributedSettingsScope = .effective) {
         guard let owner = browser?.view.window else { return }
         Task { @MainActor [weak self] in
             guard let self else { return }
             let accepted = await ApplicationShellDialogs.presentSettings(from: owner, source: repositoryModule as? any RepositorySettingsDataSource,
+                initialPage: initialPage, initialScope: initialScope,
                 repositoryChanged: { [weak self] in self?.notifyRepositoryChanged() })
             pluginEvent("PostSettings", succeeded: accepted)
+        }
+    }
+
+
+
+    static func checkStartupSettings(owner: NSWindow, store: AppSettingsStore = .shared) async {
+        guard store.checkSettingsAtStartup else { return }
+        var executable = URL(fileURLWithPath: (store.preferences.gitExecutablePath as NSString).expandingTildeInPath)
+        var checks = (try? await GitSettingsChecklist.load(executableURL: executable)) ?? []
+        guard !Task.isCancelled else { return }
+        if checks.first?.status == .invalid, let located = await GitSettingsChecklist.locateGit(), located != executable {
+            executable = located
+            var preferences = store.preferences
+            preferences.gitExecutablePath = located.path
+            store.save(preferences)
+            checks = (try? await GitSettingsChecklist.load(executableURL: executable)) ?? []
+        }
+        guard !Task.isCancelled else { return }
+        if !checks.isEmpty && checks.allSatisfy({ $0.status == .valid }) {
+            store.recordSettingsCheck(allValid: true)
+        } else if owner.isVisible, owner.attachedSheet == nil {
+            _ = await ApplicationShellDialogs.presentSettings(from: owner, initialPage: "application")
         }
     }
 
@@ -649,6 +722,7 @@ final class GitUICommands {
             changed: { [weak self, weak browser] in self?.notifyRepositoryChanged(preferredCommitID: browser?.selectedCommitID) },
             conflicts: { [weak self] window in await WorkflowManagementDialogs.resolveConflicts(source: source, window: window, offerCommit: false, scriptHooks: self?.scriptHooks) },
             closed: { [weak self] in self?.patchWindows[id] = nil })
+        controller.onViewRevisions = { [weak self, weak controller] in self?.startViewRevisions($0, owner: controller?.window) }
         patchWindows[id] = controller
         controller.window?.setFrameOrigin(NSPoint(x: owner.frame.minX + 30, y: owner.frame.minY + 30))
         controller.showWindow(nil)
@@ -730,11 +804,7 @@ final class GitUICommands {
             browser?.showPlaceholderStatus("Initialize the submodule before opening it."); return
         }
         if newWindow {
-            let configuration = NSWorkspace.OpenConfiguration(); configuration.createsNewApplicationInstance = true
-            configuration.arguments = ["--repository", url.path] + RepositoryOpeningSelection.arguments(selection)
-            NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: configuration) { _, error in
-                if let error { Task { @MainActor in self.browser?.showPlaceholderStatus(error.localizedDescription) } }
-            }
+            Self.launchBrowse(url, selection: selection) { [weak self] error in self?.browser?.showPlaceholderStatus(error.localizedDescription) }
         } else if selection.isEmpty { _ = browser?.onApplicationCommand?(.openRecentRepository(url)) }
         else { _ = browser?.onApplicationCommand?(.openRepositoryAtRevisions(url, selection)) }
     }
@@ -794,17 +864,7 @@ final class GitUICommands {
                 else { child = try await parent.submoduleTreeRepository(submodule); submoduleSources[submodule.id] = child }
                 switch action {
                 case .commit:
-                    if let submoduleCommitWindowController { submoduleCommitWindowController.window?.makeKeyAndOrderFront(nil); return }
-                    guard let commitSource = child as? any RepositoryCommitWorkflowDataSource else { return }
-                    submoduleCommitWindowController = CommitWorkflowDialog.present(source: commitSource,
-                        pushSource: child as? any RepositoryPushingDataSource, initialMode: .normal, head: nil, draft: nil, owner: owner,
-                        onManageRemotes: { [weak self] remote, branch in
-                            guard let self, let remotes = child as? any RepositoryRemoteManagingDataSource else { return }
-                            self.submoduleRemoteWindowController = RemoteManagementDialog.present(source: remotes, selectedRemote: remote, selectedLocalBranch: branch,
-                                onFetchRemote: { name, window in
-                                    if let pull = child as? any RepositoryPullingDataSource { _ = await PullProcessDialog.run(request: .init(source: .remote(name), mode: .fetch), source: pull, parent: window, scriptHooks: self.scriptHooks(for: child)) }
-                                }, onRepositoryChanged: { [weak self] in self?.notifyRepositoryChanged() }, onClose: { [weak self] in self?.submoduleRemoteWindowController = nil })
-                        }, scriptHooks: scriptHooks(for: child), onRepositoryChanged: { [weak self] _ in self?.notifyRepositoryChanged() }, onClose: { [weak self] in self?.submoduleCommitWindowController = nil })
+                    presentSubmoduleCommit(child, owner: owner)
                 case .stash:
                     guard let stash = child as? any RepositoryStashDataSource else { return }
                     let before = try await child.loadRepositoryState().navigation.stashes
@@ -887,6 +947,235 @@ final class GitUICommands {
         return browser?.onApplicationCommand?(.openRecentRepository(URL(fileURLWithPath: worktree.path))) ?? false
     }
 
+
+
+    static let dontConfirmUndoLastCommitKey = "GitExtensionsMac.DontConfirmUndoLastCommit"
+
+
+    func startUndoLastCommit() {
+        guard let browser, let owner = browser.view.window,
+              let source = repositoryModule as? any RepositoryBrowserMaintenanceDataSource else { return }
+        if !UserDefaults.standard.bool(forKey: Self.dontConfirmUndoLastCommitKey) {
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "Undo last commit"
+            alert.informativeText = "You will still be able to find all the commit's changes in the staging area\n\nDo you want to continue?"
+            alert.addButton(withTitle: "Yes"); alert.addButton(withTitle: "No")
+            alert.showsSuppressionButton = true
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+            if alert.suppressionButton?.state == .on { UserDefaults.standard.set(true, forKey: Self.dontConfirmUndoLastCommitKey) }
+        }
+        Task { @MainActor [weak self] in
+            do {
+                let result = try await source.undoLastCommit()
+                self?.notifyRepositoryChanged(preferredCommitID: result.selectedCommitID)
+            } catch {
+                await MutationDialogs.showError(error, title: "Undo last commit", window: owner)
+            }
+        }
+    }
+
+
+    func openFileExplorer() {
+        guard let path = browser?.repositoryIdentity?.currentRepository.path else { return }
+        NSWorkspace.shared.open(URL(fileURLWithPath: path, isDirectory: true))
+    }
+
+
+    func openTerminal() {
+        guard let path = browser?.repositoryIdentity?.currentRepository.path,
+              let terminal = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.Terminal") else { return }
+        NSWorkspace.shared.open([URL(fileURLWithPath: path, isDirectory: true)], withApplicationAt: terminal,
+                                configuration: NSWorkspace.OpenConfiguration())
+    }
+
+
+    func deleteIndexLock() {
+        guard let browser, let owner = browser.view.window,
+              let source = repositoryModule as? any RepositoryBrowserMaintenanceDataSource else { return }
+        Task { @MainActor in
+            do { _ = try await source.deleteIndexLocks() }
+            catch { await MutationDialogs.showError(error, title: "Delete index.lock", window: owner) }
+        }
+    }
+
+
+    func compressGitDatabase() {
+        guard let browser, let owner = browser.view.window,
+              let source = repositoryModule as? any RepositoryBrowserMaintenanceDataSource else { return }
+        Task { @MainActor [weak self] in
+            _ = await HostingProcessDialog.run("Compress git database", owner) { output in
+                let result = try await source.compressGitDatabase(output: output)
+                guard result.succeeded else {
+                    throw GitError.commandFailed(arguments: result.arguments, status: result.exitStatus, stderr: result.standardErrorString)
+                }
+                return true
+            }
+            self?.notifyRepositoryChanged(preferredCommitID: nil)
+        }
+    }
+
+
+
+
+    func startEditGitIgnore(localExclude: Bool, owner: NSWindow? = nil, onClosed: (() -> Void)? = nil) {
+        startRepositoryFileEditor(localExclude ? .localExclude : .gitIgnore, owner: owner) { [weak self] in
+            self?.pluginEvent("PostEditGitIgnore", succeeded: true)
+            onClosed?()
+        }
+    }
+
+
+    func startEditGitAttributes() { startRepositoryFileEditor(.gitAttributes, owner: nil, onClosed: nil) }
+
+
+    func startEditMailMap() { startRepositoryFileEditor(.mailMap, owner: nil, onClosed: nil) }
+
+    private func startRepositoryFileEditor(_ kind: RepositoryFileEditorWindowController.Kind, owner: NSWindow?, onClosed: (() -> Void)?) {
+        let key = "repository:\(kind.fileName)"
+        if focusFileEditor(key) { return }
+        guard let browser, let owner = owner ?? browser.view.window,
+              let source = repositoryModule as? any RepositoryFileEditingDataSource else { return }
+
+        if browser.repositoryIdentity?.currentRepository.isBare == true {
+            Task { @MainActor in
+                await RepositoryFileEditorDialogs.message(kind.noWorkingDirectory, caption: RepositoryFileEditorWindowController.Kind.noWorkingDirectoryCaption, window: owner)
+                onClosed?()
+            }
+            return
+        }
+        let controller = RepositoryFileEditorWindowController(
+            kind: kind, source: source,
+            addPattern: { [weak self] window in
+                await self?.startAddToGitIgnore(localExclude: kind == .localExclude, patterns: ["*.dll"], owner: window)
+            },
+
+            onSaved: { [weak self] in self?.notifyRepositoryChanged(preferredCommitID: self?.browser?.selectedCommitID) },
+            onClose: { [weak self] in
+                self?.fileEditorWindows[key] = nil
+                onClosed?()
+            })
+        fileEditorWindows[key] = controller
+        Task { @MainActor [weak self] in
+            await controller.load()
+            self?.showFileEditor(controller, owner: owner)
+        }
+    }
+
+
+    @discardableResult
+    func startAddToGitIgnore(localExclude: Bool, patterns: [String], owner: NSWindow) async -> Bool {
+        guard let source = repositoryModule as? any RepositoryFileEditingDataSource else { return false }
+        let controller = AddToGitIgnoreWindowController(source: source, localExclude: localExclude, patterns: patterns)
+        await controller.run(parent: owner)
+        pluginEvent("PostEditGitIgnore", succeeded: true)
+        return true
+    }
+
+
+    func startFileEditor(_ url: URL, showWarning: Bool = false, lineNumber: Int? = nil, owner: NSWindow? = nil, onClosed: (() -> Void)? = nil) {
+        let key = "file:" + url.standardizedFileURL.path
+        if focusFileEditor(key) { return }
+        guard let browser, let owner = owner ?? browser.view.window,
+              let source = repositoryModule as? any RepositoryFileEditingDataSource else { return }
+        let controller = FileEditorWindowController(fileURL: url, source: source, showWarning: showWarning, lineNumber: lineNumber) { [weak self] in
+            self?.fileEditorWindows[key] = nil
+            onClosed?()
+        }
+        fileEditorWindows[key] = controller
+        Task { @MainActor [weak self] in
+            do { try await controller.load() } catch {
+                self?.fileEditorWindows[key] = nil
+                await RepositoryFileEditorDialogs.message("Cannot open file:\n\(error.localizedDescription)", caption: "Error", window: owner)
+                onClosed?()
+                return
+            }
+            self?.showFileEditor(controller, owner: owner)
+        }
+    }
+
+
+    func startEditGitConfig() {
+        guard let browser, let owner = browser.view.window,
+              let source = repositoryModule as? any RepositoryFileEditingDataSource else { return }
+        Task { @MainActor [weak self] in
+            do { self?.startFileEditor(try await source.editableFileURL(.gitConfig), showWarning: true, owner: owner) }
+            catch { await MutationDialogs.showError(error, title: "Edit .git/config", window: owner) }
+        }
+    }
+
+
+
+    func startSparseWorkingCopy() {
+        let key = "sparse-working-copy"
+        if focusFileEditor(key) { return }
+        guard let browser, let owner = browser.view.window,
+              let source = repositoryModule as? SparseWorkingCopyWindowController.Source else { return }
+        let path = browser.repositoryIdentity?.currentRepository.path ?? ""
+        let controller = SparseWorkingCopyWindowController(
+            source: source, processTitle: path.isEmpty ? "Process" : "Process (\(path))",
+            onSaved: { [weak self] in self?.notifyRepositoryChanged(preferredCommitID: self?.browser?.selectedCommitID) },
+            onClose: { [weak self] in self?.fileEditorWindows[key] = nil })
+        fileEditorWindows[key] = controller
+        Task { @MainActor [weak self] in
+            await controller.load()
+            self?.showFileEditor(controller, owner: owner)
+        }
+    }
+
+
+    func startRecoverLostObjects() {
+        let key = "recover-lost-objects"
+        if focusFileEditor(key) { return }
+        guard let browser, let owner = browser.view.window,
+              let source = repositoryModule as? any RepositoryLostObjectsDataSource,
+              let tagSource = repositoryModule as? any RepositoryTagManagingDataSource else { return }
+        let path = browser.repositoryIdentity?.currentRepository.path ?? ""
+        let title = path.isEmpty ? "Process" : "Process (\(path))"
+        let actions = RecoverLostObjectsWindowController.Actions(
+            runProcess: { window, operation in await HostingProcessDialog.run(title, window, operation) },
+            createTag: { [weak self] id, window, finished in
+                self?.startCreateTag(initialTarget: id, owner: window, onFinished: finished)
+            },
+            createBranch: { [weak self] id, window, finished in
+                guard let coordinator = self?.makeCheckoutWorkflowCoordinator(owner: window) else { finished(false); return }
+                coordinator.createBranch(sourceRevision: RevisionCommitBuilder.placeholderRevision(id: id),
+                                         allowsBareRepository: true, onFinished: finished)
+            },
+            createLightweightTag: { name, id in
+                _ = try await tagSource.createTag(RepositoryCreateTagRequest(name: name, target: id))
+            },
+            deleteTag: { name in _ = try await tagSource.deleteTag(named: name) })
+        let controller = RecoverLostObjectsWindowController(
+            source: source, actions: actions,
+            workingDirectory: path.isEmpty ? nil : URL(fileURLWithPath: path, isDirectory: true),
+            onClose: { [weak self] in
+                self?.fileEditorWindows[key] = nil
+                self?.notifyRepositoryChanged(preferredCommitID: self?.browser?.selectedCommitID)
+            })
+        fileEditorWindows[key] = controller
+        showFileEditor(controller, owner: owner)
+        Task { await controller.updateLostObjects() }
+    }
+
+    private func focusFileEditor(_ key: String) -> Bool {
+        guard let controller = fileEditorWindows[key] else { return false }
+        if controller.window?.isVisible == true {
+            controller.showWindow(nil)
+            controller.window?.makeKeyAndOrderFront(nil)
+        }
+        return true
+    }
+
+    private func showFileEditor(_ controller: NSWindowController, owner: NSWindow) {
+        guard let window = controller.window else { return }
+
+        let frame = window.frame
+        window.setFrameOrigin(NSPoint(x: owner.frame.midX - frame.width / 2, y: owner.frame.midY - frame.height / 2))
+        controller.showWindow(nil)
+        window.makeKeyAndOrderFront(nil)
+    }
+
     private func worktreeError(_ message: String, owner: NSWindow) {
         let alert = NSAlert(); alert.alertStyle = .warning; alert.messageText = "Worktree operation failed"; alert.informativeText = message
         alert.beginSheetModal(for: owner)
@@ -908,6 +1197,753 @@ final class GitUICommands {
                 browser?.statusLabel.stringValue = "Difftool failed: \(error.localizedDescription)"
             }
         }
+    }
+
+
+
+
+    func startBlame(file: String, revision: ObjectID? = nil, initialLine: Int? = nil, owner: NSWindow? = nil) {
+        guard let source = repositoryModule as? any RepositoryBlameDataSource,
+              let owner = owner ?? browser?.view.window else { return }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let commit = try await source.loadBlameRevision(revision)
+                let manager = repositoryModule as? any RepositoryRemoteManagingDataSource
+                let controller = BlameWindowController(source: source,
+                    infoSource: repositoryModule as? any RepositoryCommitInfoDataSource,
+                    revision: commit, file: file, initialLine: initialLine,
+                    hostedRemotes: { HostedRemote.gitHubRemotes((try? await manager?.loadRemoteConfigurations()) ?? []) },
+                    showChanges: { [weak self] in self?.startBlameCommitDiff($0) })
+                controller.infoController.onGoToRevision = { [weak self] id in
+                    if let object = id.objectID { self?.browser?.selectScriptRevision(object) }
+                }
+                retainBlameWindow(controller, owner: owner)
+            } catch { await MutationDialogs.showError(error, title: "Blame", window: owner) }
+        }
+    }
+
+
+    func startViewRevisions(_ selected: [Commit], owner: NSWindow? = nil) {
+        if let first = selected.first {
+            if let object = first.objectID { startBlameCommitDiff(object, owner: owner) }
+        } else { startCompareRevisions(owner: owner) }
+    }
+
+    func startRevisionComparison(_ action: String, selected: [Commit], base: Commit?, owner: NSWindow? = nil) {
+        guard let source = repositoryModule as? any RepositoryRevisionComparingDataSource,
+              let owner = owner ?? browser?.view.window, let latest = selected.first else { return }
+        Task { @MainActor [weak self, weak owner] in
+            guard let self, let owner else { return }
+            do {
+                let request = try await source.comparisonReadRequest()
+                let head = request.context.headID
+                var first = latest
+                var second = latest
+                var firstLabel: String?
+                var secondLabel: String?
+                switch action {
+                case "revision.compare.branch":
+                    guard let expression = await pickComparisonBranch(selected: latest.id, request: request, owner: owner) else { return }
+                    first = try await source.comparisonTarget(expression); firstLabel = expression
+                case "revision.compare.current":
+                    guard let head, let branch = request.references.branches.first(where: \.isCurrent) else {
+                        throw RevisionComparisonError.noCurrentBranch
+                    }
+                    second = try await source.comparisonRevision(.object(head), headID: head); secondLabel = branch.name
+                case "revision.compare.base":
+                    guard let base else { throw RevisionComparisonError.noBase }
+                    first = base
+                case "revision.compare.worktree":
+                    guard !request.identity.currentRepository.isBare, latest.id != .workingDirectory else { return }
+                    second = try await source.comparisonRevision(.workingDirectory, headID: head)
+                case "revision.compare.selected":
+
+                    let actual = try await source.comparisonRevision(latest.id, headID: head)
+                    guard let id = RevisionComparison.firstID(in: selected.count == 1 ? [actual] : selected) else { return }
+                    first = try await source.comparisonRevision(id, headID: head)
+                default: return
+                }
+                _ = try await showRevisionComparison(first: first, second: second, firstLabel: firstLabel,
+                    secondLabel: secondLabel, request: request, owner: owner)
+            } catch { await MutationDialogs.showError(error, title: "Compare revisions", window: owner) }
+        }
+    }
+
+    @discardableResult
+    func showRevisionComparison(first: Commit, second: Commit, firstLabel: String? = nil, secondLabel: String? = nil,
+                                request: RevisionComparisonReadRequest, owner: NSWindow) async throws -> RevisionComparisonWindowController {
+        guard let source = repositoryModule as? any RepositoryRevisionComparingDataSource else { throw RepositoryDataSourceError.unavailable }
+        let baseID = try await source.comparisonMergeBase(first: first.id, second: second.id, headID: request.context.headID)
+        let base: Commit?
+        if let baseID { base = try await source.comparisonRevision(.object(baseID), headID: request.context.headID) }
+        else { base = nil }
+        let content = RevisionPairViewController(first: first, second: second, firstLabel: firstLabel, secondLabel: secondLabel,
+                                                 headID: request.context.headID, mergeBase: base)
+        let controller = RevisionComparisonWindowController(content: content, title: "Diff", size: NSSize(width: 1042, height: 685), autosave: "GitExtensionsMac.RevisionDiff")
+        configureComparisonDiff(content.diff, owner: controller.window)
+        content.diff.repositoryURL = URL(fileURLWithPath: request.identity.currentRepository.path)
+        content.diff.isBareRepository = request.identity.currentRepository.isBare
+
+
+        content.populate()
+        content.onPickBranch = { [weak self, weak controller, weak content] first in
+            guard let self, let content, let window = controller?.window else { return }
+            Task { @MainActor in
+                guard let expression = await self.pickComparisonBranch(selected: (first ? content.first : content.second).id, request: request, owner: window) else { return }
+                do { content.replaceEndpoint(first: first, revision: try await source.comparisonTarget(expression), label: expression) }
+                catch { await MutationDialogs.showError(error, title: "Compare to branch", window: window) }
+            }
+        }
+        content.onPickCommit = { [weak self, weak controller, weak content] first in
+            guard let self, let content, let window = controller?.window else { return }
+            Task { @MainActor in
+                if let revision = await self.pickComparisonCommit(preselect: (first ? content.first : content.second).id, owner: window) {
+                    content.replaceEndpoint(first: first, revision: revision)
+                }
+            }
+        }
+        content.onDirectoryDiff = { [weak self, weak controller] a, b in
+            guard let source = self?.repositoryModule as? any RepositoryRevisionGridDataSource else { return }
+            Task { @MainActor in
+                do { try await source.openDirDiffWithDifftool(first: a, second: b) }
+                catch { if let window = controller?.window { await MutationDialogs.showError(error, title: "Directory diff tool", window: window) } }
+            }
+        }
+        let subscription = repositoryChangedNotifier.subscribe { [weak content] _, _ in content?.populate() }
+        retainComparison(controller, owner: owner) { [weak content] in subscription.cancel(); content?.diff.cancelLoads() }
+        return controller
+    }
+
+    @discardableResult
+    func startCompareRevisions(owner: NSWindow? = nil) -> RevisionComparisonWindowController? {
+        guard let source = repositoryModule as? any RepositoryRevisionComparingDataSource, let owner = owner ?? browser?.view.window else { return nil }
+        let content = RevisionComparisonGridController(source: source)
+        content.grid.dataSource = repositoryModule as? any RepositoryRevisionGridDataSource
+        let controller = RevisionComparisonWindowController(content: content, title: "Diff", size: NSSize(width: 900, height: 650), autosave: "GitExtensionsMac.CompareRevisions")
+        configureComparisonDiff(content.diff, owner: controller.window)
+        content.grid.onViewSelected = { [weak self, weak controller] in self?.startViewRevisions($0, owner: controller?.window) }
+        configureComparisonGrid(content, controller: controller)
+        let subscription = repositoryChangedNotifier.subscribe { [weak content] _, _ in content?.reload() }
+        retainComparison(controller, owner: owner) { [weak content] in subscription.cancel(); content?.cancel() }
+        return controller
+    }
+
+    private func configureComparisonGrid(_ content: RevisionComparisonGridController, controller: RevisionComparisonWindowController) {
+        content.grid.onCommand = { [weak self, weak content, weak controller] id, selected, focused in
+            if id.hasPrefix("revision.compare.") {
+                self?.startRevisionComparison(id, selected: selected, base: content?.grid.comparisonBase, owner: controller?.window)
+            } else { self?.browser?.performRevisionCommand(id, selected: selected, focused: focused) }
+        }
+        content.grid.onDeleteBranch = { [weak self] in self?.deleteBranches(initiallySelected: [$0]) }
+        content.grid.onApplyPatch = { [weak self] in self?.startPatch(.apply, file: $0) }
+        content.grid.onScript = { [weak self, weak content] script in
+            guard let self, let content else { return }
+            let ids = content.grid.selectedRevisionIDsBySelectionOrder
+            let selected = ids.compactMap { id in content.revisions.first { $0.id == id } }
+            var script = script; script.enabled = true
+            Task { @MainActor in
+                var context = (try? await (self.repositoryModule as? any RepositoryScriptContextDataSource)?.scriptContext(selected: ids.compactMap(\.objectID), arguments: script.arguments)) ?? [:]
+                context.merge(ScriptExecution.selectedRevisionOptions(selected)) { _, value in value }
+                context.merge(content.diff.scriptFileContext) { _, value in value }
+                _ = await self.runScriptEvent(script.onEvent, definitions: [script], context: context)
+            }
+        }
+    }
+
+    private func retainComparison(_ controller: RevisionComparisonWindowController, owner: NSWindow, cancel: @escaping () -> Void) {
+        let id = UUID()
+        controller.onClose = { [weak self] in cancel(); self?.comparisonWindows[id] = nil }
+        comparisonWindows[id] = controller
+        controller.window?.setFrameOrigin(NSPoint(x: owner.frame.minX + 30, y: owner.frame.minY + 30))
+        controller.showWindow(nil); controller.window?.makeKeyAndOrderFront(nil)
+    }
+
+    private func pickComparisonBranch(selected: RevisionID, request: RevisionComparisonReadRequest, owner: NSWindow) async -> String? {
+        guard let source = repositoryModule as? any RepositoryRevisionComparingDataSource else { return nil }
+        let content = ComparisonBranchPicker(branches: request.branches, selected: selected, headID: request.context.headID, source: source)
+        let window = NSWindow(contentViewController: content); window.title = "Compare to branch"
+        window.styleMask = [.titled]; window.setContentSize(NSSize(width: 434, height: 140))
+        return await withCheckedContinuation { continuation in
+            content.completion = { value in content.cancel(); owner.endSheet(window); window.orderOut(nil); continuation.resume(returning: value); content.completion = nil }
+            owner.beginSheet(window)
+        }
+    }
+
+    private func pickComparisonCommit(preselect: RevisionID, owner: NSWindow) async -> Commit? {
+        guard let source = repositoryModule as? any RepositoryRevisionComparingDataSource else { return nil }
+        let content = RevisionComparisonGridController(source: source, choosing: true, preselect: preselect)
+        content.grid.dataSource = repositoryModule as? any RepositoryRevisionGridDataSource
+        let controller = RevisionComparisonWindowController(content: content, title: "Choose commit", size: NSSize(width: 900, height: 550), autosave: "GitExtensionsMac.ChooseCommit")
+        configureComparisonGrid(content, controller: controller)
+        guard let window = controller.window else { return nil }
+        let subscription = repositoryChangedNotifier.subscribe { [weak content] _, _ in content?.reload() }
+        return await withCheckedContinuation { continuation in
+            var completed = false
+            let finish: (Commit?) -> Void = { value in
+                guard !completed else { return }; completed = true
+                subscription.cancel(); content.cancel(); content.onChoose = nil; controller.onClose = nil
+                owner.endSheet(window); window.orderOut(nil); continuation.resume(returning: value)
+            }
+            controller.onClose = { finish(nil) }
+            content.onChoose = finish
+            owner.beginSheet(window)
+
+            content.onChoose = { [controller] value in finish(value); _ = controller }
+        }
+    }
+
+    private func configureComparisonDiff(_ diff: RevisionDiffViewController, owner: NSWindow?) {
+        diff.supportsContinuousFileNavigation = true
+        diff.fileStatusSource = repositoryModule as? any RepositoryFileStatusDataSource
+        diff.blameSource = repositoryModule as? any RepositoryBlameDataSource
+        let manager = repositoryModule as? any RepositoryRemoteManagingDataSource
+        diff.blameContext = .init(revisionInGrid: { _ in nil }, selectFileInRevision: { _, _ in false },
+            hostedRemotes: { HostedRemote.gitHubRemotes((try? await manager?.loadRemoteConfigurations()) ?? []) })
+        diff.blameController.onShowChanges = { [weak self, weak owner] in self?.startBlameCommitDiff($0, owner: owner) }
+        diff.filesController.canShowInFileTree = false; diff.filesController.canFilterInGrid = false
+        diff.onCommand = { [weak self, weak owner] in self?.performFileStatusCommand($0, owner: owner) }
+        diff.onFileCommand = { [weak self, weak owner] id, item in
+            self?.performFileStatusCommand(.init(identifier: id, items: [item], folder: nil, tool: nil, focused: item, remembered: nil), owner: owner)
+        }
+        diff.onFileHistory = { [weak self, weak owner] path, revision in
+            guard let self else { return }
+            Task { @MainActor in
+                let commit = try? await (self.repositoryModule as? any RepositoryRevisionComparingDataSource)?.comparisonRevision(revision ?? .workingDirectory, headID: self.browser?.repositoryIdentity?.headID)
+                self.startFileHistory(file: path, revision: commit, owner: owner)
+            }
+        }
+        Task { @MainActor [weak diff] in diff?.diffTools = (try? await (repositoryModule as? any RepositoryFileStatusDataSource)?.loadDiffTools()) ?? [] }
+    }
+
+    func startBlameCommitDiff(_ revision: ObjectID, comparedRevisions: [Commit]? = nil, owner: NSWindow? = nil) {
+        guard let source = repositoryModule as? any RepositoryBlameDataSource,
+              let files = repositoryModule as? any RepositoryFileStatusDataSource,
+              let owner = owner ?? browser?.view.window else { return }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let commit = try await source.loadBlameRevision(revision)
+                let path = browser?.repositoryIdentity?.currentRepository.path
+                let controller = CommitDiffWindowController(revision: commit, source: files,
+                    infoSource: repositoryModule as? any RepositoryCommitInfoDataSource,
+                    repositoryURL: path.map { URL(fileURLWithPath: $0) },
+                    comparedRevisions: comparedRevisions,
+                    command: { [weak self] in self?.performFileStatusCommand($0) })
+                configureComparisonDiff(controller.diffController, owner: controller.window)
+                controller.diffController.isBareRepository = browser?.repositoryIdentity?.currentRepository.isBare ?? false
+                controller.infoController.onGoToRevision = { [weak self] id in
+                    if let object = id.objectID { self?.browser?.selectScriptRevision(object) }
+                }
+                retainBlameWindow(controller, owner: owner)
+            } catch { await MutationDialogs.showError(error, title: "Show changes", window: owner) }
+        }
+    }
+
+    private func retainBlameWindow(_ controller: NSWindowController, owner: NSWindow) {
+        let id = UUID()
+        let closed: () -> Void = { [weak self] in self?.blameWindows[id] = nil }
+        (controller as? BlameWindowController)?.onClose = closed
+        (controller as? CommitDiffWindowController)?.onClose = closed
+        blameWindows[id] = controller
+        controller.window?.setFrameOrigin(NSPoint(x: owner.frame.minX + 30, y: owner.frame.minY + 30))
+        controller.showWindow(nil)
+        controller.window?.makeKeyAndOrderFront(nil)
+    }
+
+    @discardableResult
+    func startFileHistory(file: String, revision: Commit? = nil, filterByRevision: Bool = false,
+                          showBlame: Bool = false, owner: NSWindow? = nil) -> FileHistoryWindowController? {
+        guard !file.isEmpty, let history = repositoryModule as? any RepositoryFileHistoryDataSource,
+              let owner = owner ?? browser?.view.window else { return nil }
+        if AppSettingsStore.shared.revisionGridPreferences.useBrowseForFileHistory,
+           let repository = browser?.repositoryIdentity?.currentRepository {
+            Self.launchBrowse(URL(fileURLWithPath: repository.path), selection: revision.map { [$0.id] } ?? [],
+                fileHistory: FileHistoryBrowseRequest(path: file, filterRevision: filterByRevision ? revision?.objectID : nil)) { error in
+                    Task { await MutationDialogs.showError(error, title: "File History", window: owner) }
+                }
+            return nil
+        }
+        weak var historyWindow: NSWindow?
+        let controller = FileHistoryWindowController(source: repositoryModule, history: history,
+            file: file, revision: revision, filterByRevision: filterByRevision, showBlame: showBlame) { [weak self] id, selected, item in
+                guard let self else { return }
+                switch id {
+                case "revert", "cherryPick":
+                    guard let source = repositoryModule as? any RepositoryBlameDataSource else { return }
+                    Task { @MainActor [weak self, weak historyWindow] in
+                        guard let self, let historyWindow else { return }
+                        do {
+                            var resolved: [Commit] = []
+                            for commit in selected {
+                                if let object = commit.objectID { resolved.append(try await source.loadBlameRevision(object)) }
+                            }
+                            guard historyWindow.isVisible else { return }
+                            if id == "revert" { startRevert(resolved, owner: historyWindow) }
+                            else { startCherryPick(resolved, owner: historyWindow) }
+                        } catch { await MutationDialogs.showError(error, title: "File History", window: historyWindow) }
+                    }
+                case "commandLog": Self.startCommandLog()
+                case "settings": startSettings()
+                case "showChanges": if let id = selected.first?.objectID { startBlameCommitDiff(id, comparedRevisions: selected.count > 1 ? selected : nil, owner: historyWindow) }
+                default:
+                    if let item {
+                        let local = id.hasPrefix("difftool.local.")
+                        let prefix = local ? "difftool.local." : "difftool.named."
+                        let tool = id.hasPrefix(prefix) ? String(id.dropFirst(prefix.count)) : nil
+                        performFileStatusCommand(.init(identifier: tool == nil ? id : local ? "file.difftool.selectedToLocal" : "file.difftool", items: [item], folder: nil, tool: tool, focused: item, remembered: nil), owner: historyWindow)
+                    }
+                }
+            }
+        historyWindow = controller.window
+        controller.controller.onShowChanges = { [weak self, weak controller] id in self?.startBlameCommitDiff(id, owner: controller?.window) }
+        controller.controller.onFileStatusCommand = { [weak self, weak controller] command in self?.performFileStatusCommand(command, owner: controller?.window) }
+        let id = UUID()
+        let subscription = repositoryChangedNotifier.subscribe { [weak controller] _, _ in controller?.controller.reload() }
+        controller.onClose = { [weak self] in subscription.cancel(); self?.fileHistoryWindows[id] = nil }
+        fileHistoryWindows[id] = controller
+        controller.window?.setFrameOrigin(NSPoint(x: owner.frame.minX + 30, y: owner.frame.minY + 30))
+        controller.showWindow(nil); controller.window?.makeKeyAndOrderFront(nil)
+        return controller
+    }
+
+    func performFileStatusCommand(_ command: FileStatusListCommand, owner: NSWindow? = nil) {
+        guard let browser, let owner = owner ?? browser.view.window,
+              let source = repositoryModule as? any RepositoryFileStatusDataSource,
+              let repository = browser.repositoryIdentity?.currentRepository else { return }
+        let root = URL(fileURLWithPath: repository.path, isDirectory: true)
+        let items = command.items
+        let externalCommand = AppSettingsStore.shared.preferences.externalDiffToolPath
+        switch command.identifier {
+        case "file.history":
+            if let path = command.folder ?? items.first?.file.path {
+                let id = items.first?.second
+                if let object = id?.objectID, !browser.revisions.contains(where: { $0.id == id }),
+                   let revisions = repositoryModule as? any RepositoryBlameDataSource {
+                    Task { @MainActor [weak self] in
+                        do { self?.startFileHistory(file: path, revision: try await revisions.loadBlameRevision(object), owner: owner) }
+                        catch { await MutationDialogs.showError(error, title: "File History", window: owner) }
+                    }
+                } else { startFileHistory(file: path, revision: browser.revisions.first { $0.id == id }, owner: owner) }
+            }
+        case "file.reset", "file.reset.first": resetFileStatusItems(items, toFirst: true, source: source, owner: owner)
+        case "file.reset.second": resetFileStatusItems(items, toFirst: false, source: source, owner: owner)
+        case "file.resetChunk", "file.interactiveAdd":
+            guard let item = items.first else { return }
+
+            let gitCommand = FileStatusCommands.interactivePatch(path: item.file.path, stage: command.identifier == "file.interactiveAdd")
+            startInteractiveGit(gitCommand, root: root, owner: owner)
+        case "file.cherryPick":
+            guard let item = items.first else { return }
+            Task { @MainActor [weak self] in
+                do {
+                    let result = try await source.cherryPickChanges(group: item.group, file: item.file)
+                    self?.notifyRepositoryChanged()
+                    if !result.succeeded {
+                        let conflicts = (try? await (self?.repositoryModule as? any RepositoryConflictDataSource)?.loadConflicts()) ?? []
+                        if !conflicts.isEmpty, await Self.confirm("There are unresolved merge conflicts, solve conflicts now?", title: "Merge conflicts", owner: owner) {
+                            self?.startConflictResolution(offerCommit: false)
+                        } else if conflicts.isEmpty {
+                            await Self.showMessage("\(result.output)\n\n\(result.patch)", title: "Error", owner: owner)
+                        }
+                    }
+                } catch { await Self.showMessage(error.localizedDescription, title: "Error", owner: owner) }
+            }
+        case "file.difftool", "file.difftool.selectedToLocal", "file.difftool.firstToLocal":
+            Task { @MainActor in
+                for item in items where item.group.kind != .combined {
+                    let (first, second): (RevisionID?, RevisionID?) = switch command.identifier {
+                    case "file.difftool": (item.first, item.second)
+                    case "file.difftool.selectedToLocal": (item.second, .workingDirectory)
+                    default: (item.first, .workingDirectory)
+                    }
+                    do {
+                        try await source.openDifftool(first: first, second: second, path: item.file.path, oldPath: item.file.oldPath,
+                                                      isTracked: item.file.isTracked, customTool: command.tool,
+                                                      externalCommand: externalCommand.isEmpty ? nil : externalCommand)
+                    } catch { await Self.showMessage(error.localizedDescription, title: "Error", owner: owner); return }
+                }
+            }
+        case "file.difftool.twoSelected", "file.difftool.remembered":
+            startBlobDifftool(command, source: source, externalCommand: externalCommand, owner: owner)
+        case "file.open.local", "file.open.localWith":
+            guard let item = items.first else { return }
+            let url = root.appendingPathComponent(item.file.path)
+            if command.identifier == "file.open.local" { NSWorkspace.shared.open(url) } else { Self.openWith(url, owner: owner) }
+        case "file.open.revision", "file.open.revisionWith":
+            guard let item = items.first else { return }
+            Task { @MainActor in
+                do {
+                    let data = try await source.loadFileData(path: item.file.path, at: item.second)
+                    let directory = FileManager.default.temporaryDirectory.appendingPathComponent("GitExtensionsMac-Revision-" + UUID().uuidString, isDirectory: true)
+                    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                    let file = directory.appendingPathComponent(URL(fileURLWithPath: item.file.path).lastPathComponent)
+                    try data.write(to: file, options: .atomic)
+                    if command.identifier == "file.open.revision" { NSWorkspace.shared.open(file) } else { Self.openWith(file, owner: owner) }
+                } catch { await Self.showMessage(error.localizedDescription, title: "Error", owner: owner) }
+            }
+        case "file.save": saveFileStatusItems(items, root: root, source: source, owner: owner)
+        case "file.move": moveFileStatusItem(command, source: source, owner: owner)
+        case "file.delete": deleteFileStatusItems(items, source: source, owner: owner)
+        case "file.showFinder":
+
+            let urls = items.map { root.appendingPathComponent($0.file.path) }
+            let existing = urls.filter { FileManager.default.fileExists(atPath: $0.path) }
+            if !existing.isEmpty { NSWorkspace.shared.activateFileViewerSelecting(existing) }
+            else if let parent = urls.map({ $0.deletingLastPathComponent() }).first(where: { FileManager.default.fileExists(atPath: $0.path) }) {
+                NSWorkspace.shared.open(parent)
+            }
+        case "file.skipWorktree", "file.assumeUnchanged", "file.stopTracking":
+            Task { @MainActor [weak self] in
+                do {
+                    switch command.identifier {
+                    case "file.skipWorktree": try await source.setSkipWorktree(items.map(\.file.path), !items.contains(where: \.file.isSkipWorktree))
+                    case "file.assumeUnchanged": try await source.setAssumeUnchanged(items.map(\.file.path), !items.contains(where: \.file.isAssumeUnchanged))
+                    default:
+                        guard let path = items.first?.file.path else { return }
+                        do { try await source.stopTracking(path) } catch {
+                            await Self.showMessage("Fail to stop tracking the file '\(path)'.", title: "Error", owner: owner)
+                            return
+                        }
+                    }
+                    self?.notifyRepositoryChanged()
+                } catch { await Self.showMessage(error.localizedDescription, title: "Error", owner: owner) }
+            }
+        case "file.submodule.update", "file.submodule.reset", "file.submodule.stash", "file.submodule.commit":
+            startFileStatusSubmoduleAction(command.identifier, paths: Array(NSOrderedSet(array: items.filter(\.file.isSubmodule).map(\.file.path))) as? [String] ?? [], owner: owner)
+        case "file.openSubmodule":
+            guard let item = items.first else { return }
+            let url = root.appendingPathComponent(item.file.path, isDirectory: true)
+            guard FileManager.default.fileExists(atPath: url.path) else {
+                Task { await Self.showMessage("The submodule directory \(url.path) does not exist for \(item.file.path).", title: "Error", owner: owner) }
+                return
+            }
+            Task { @MainActor in
+                let selected: RevisionID? = item.second == .workingDirectory ? .workingDirectory
+                    : (try? await source.submoduleCommit(path: item.file.path, at: item.second)).flatMap { $0.map(RevisionID.object) }
+                let first = (try? await source.submoduleCommit(path: item.file.path, at: item.first)).flatMap { $0.map(RevisionID.object) }
+                Self.launchBrowse(url, selection: [selected, first].compactMap { $0 })
+            }
+        case "file.edit.local":
+
+            guard let item = items.first else { return }
+            startFileEditor(root.appendingPathComponent(item.file.path), lineNumber: command.lineNumber, owner: owner) { [weak self] in
+                self?.notifyRepositoryChanged()
+            }
+        case "file.ignore.gitignore", "file.ignore.exclude":
+
+            let folder = command.folder.map { $0.hasSuffix("/") ? String($0.dropLast()) : $0 }
+            let patterns = folder.map { $0.isEmpty ? [] : ["/\($0)/"] } ?? items.map { "/" + $0.file.path }
+            guard !patterns.isEmpty else { return }
+            Task { @MainActor [weak self] in
+                guard await self?.startAddToGitIgnore(localExclude: command.identifier == "file.ignore.exclude", patterns: patterns, owner: owner) == true else { return }
+                self?.notifyRepositoryChanged()
+            }
+        case "file.editGitIgnore", "file.editLocallyIgnored":
+
+            startEditGitIgnore(localExclude: command.identifier == "file.editLocallyIgnored", owner: owner) { [weak self] in
+                self?.notifyRepositoryChanged()
+            }
+        default:
+            break
+        }
+    }
+
+
+    private func resetFileStatusItems(_ items: [FileStatusListItem], toFirst: Bool, source: any RepositoryFileStatusDataSource, owner: NSWindow) {
+        guard !items.isEmpty else { return }
+        func isNew(_ file: ChangedFile) -> Bool { file.changeType == .added || file.changeType == .copied || !file.isTracked }
+        let hasNewFiles = !items.allSatisfy { $0.file.changeType == .modified && $0.file.isTracked }
+        let hasExistingFiles = items.contains { !((isNew($0.file) && $0.file.staged != .none) || ($0.file.changeType == .renamed && $0.file.staged == .index)) }
+        func describeAll(_ revisions: [RevisionID?]) -> String {
+            var seen: [RevisionID?] = []
+            for revision in revisions where !seen.contains(revision) { seen.append(revision) }
+            guard seen.count == 1 else { return seen.isEmpty ? "" : "<multiple>" }
+            return browser?.describeRevision(seen[0]) ?? ""
+        }
+        let description = toFirst ? "First: A \(describeAll(items.map(\.first)))" : "Second: B \(describeAll(items.map { $0.second }))"
+        Task { @MainActor [weak self] in
+            guard let deleteNew = await ResetDialogs.confirmResetChanges(
+                hasTrackedChanges: hasExistingFiles, hasUntrackedFiles: hasNewFiles,
+                message: "Are you sure you want to reset all selected files to \(description)?", owner: owner) else { return }
+            var output = ""
+            let targets = toFirst ? items.map(\.first) : items.map { Optional($0.second) }
+            var seen: [RevisionID] = []
+            for case let target? in targets where !seen.contains(target) {
+                seen.append(target)
+
+                if toFirst {
+                    guard target.objectID != nil || (target == .index && items.allSatisfy { $0.second == .workingDirectory }) else { continue }
+                } else {
+                    guard target.objectID != nil else { continue }
+                }
+
+                let resetItems = items.map { item -> ChangedFile in
+                    guard !toFirst else { return item.file }
+                    var file = item.file
+                    if file.changeType == .added { file.changeType = .deleted } else if file.changeType == .deleted { file.changeType = .added }
+                    return file
+                }
+                do { output += try await source.resetFiles(to: target, items: resetItems, resetAndDelete: deleteNew) }
+                catch { output += error.localizedDescription }
+            }
+            self?.notifyRepositoryChanged()
+            if !output.isEmpty { await Self.showMessage(output, title: "Reset changes", owner: owner) }
+        }
+    }
+
+
+    private func startBlobDifftool(_ command: FileStatusListCommand, source: any RepositoryFileStatusDataSource, externalCommand: String, owner: NSWindow) {
+        let items = command.items
+        func specifier(_ side: (revision: RevisionID?, path: String)) async -> String? {
+            guard let revision = side.revision else { return nil }
+            return try? await source.blobSpecifier(path: side.path, at: revision)
+        }
+        Task { @MainActor in
+            var pair: (String?, String?)
+            if command.identifier == "file.difftool.twoSelected" {
+                guard items.count == 2 else { return }
+
+                let firstIndex = command.focused == items[0] ? 1 : 0
+                let firstFile = RememberedDiffFile(item: items[firstIndex]), secondFile = RememberedDiffFile(item: items[1 - firstIndex])
+                pair.0 = await specifier(firstFile.side(secondRevision: firstFile.canUseAsFirst(secondRevision: true)))
+                pair.1 = await specifier(secondFile.side(secondRevision: secondFile.canUseAsSecond(secondRevision: true)))
+            } else {
+                guard let remembered = command.remembered, let item = items.first else { return }
+                let selected = RememberedDiffFile(item: item)
+                pair.0 = await specifier(remembered.side(secondRevision: true))
+                pair.1 = await specifier(selected.side(secondRevision: selected.canUseAsSecond(secondRevision: true)))
+            }
+            guard let first = pair.0, !first.isEmpty, let second = pair.1, !second.isEmpty else { return }
+            do { try await source.openDifftool(firstBlob: first, secondBlob: second, customTool: command.tool, externalCommand: externalCommand.isEmpty ? nil : externalCommand) }
+            catch { await Self.showMessage(error.localizedDescription, title: "Error", owner: owner) }
+        }
+    }
+
+
+    private func saveFileStatusItems(_ items: [FileStatusListItem], root: URL, source: any RepositoryFileStatusDataSource, owner: NSWindow) {
+        guard !items.isEmpty else { return }
+        if items.count == 1 {
+            let item = items[0]
+            let full = root.appendingPathComponent(item.file.path)
+            let panel = NSSavePanel()
+            panel.directoryURL = full.deletingLastPathComponent()
+            panel.nameFieldStringValue = full.lastPathComponent
+            panel.beginSheetModal(for: owner) { response in
+                guard response == .OK, let destination = panel.url else { return }
+                Task { @MainActor in
+                    do { try await source.loadFileData(path: item.file.path, at: item.second).write(to: destination, options: .atomic) }
+                    catch { await Self.showMessage(error.localizedDescription, title: "Error", owner: owner) }
+                }
+            }
+            return
+        }
+
+        let directories = items.map { ($0.file.path as NSString).deletingLastPathComponent }
+        var common = directories[0].split(separator: "/").map(String.init)
+        for directory in directories.dropFirst() {
+            let parts = directory.split(separator: "/").map(String.init)
+            common = Array(zip(common, parts).prefix { $0 == $1 }.map(\.0))
+        }
+        let base = common.joined(separator: "/")
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.directoryURL = base.isEmpty ? root : root.appendingPathComponent(base, isDirectory: true)
+        panel.prompt = "Save"
+        panel.beginSheetModal(for: owner) { response in
+            guard response == .OK, let destination = panel.url else { return }
+            Task { @MainActor in
+                do {
+                    for item in items {
+                        let relative = String((item.file.path as NSString).deletingLastPathComponent.dropFirst(base.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+                        let directory = relative.isEmpty ? destination : destination.appendingPathComponent(relative, isDirectory: true)
+                        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                        let data = try await source.loadFileData(path: item.file.path, at: item.second)
+                        try data.write(to: directory.appendingPathComponent((item.file.path as NSString).lastPathComponent), options: .atomic)
+                    }
+                } catch { await Self.showMessage(error.localizedDescription, title: "Error", owner: owner) }
+            }
+        }
+    }
+
+
+    private func moveFileStatusItem(_ command: FileStatusListCommand, source: any RepositoryFileStatusDataSource, owner: NSWindow) {
+        let isFolder = command.items.count != 1 && command.folder != nil
+        guard let oldName = isFolder ? command.folder : command.items.first?.file.path ?? command.folder else { return }
+        Task { @MainActor [weak self] in
+            var proposal = oldName
+            while true {
+                let alert = NSAlert()
+                alert.messageText = "Rename / move"
+                alert.informativeText = "New name"
+                let field = NSTextField(string: proposal)
+                field.frame = NSRect(x: 0, y: 0, width: 420, height: 24)
+                alert.accessoryView = field
+                alert.addButton(withTitle: "OK")
+                alert.addButton(withTitle: "Cancel")
+                alert.window.initialFirstResponder = field
+                guard await alert.beginSheetModal(for: owner) == .alertFirstButtonReturn else { return }
+                proposal = field.stringValue
+                guard FileStatusCommands.validateMove(oldName: oldName, newName: proposal) else { continue }
+                do {
+                    try await source.move(from: oldName, to: proposal, isFolder: isFolder)
+                    self?.notifyRepositoryChanged()
+                    return
+                } catch {
+                    self?.notifyRepositoryChanged()
+                    await Self.showMessage(error.localizedDescription, title: "Rename / move", owner: owner)
+                }
+            }
+        }
+    }
+
+
+    private func deleteFileStatusItems(_ items: [FileStatusListItem], source: any RepositoryFileStatusDataSource, owner: NSWindow) {
+        guard let first = items.first, first.second.objectID == nil else { return }
+        Task { @MainActor [weak self] in
+            guard await Self.confirm("Are you sure you want to delete the selected file(s)?", title: "Delete", owner: owner) else { return }
+            do {
+                if try await source.deleteFiles(items.map(\.file)) { self?.notifyRepositoryChanged() }
+            } catch {
+                if error is FileStatusPartialMutationError { self?.notifyRepositoryChanged() }
+                await Self.showMessage("Delete file failed\n" + error.localizedDescription, title: "Error", owner: owner)
+            }
+        }
+    }
+
+
+    private func startFileStatusSubmoduleAction(_ identifier: String, paths: [String], owner: NSWindow) {
+        guard !paths.isEmpty, let parent = repositoryModule as? any RepositorySubmoduleManagingDataSource else { return }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            switch identifier {
+            case "file.submodule.update":
+                let result = await SubmoduleDialogs.run(title: "Submodules", owner: owner) { output in
+                    var combined: RepositorySubmoduleResult?
+                    for path in paths {
+                        let result = try await parent.performSubmoduleAction(.update(path: path), output: output)
+                        combined = RepositorySubmoduleResult(succeeded: (combined?.succeeded ?? true) && result.succeeded,
+                                                             changed: (combined?.changed ?? false) || result.changed,
+                                                             output: [combined?.output, result.output].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "\n"))
+                    }
+                    return combined ?? RepositorySubmoduleResult(succeeded: true, changed: false, output: "")
+                }
+                completeSubmoduleOperation(result)
+                pluginEvent("PostUpdateSubmodules", succeeded: result.succeeded)
+            case "file.submodule.reset":
+                guard let clean = await ResetDialogs.confirmResetChanges(hasTrackedChanges: true, hasUntrackedFiles: true, owner: owner) else { return }
+                do {
+                    for path in paths {
+                        guard let reset = try await submoduleSource(path: path) as? any RepositoryResettingDataSource else { continue }
+                        _ = try await reset.resetChanges(.init(scope: .all, deleteUntracked: clean))
+                    }
+                } catch { worktreeError(error.localizedDescription, owner: owner) }
+                notifyRepositoryChanged()
+            case "file.submodule.stash":
+                do {
+                    for path in paths {
+                        guard let stash = try await submoduleSource(path: path) as? any RepositoryStashDataSource else { continue }
+                        _ = try await stash.createStash(.init(message: "", includeUntracked: AppSettingsStore.shared.stashPreferences.includeUntracked, keepIndex: false, stagedOnly: false))
+                    }
+                } catch { worktreeError(error.localizedDescription, owner: owner) }
+                notifyRepositoryChanged()
+            default:
+                for path in paths {
+                    guard let child = try? await submoduleSource(path: path) else { continue }
+                    pendingSubmoduleCommits.append(child)
+                }
+                presentNextSubmoduleCommit(owner: owner)
+            }
+        }
+    }
+
+
+
+    private func presentNextSubmoduleCommit(owner: NSWindow) {
+        if let submoduleCommitWindowController { submoduleCommitWindowController.window?.makeKeyAndOrderFront(nil); return }
+        guard !pendingSubmoduleCommits.isEmpty else { return }
+        let child = pendingSubmoduleCommits.removeFirst()
+        presentSubmoduleCommit(child, owner: owner)
+    }
+
+
+    private func presentSubmoduleCommit(_ child: any RepositoryBrowsingDataSource, owner: NSWindow) {
+        if let submoduleCommitWindowController { submoduleCommitWindowController.window?.makeKeyAndOrderFront(nil); return }
+        guard let commitSource = child as? any RepositoryCommitWorkflowDataSource else { return }
+        submoduleCommitWindowController = CommitWorkflowDialog.present(source: commitSource,
+            pushSource: child as? any RepositoryPushingDataSource, initialMode: .normal, head: nil, draft: nil, owner: owner,
+            onManageRemotes: { [weak self] remote, branch in
+                guard let self, let remotes = child as? any RepositoryRemoteManagingDataSource else { return }
+                self.submoduleRemoteWindowController = RemoteManagementDialog.present(source: remotes, selectedRemote: remote, selectedLocalBranch: branch,
+                    onFetchRemote: { name, window in
+                        if let pull = child as? any RepositoryPullingDataSource { _ = await PullProcessDialog.run(request: .init(source: .remote(name), mode: .fetch), source: pull, parent: window, scriptHooks: self.scriptHooks(for: child)) }
+                    }, onRepositoryChanged: { [weak self] in self?.notifyRepositoryChanged() }, onClose: { [weak self] in self?.submoduleRemoteWindowController = nil })
+            }, scriptHooks: scriptHooks(for: child), onRepositoryChanged: { [weak self] _ in self?.notifyRepositoryChanged() },
+            onClose: { [weak self, weak owner] in
+                self?.submoduleCommitWindowController = nil
+                if let owner { self?.presentNextSubmoduleCommit(owner: owner) }
+            })
+    }
+
+
+    private func startInteractiveGit(_ command: GitCommand, root: URL, owner: NSWindow) {
+        do {
+            let invocation = try ScriptExecution.terminalInvocation(
+                executable: URL(fileURLWithPath: AppSettingsStore.shared.preferences.gitExecutablePath), arguments: command.arguments, directory: root)
+            Task { @MainActor [weak self] in
+                do { _ = try await ScriptExecution.run(invocation) { _ in } }
+                catch { await Self.showMessage(error.localizedDescription, title: "Error", owner: owner); return }
+                self?.refreshOnNextActivation()
+            }
+        } catch {
+            Task { await Self.showMessage(error.localizedDescription, title: "Error", owner: owner) }
+        }
+    }
+
+    private var activationRefreshObserver: NSObjectProtocol?
+    private func refreshOnNextActivation() {
+        if let activationRefreshObserver { NotificationCenter.default.removeObserver(activationRefreshObserver) }
+        activationRefreshObserver = NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                if let observer = self.activationRefreshObserver { NotificationCenter.default.removeObserver(observer) }
+                self.activationRefreshObserver = nil
+                self.notifyRepositoryChanged()
+            }
+        }
+    }
+
+
+    private static func openWith(_ url: URL, owner: NSWindow) {
+        let panel = NSOpenPanel()
+        panel.directoryURL = URL(fileURLWithPath: "/Applications", isDirectory: true)
+        panel.allowedContentTypes = [.application]
+        panel.canChooseDirectories = false
+        panel.prompt = "Open"
+        panel.message = "Choose an application to open \(url.lastPathComponent)"
+        panel.beginSheetModal(for: owner) { response in
+            guard response == .OK, let application = panel.url else { return }
+            NSWorkspace.shared.open([url], withApplicationAt: application, configuration: NSWorkspace.OpenConfiguration())
+        }
+    }
+
+    private static func showMessage(_ message: String, title: String, owner: NSWindow) async {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        _ = await alert.beginSheetModal(for: owner)
+    }
+
+    private static func confirm(_ message: String, title: String, owner: NSWindow) async -> Bool {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = title
+        alert.informativeText = message
+        alert.addButton(withTitle: "Yes")
+        alert.addButton(withTitle: "No")
+        return await alert.beginSheetModal(for: owner) == .alertFirstButtonReturn
     }
 
     func startCommit(
@@ -1165,10 +2201,10 @@ final class GitUICommands {
         }
     }
 
-    func startCherryPick(_ selectedCommits: [Commit]) {
+    func startCherryPick(_ selectedCommits: [Commit], owner: NSWindow? = nil) {
         guard let browser,
               browser.repositoryIdentity != nil,
-              let window = browser.view.window,
+              let window = owner ?? browser.view.window,
               let source = repositoryModule as? any RepositoryCherryPickDataSource else {
             browser?.showPlaceholderStatus("Cherry-pick is unavailable for mock data")
             return
@@ -1189,10 +2225,10 @@ final class GitUICommands {
         )
     }
 
-    func startRevert(_ selectedCommits: [Commit]) {
+    func startRevert(_ selectedCommits: [Commit], owner: NSWindow? = nil) {
         guard let browser,
               browser.repositoryIdentity?.currentRepository.isBare == false,
-              let window = browser.view.window,
+              let window = owner ?? browser.view.window,
               let source = repositoryModule as? any RepositoryRevertingDataSource else {
             browser?.showPlaceholderStatus("Revert is unavailable for this repository")
             return
@@ -1581,7 +2617,8 @@ final class GitUICommands {
         }
     }
 
-    func startResetChanges() {
+
+    func startResetChanges(onlyWorkTree: Bool = false) {
         guard let browser,
               let owner = browser.view.window,
               let identity = browser.repositoryIdentity,
@@ -1608,7 +2645,7 @@ final class GitUICommands {
                     return
                 }
                 let result = try await source.resetChanges(RepositoryResetChangesRequest(
-                    scope: .all,
+                    scope: onlyWorkTree ? .worktree : .all,
                     deleteUntracked: deleteUntracked
                 ))
                 notifyRepositoryChanged(preferredCommitID: result.selectedCommitID)
@@ -1671,9 +2708,10 @@ final class GitUICommands {
         makeCheckoutWorkflowCoordinator()?.renameBranch(name)
     }
 
-    func startCreateTag(initialTarget: ObjectID? = nil) {
+
+    func startCreateTag(initialTarget: ObjectID? = nil, owner: NSWindow? = nil, onFinished: ((Bool) -> Void)? = nil) {
         guard let browser,
-              let window = browser.view.window,
+              let window = owner ?? browser.view.window,
               let identity = browser.repositoryIdentity,
               let source = repositoryModule as? any RepositoryTagManagingDataSource else {
             browser?.showPlaceholderStatus("Tag creation is unavailable for this data source")
@@ -1725,11 +2763,13 @@ final class GitUICommands {
                         self.notifyRepositoryChanged(preferredCommitID: result.selectedCommitID)
                         browser.statusLabel.stringValue = result.message
                     }
+                    onFinished?(true)
                     return
                 } catch {
                     await TagDialogs.showError(error, title: "Create tag failed", window: window)
                 }
             }
+            onFinished?(false)
         }
     }
 

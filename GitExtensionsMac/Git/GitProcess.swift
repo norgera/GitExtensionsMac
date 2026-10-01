@@ -111,7 +111,8 @@ package extension GitCommandRunning {
         standardInput: Data? = nil,
         environment: [String: String] = [:]
     ) async throws -> GitCommandResult {
-        let logID = CommandLog.shared.start(command, directory: directory)
+        let logID = CommandLog.shared.start(command, directory: directory,
+            recordsOutput: ProcessOutputHistory.recordsOutput && command.changesRepositoryState, environment: environment)
         do {
             let result = try await CommandLogContext.entryID.withValue(logID) { try await run(
                 arguments: command.arguments,
@@ -128,7 +129,7 @@ package extension GitCommandRunning {
                 executionClass: command.executionClass
             )
         } catch {
-            CommandLog.shared.finish(logID, cancelled: error is CancellationError)
+            CommandLog.shared.finish(logID, cancelled: error is CancellationError, errorDescription: error.localizedDescription)
             throw error
         }
     }
@@ -140,14 +141,17 @@ package extension GitCommandRunning {
         environment: [String: String] = [:],
         output: @escaping GitOutputHandler
     ) async throws -> GitCommandResult {
-        let logID = CommandLog.shared.start(command, directory: directory)
+        let logID = CommandLog.shared.start(command, directory: directory, recordsOutput: ProcessOutputHistory.recordsOutput, environment: environment)
         do {
             let result = try await CommandLogContext.entryID.withValue(logID) { try await runStreaming(
                 arguments: command.arguments,
                 in: directory,
                 standardInput: standardInput,
                 environment: environment,
-                output: output
+                output: { event in
+                    CommandLog.shared.appendOutput(logID, event: event)
+                    output(event)
+                }
             ) }
             CommandLog.shared.finish(logID, result: result)
             return GitCommandResult(
@@ -158,7 +162,7 @@ package extension GitCommandRunning {
                 executionClass: command.executionClass
             )
         } catch {
-            CommandLog.shared.finish(logID, cancelled: error is CancellationError)
+            CommandLog.shared.finish(logID, cancelled: error is CancellationError, errorDescription: error.localizedDescription)
             throw error
         }
     }

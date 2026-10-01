@@ -95,12 +95,13 @@ enum ResetDialogs {
     static func confirmResetChanges(
         hasTrackedChanges: Bool,
         hasUntrackedFiles: Bool,
+        message: String? = nil,
         owner: NSWindow
     ) async -> Bool? {
         let alert = NSAlert()
         alert.alertStyle = .critical
         alert.messageText = "Reset changes"
-        alert.informativeText = "Are you sure you want to reset your changes?\n\nThis will delete any uncommitted work."
+        alert.informativeText = (message ?? "Are you sure you want to reset your changes?") + "\n\nThis will delete any uncommitted work."
         let deleteNew = NSButton(checkboxWithTitle: "Also delete new files and/or directories", target: nil, action: nil)
         if !hasTrackedChanges {
             deleteNew.state = .on

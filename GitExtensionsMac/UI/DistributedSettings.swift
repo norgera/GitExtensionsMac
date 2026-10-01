@@ -3,6 +3,15 @@ import GitCommands
 
 enum DistributedSettingsScope: String, CaseIterable {
     case effective, local, distributed, global
+
+    var title: String {
+        switch self {
+        case .effective: "Effective"
+        case .local: "Local for current repository"
+        case .distributed: "Distributed with repository"
+        case .global: "Global for all repositories"
+        }
+    }
 }
 
 @MainActor
@@ -77,10 +86,29 @@ struct DistributedSettings {
         [remoteBranches: String(store.pushPreferences.loadRemoteBranchesDirectly),
          mergeLog: String(store.mergePreferences.addLogMessages),
          mergeLogCount: String(store.mergePreferences.logMessagesCount)]
+            .filter { !store.unsetDetailedSettingKeys.contains($0.key) }
+    }
+
+
+
+    static func detailedDefaults(_ values: [String: String]) -> [String: String] {
+        var result = values
+        for key in [remoteBranches, mergeLog] {
+            result[key] = values[key]?.lowercased() == "true" ? "true" : "false"
+        }
+        result[mergeLogCount] = values[mergeLogCount].flatMap(normalizedMergeLogCount) ?? "20"
+        return result
+    }
+
+
+
+    func effectiveWriteScope(key: String, value: String?, global: [String: String]) throws -> DistributedSettingsScope? {
+        guard try values(.effective, global: global)[key] != value else { return nil }
+        return try Self.read(localURL)[key] != nil || Self.read(distributedURL)[key] != nil ? .local : .global
     }
 
     func mergePreferences(_ store: AppSettingsStore) throws -> MergePreferences {
-        let values = try values(.effective, global: Self.globalValues(store))
+        let values = Self.detailedDefaults(try values(.effective, global: Self.globalValues(store)))
         var preferences = store.mergePreferences
         preferences.addLogMessages = values[Self.mergeLog]?.lowercased() == "true"
         preferences.logMessagesCount = Int(values[Self.mergeLogCount] ?? "") ?? 20
@@ -88,18 +116,16 @@ struct DistributedSettings {
     }
 
     func saveMergeLog(_ preferences: MergePreferences, store: AppSettingsStore) throws {
-        let local = try Self.read(localURL)
-        let distributed = try Self.read(distributedURL)
-        let effective = try values(.effective, global: Self.globalValues(store))
         var edits: [String: String?] = [:]
-        var global = store.mergePreferences
+        var globalEdits: [String: String] = [:]
         for (key, value) in [(Self.mergeLog, String(preferences.addLogMessages)), (Self.mergeLogCount, String(preferences.logMessagesCount))] {
-            guard value.lowercased() != effective[key]?.lowercased() else { continue }
-            if local[key] != nil || distributed[key] != nil { edits[key] = value }
-            else if key == Self.mergeLog { global.addLogMessages = preferences.addLogMessages }
-            else { global.logMessagesCount = preferences.logMessagesCount }
+            switch try effectiveWriteScope(key: key, value: value, global: Self.globalValues(store)) {
+            case .local: edits[key] = value
+            case .global: globalEdits[key] = value
+            default: break
+            }
         }
         if !edits.isEmpty { try Self.write(edits, to: localURL) }
-        if global != store.mergePreferences { store.saveMergePreferences(global) }
+        for (key, value) in globalEdits { store.saveDetailedSetting(key, value: value) }
     }
 }

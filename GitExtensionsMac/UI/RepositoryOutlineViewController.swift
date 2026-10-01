@@ -553,6 +553,20 @@ private final class RepositoryOutlineView: NSOutlineView {
     var onReturn: (() -> Void)?
     var onShortcut: ((String) -> Void)?
 
+
+    var onToggleWithDescendants: ((Int) -> Void)?
+
+    override func mouseDown(with event: NSEvent) {
+        let flags = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        let row = self.row(at: convert(event.locationInWindow, from: nil))
+        if flags == [.command, .shift], row >= 0, let onToggleWithDescendants {
+            window?.makeFirstResponder(self)
+            onToggleWithDescendants(row)
+            return
+        }
+        super.mouseDown(with: event)
+    }
+
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         if window?.firstResponder === self,
            let command = ApplicationHotkeys.shared.matching(event, category: "Repository tree") {
@@ -579,6 +593,11 @@ final class RepositoryOutlineViewController: NSViewController, NSOutlineViewData
     var onSelection: ((RepositoryTreeNode) -> Void)?
     var onCommand: ((String, RepositoryTreeNode) -> Void)?
     var onFilterReferences: (([String]) -> Void)?
+
+    var selectedRevisions: () -> [Commit] = { [] }
+    var onCopyRevisionValue: ((String) -> Void)?
+
+    var onScript: ((ScriptDefinition) -> Void)?
 
     private let outlineView = RepositoryOutlineView()
     private let searchField = NSSearchField()
@@ -654,6 +673,7 @@ final class RepositoryOutlineViewController: NSViewController, NSOutlineViewData
         outlineView.dataSource = self
         outlineView.onReturn = { [weak self] in self?.openSelectedNodeFromKeyboard() }
         outlineView.onShortcut = { [weak self] in self?.performShortcut($0) }
+        outlineView.onToggleWithDescendants = { [weak self] in self?.toggleSelectionWithDescendants(row: $0) }
 
         let contextMenu = NSMenu()
         contextMenu.delegate = self
@@ -996,8 +1016,38 @@ final class RepositoryOutlineViewController: NSViewController, NSOutlineViewData
     func outlineViewSelectionDidChange(_ notification: Notification) {
         guard outlineView.selectedRow >= 0,
               let node = outlineView.item(atRow: outlineView.selectedRow) as? RepositoryTreeNode else { return }
+
+        if node.objectID != nil, !node.isRevisionVisible { return }
         onSelection?(node)
     }
+
+
+    func toggleSelectionWithDescendants(row: Int) {
+        guard let node = outlineView.item(atRow: row) as? RepositoryTreeNode else { return }
+        let select = !outlineView.selectedRowIndexes.contains(row)
+        outlineView.expandItem(node, expandChildren: true)
+        func nodes(_ node: RepositoryTreeNode) -> [RepositoryTreeNode] { [node] + node.children.flatMap(nodes) }
+        let rows = IndexSet(nodes(node).map { outlineView.row(forItem: $0) }.filter { $0 >= 0 })
+        if select { outlineView.selectRowIndexes(rows, byExtendingSelection: true) }
+        else { rows.forEach { outlineView.deselectRow($0) } }
+    }
+
+
+    func contextMenu(forRow row: Int) -> NSMenu {
+        let menu = NSMenu()
+        guard let node = outlineView.item(atRow: row) as? RepositoryTreeNode else { return menu }
+        if !outlineView.selectedRowIndexes.contains(row) {
+            outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        }
+        populateMenu(menu, focused: node)
+        return menu
+    }
+
+    var rowCount: Int { outlineView.numberOfRows }
+    func node(atRow row: Int) -> RepositoryTreeNode? { outlineView.item(atRow: row) as? RepositoryTreeNode }
+    func expandAll() { outlineView.expandItem(nil, expandChildren: true) }
+    func reloadForTesting() { rebuildTree(preservingExpansion: true) }
+    var selectedNodesForTesting: [RepositoryTreeNode] { selectedNodes() }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         guard outlineView.clickedRow >= 0,
@@ -1012,14 +1062,23 @@ final class RepositoryOutlineViewController: NSViewController, NSOutlineViewData
         populateMenu(menu, focused: node)
     }
 
-    private func performShortcut(_ command: String) {
+    func performShortcut(_ command: String) {
         if command == "tree.search" { view.window?.makeFirstResponder(searchField); return }
+        if command == "tree.multiSelectWithChildren" {
+            outlineView.selectedRowIndexes.reversed().forEach { row in
+                guard let node = outlineView.item(atRow: row) as? RepositoryTreeNode else { return }
+                outlineView.expandItem(node, expandChildren: true)
+                func nodes(_ node: RepositoryTreeNode) -> [RepositoryTreeNode] { [node] + node.children.flatMap(nodes) }
+                outlineView.selectRowIndexes(IndexSet(nodes(node).map { outlineView.row(forItem: $0) }.filter { $0 >= 0 }), byExtendingSelection: true)
+            }
+            return
+        }
         guard let node = outlineView.item(atRow: outlineView.selectedRow) as? RepositoryTreeNode else { return }
         let menu = NSMenu()
         populateMenu(menu, focused: node)
+
         let ids: Set<String> = command == "tree.rename" ? ["repository.branch.rename"] : [
-            "repository.branch.delete", "repository.remoteBranch.delete", "repository.tag.delete",
-            "repository.stash.drop", "repository.worktree.delete", "repository.folder.deleteAll"
+            "repository.branch.delete", "repository.remoteBranch.delete", "repository.tag.delete"
         ]
         func find(_ menu: NSMenu) -> NSMenuItem? {
             for item in menu.items where item.isEnabled {
@@ -1037,7 +1096,7 @@ final class RepositoryOutlineViewController: NSViewController, NSOutlineViewData
             outlineView.item(atRow: index) as? RepositoryTreeNode
         }
         let parents = selectedNodes.filter { !$0.children.isEmpty }
-        let context = RepositoryContextMenuContext(
+        var context = RepositoryContextMenuContext(
             focused: node.menuKind,
             selected: selectedNodes.map(\.menuKind),
             selectedHaveChildren: !parents.isEmpty,
@@ -1047,79 +1106,38 @@ final class RepositoryOutlineViewController: NSViewController, NSOutlineViewData
             focusedRootCanMoveUp: rootIndex(of: node).map { $0 > 0 } ?? false,
             focusedRootCanMoveDown: rootIndex(of: node).map { $0 < allRoots.count - 1 } ?? false
         )
+        context.focusedRevisionVisible = node.isRevisionVisible
+        context.copyRevisions = selectedRevisions()
+        context.scripts = ((try? ApplicationScriptsStore.shared.load()) ?? []).filter(\.enabled)
+            .map { ($0.id.uuidString, $0.name, $0.addToRevisionGridContextMenu) }
+        let preferences = AppSettingsStore.shared.repositoryTreePreferences
+        context.sortByIsGitDefault = preferences.sortBy == .gitDefault
         populatePlaceholderMenu(menu, with: RepositoryContextMenuBuilder.build(context))
         menuFocusedNode = node
-        let mutationCommands: Set<String> = [
-            "repository.branch.checkout",
-            "repository.branch.create",
-            "repository.branch.rename",
-            "repository.branch.delete",
-            "repository.branch.push",
-            "repository.branch.merge",
-            "repository.branch.reset",
-            "repository.remoteBranch.checkout",
-            "repository.remoteBranch.create",
-            "repository.remoteBranch.fetch",
-            "repository.remoteBranch.fetchCheckout",
-            "repository.remoteBranch.fetchCreate",
-            "repository.remoteBranch.merge",
-            "repository.remoteBranch.reset",
-            "repository.remoteBranch.delete",
-            "repository.remote.manage",
-            "repository.remote.fetch",
-            "repository.remote.prune",
-            "repository.remote.openURL",
-            "repository.remote.disable",
-            "repository.remote.enable",
-            "repository.remote.enableFetch",
-            "repository.remotes.manage",
-            "repository.remotes.fetch",
-            "repository.remotes.prune",
-            "repository.tag.checkout",
-            "repository.tag.createBranch",
-            "repository.folder.create",
-            "repository.folder.deleteAll",
-            "repository.tag.merge",
-            "repository.tag.reset",
-            "repository.branch.rebase",
-            "repository.remoteBranch.rebase",
-            "repository.tag.rebase",
-            "repository.tag.delete",
-            "repository.stash.apply",
-            "repository.stash.pop",
-            "repository.stash.drop",
-            "repository.stash.open",
-            "repository.stashes.create",
-            "repository.stashes.staged",
-            "repository.stashes.manage",
-            "repository.copy",
-            "repository.filter",
-            "repository.expand",
-            "repository.collapse",
-            "repository.root.moveUp",
-            "repository.root.moveDown",
-            "repository.sortOrder.ascending",
-            "repository.sortOrder.descending",
-            "repository.worktree.copyPath",
-            "repository.worktree.show",
-            "repository.worktree.open", "repository.worktree.delete",
-            "repository.submodule.open", "repository.submodule.update",
-            "repository.submodule.openGE", "repository.submodule.reset", "repository.submodule.stash", "repository.submodule.commit",
-            "repository.submodules.manage", "repository.submodules.update", "repository.submodules.synchronize",
-            "repository.worktrees.create", "repository.worktrees.prune", "repository.worktrees.manage"
-        ]
-        retargetMenuItems(
-            in: menu,
-            where: { mutationCommands.contains($0) || $0.hasPrefix("repository.sortBy.") },
-            target: self,
-            action: #selector(performMenuCommand(_:))
-        )
+
+        retargetMenuItems(in: menu, where: { $0.hasPrefix("repository.") || $0.hasPrefix("revision.copy.") },
+                          target: self, action: #selector(performMenuCommand(_:)))
+
+        menuItem(withIdentifier: "repository.sortBy.\(preferences.sortBy.rawValue)", in: menu)?.state = .on
+        menuItem(withIdentifier: "repository.sortOrder.\(preferences.sortOrder.rawValue)", in: menu)?.state = .on
+        menuItem(withIdentifier: "revision.copy", in: menu)?.image = AppKitFactory.resourceImage("CopyToClipboard")
+
+        if !menu.items.contains(where: \.isEnabled) { menu.removeAllItems() }
     }
 
     @objc private func performMenuCommand(_ sender: NSMenuItem) {
         guard let identifier = sender.identifier?.rawValue, let menuFocusedNode else { return }
+        if identifier.hasPrefix("revision.copy.") {
+            onCopyRevisionValue?(identifier)
+            return
+        }
+        if identifier.hasPrefix("repository.script.run.") {
+            let scriptID = String(identifier.dropFirst("repository.script.run.".count))
+            if let script = ((try? ApplicationScriptsStore.shared.load()) ?? []).first(where: { $0.id.uuidString == scriptID }) { onScript?(script) }
+            return
+        }
         switch identifier {
-        case "repository.copy", "repository.worktree.copyPath":
+        case "repository.worktree.copyPath":
             copyToClipboard(menuFocusedNode.copyValue)
             return
         case "repository.filter":
@@ -1181,7 +1199,11 @@ final class RepositoryOutlineViewController: NSViewController, NSOutlineViewData
         guard let root = node.repositoryTreeRoot else { return }
         var preferences = AppSettingsStore.shared.repositoryTreePreferences
         guard let index = preferences.rootOrder.firstIndex(of: root) else { return }
-        let destination = index + offset
+
+        var destination = index + offset
+        while preferences.rootOrder.indices.contains(destination), !preferences.visibleRoots.contains(preferences.rootOrder[destination]) {
+            destination += offset
+        }
         guard preferences.rootOrder.indices.contains(destination) else { return }
         preferences.rootOrder.swapAt(index, destination)
         AppSettingsStore.shared.saveRepositoryTreePreferences(preferences)
@@ -1260,7 +1282,11 @@ final class RepositoryOutlineViewController: NSViewController, NSOutlineViewData
                 node.isMerged = false
             }
         }
-        outlineView.reloadData()
+
+
+        guard outlineView.numberOfRows > 0 else { return }
+        outlineView.reloadData(forRowIndexes: IndexSet(integersIn: 0..<outlineView.numberOfRows),
+                               columnIndexes: IndexSet(integersIn: 0..<outlineView.numberOfColumns))
     }
 
     func select(reference: RevisionReference) {

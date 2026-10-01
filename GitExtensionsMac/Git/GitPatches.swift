@@ -131,7 +131,7 @@ package enum PatchPreviewParser {
         return String(path[path.index(after: slash)...])
     }
 
-    private static func unquote(_ input: String) -> String {
+    static func unquote(_ input: String) -> String {
         let trimmed = String(input.split(separator: "\t", maxSplits: 1, omittingEmptySubsequences: false)[0])
             .trimmingCharacters(in: .newlines)
         guard trimmed.hasPrefix("\""), trimmed.hasSuffix("\"") else { return trimmed }

@@ -99,11 +99,13 @@ private final class SubmoduleProcessViewController: NSViewController, NSWindowDe
         progress.startAnimation(nil)
         task = Task { @MainActor in
             do {
-                result = try await operation { [weak self] event in
-                    Task { @MainActor in
-                        guard let self, !self.finished else { return }
-                        self.output.textStorage?.append(NSAttributedString(string: event.text, attributes: [.foregroundColor: event.stream == .standardError ? NSColor.systemRed : NSColor.textColor, .font: AppSettingsStore.shared.fontPreferences.font(.monospace, fallback: .monospacedSystemFont(ofSize: 11, weight: .regular))]))
-                        self.output.scrollToEndOfDocument(nil)
+                result = try await OutputHistoryRecording.perform {
+                    try await operation { [weak self] event in
+                        Task { @MainActor in
+                            guard let self, !self.finished else { return }
+                            self.output.textStorage?.append(NSAttributedString(string: event.text, attributes: [.foregroundColor: event.stream == .standardError ? NSColor.systemRed : NSColor.textColor, .font: AppSettingsStore.shared.fontPreferences.font(.monospace, fallback: .monospacedSystemFont(ofSize: 11, weight: .regular))]))
+                            self.output.scrollToEndOfDocument(nil)
+                        }
                     }
                 }
             } catch { result = .init(succeeded: false, changed: false, output: error.localizedDescription) }

@@ -577,7 +577,9 @@ private final class RepositoryCreationProcessViewController: NSViewController, N
         task = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
-                let value = try await operation { [weak self] event in Task { @MainActor in self?.append(event) } }
+                let value = try await OutputHistoryRecording.perform {
+                    try await operation { [weak self] event in Task { @MainActor in self?.append(event) } }
+                }
                 result = .success(value); status.stringValue = "Completed successfully"
             } catch is CancellationError {
                 result = .failure(CancellationError()); status.stringValue = "Aborted"; appendText("\nAborted\n", color: .systemOrange)

@@ -911,7 +911,7 @@ private final class RemoteManagementViewController: NSViewController, NSWindowDe
     }
 }
 
-private extension NSColor {
+extension NSColor {
     convenience init?(hexString: String) {
         let value = hexString.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
         guard value.count == 6, let rgb = Int(value, radix: 16) else { return nil }

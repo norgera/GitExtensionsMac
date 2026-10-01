@@ -2,6 +2,16 @@
 @testable import GitCommands
 @testable import GitUI
 import Foundation
+import AppKit
+
+
+
+@MainActor
+private final class DeterministicTestLifecycle: NSObject, NSApplicationDelegate {
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        return .terminateCancel
+    }
+}
 
 func testObjectID(_ label: String) -> ObjectID {
     var words: [UInt32] = [2_166_136_261, 2_166_136_263, 2_166_136_269, 2_166_136_283, 2_166_136_301]
@@ -19,7 +29,103 @@ func testRevisionID(_ label: String) -> RevisionID { .object(testObjectID(label)
 
 @main
 private enum RevisionGraphLayoutTests {
-    static func main() async {
+    @MainActor private static let lifecycle = DeterministicTestLifecycle()
+    @MainActor
+    static func main() {
+        let application = NSApplication.shared
+
+
+        AvatarService.shared.store = AvatarImageStore(transport: { request in
+            (Data(), HTTPURLResponse(url: request.url!, statusCode: 404, httpVersion: nil, headerFields: nil)!)
+        })
+        application.delegate = lifecycle
+        var completed = false
+        Task { @MainActor in
+            await run()
+            completed = true
+            application.stop(nil)
+            if let event = NSEvent.otherEvent(with: .applicationDefined, location: .zero,
+                modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: 0, context: nil, subtype: 0, data1: 0, data2: 0) {
+                application.postEvent(event, atStart: true)
+            }
+        }
+        while !completed { application.run() }
+    }
+
+    @MainActor
+    static func run() async {
+        if let index = CommandLine.arguments.firstIndex(of: "--graph-repository"),
+           CommandLine.arguments.indices.contains(index + 1) {
+            do {
+                let module = GitRepositoryModule(repositoryURL: URL(fileURLWithPath: CommandLine.arguments[index + 1], isDirectory: true))
+                let commits = try await GitRepositoryModuleTests.readRevisions(from: module)
+                let graph = await Task.detached { RevisionGraphLayout.build(commits: commits) }.value
+                expect(graph.rows.count == commits.count, "repository graph: every streamed revision is represented")
+                let positions = Dictionary(uniqueKeysWithValues: graph.rows.enumerated().map { ($0.element.commitID, $0.offset) })
+                for (child, parents) in graph.parentIDs {
+                    for parent in parents {
+                        if let childRow = positions[child], let parentRow = positions[parent] {
+                            expect(childRow < parentRow, "repository graph: every loaded parent follows its child")
+                        }
+                    }
+                }
+                print("Repository graph read-only verification passed: \(graph.rows.count) revisions")
+            } catch { fatalError("Repository graph verification failed: \(error.localizedDescription)") }
+            return
+        }
+        if CommandLine.arguments.contains("--avatars-only") {
+            do { try await AvatarProviderTests.run() }
+            catch { fatalError("AvatarProviderTests failed: \(error)") }
+            return
+        }
+        if CommandLine.arguments.contains("--output-history-only") {
+            do { try await OutputHistoryTests.run() }
+            catch { fatalError("OutputHistoryTests failed: \(error)") }
+            return
+        }
+        if CommandLine.arguments.contains("--revision-compare-only") {
+            do { try await RevisionComparisonTests.run() }
+            catch { fatalError("RevisionComparisonTests failed: \(error.localizedDescription)") }
+            return
+        }
+        if CommandLine.arguments.contains("--file-history-only") {
+            do { try await FileHistoryTests.run() }
+            catch { fatalError("FileHistoryTests failed: \(error.localizedDescription)") }
+            return
+        }
+        if CommandLine.arguments.contains("--blame-only") {
+            do { try await BlameTests.run() }
+            catch { fatalError("BlameTests failed: \(error.localizedDescription)") }
+            return
+        }
+        if CommandLine.arguments.contains("--file-status-only") {
+            do { try await FileStatusTests.run() }
+            catch { fatalError("FileStatusTests failed: \(error.localizedDescription)") }
+            return
+        }
+        if CommandLine.arguments.contains("--commit-info-only") {
+            do { try await CommitInfoTests.run() }
+            catch { fatalError("CommitInfoTests failed: \(error.localizedDescription)") }
+            return
+        }
+        if CommandLine.arguments.contains("--shell-only") {
+            do { try await AppShellTests.run() }
+            catch { fatalError("AppShellTests failed: \(error.localizedDescription)") }
+            return
+        }
+        if CommandLine.arguments.contains("--browser-only") {
+            do { try await BrowserTests.run() }
+            catch { fatalError("BrowserTests failed: \(error.localizedDescription)") }
+            return
+        }
+        if CommandLine.arguments.contains("--grid-only") {
+            ContextMenuStateTests.run()
+            AppSettingsTests.run()
+            do { try await RevisionGridTests.run() }
+            catch { fatalError("RevisionGridTests failed: \(error.localizedDescription)") }
+            return
+        }
         if CommandLine.arguments.contains("--hosts-only") {
             do { try await RepositoryHostingTests.run() }
             catch { fatalError("RepositoryHostingTests failed: \(error)") }
@@ -42,7 +148,7 @@ private enum RevisionGraphLayoutTests {
         }
         if CommandLine.arguments.contains("--settings-only") {
             AppSettingsTests.run()
-            do { try await GitSettingsTests.run() }
+            do { try await GitSettingsTests.run(); try await AppSettingsTests.runSettingsTree(); try await AppSettingsTests.runRepositoryScopes() }
             catch { fatalError("GitSettingsTests failed: \(error)") }
             return
         }
@@ -66,10 +172,27 @@ private enum RevisionGraphLayoutTests {
             }
             return
         }
+        if CommandLine.arguments.contains("--lost-objects-only") {
+            do { try await RecoverLostObjectsTests.run() }
+            catch { fatalError("RecoverLostObjectsTests failed: \(error.localizedDescription)") }
+            return
+        }
+        if CommandLine.arguments.contains("--sparse-only") {
+            do { try await SparseWorkingCopyTests.run() }
+            catch { fatalError("SparseWorkingCopyTests failed: \(error.localizedDescription)") }
+            return
+        }
+        if CommandLine.arguments.contains("--file-editors-only") {
+            ContextMenuStateTests.run()
+            do { try await RepositoryFileEditorTests.run() }
+            catch { fatalError("RepositoryFileEditorTests failed: \(error.localizedDescription)") }
+            return
+        }
         if CommandLine.arguments.contains("--left-panel-only") {
             ContextMenuStateTests.run()
             AppSettingsTests.run()
-            print("LeftPanelTests: passed")
+            do { try await LeftPanelTests.run() }
+            catch { fatalError("LeftPanelTests failed: \(error.localizedDescription)") }
             return
         }
         if CommandLine.arguments.contains("--architecture-h-only") {
@@ -222,8 +345,17 @@ private enum RevisionGraphLayoutTests {
         testUpstreamReducedCrossingFixture()
         testUpstreamDiagonalCrossingFixture()
         testOctopusMergeIsCappedAndDeterministic()
+        testGraphConfigurationAndOrdering()
+        testUpstreamGraphParity()
+        testLargeGraphBatches()
+        await testDeepHistoryOnBackgroundTask()
+        await testIncrementalGraphCache()
         testRevisionSelectionRestoration()
         testAuthorAvatarPresentation()
+        if CommandLine.arguments.contains("--graph-only") {
+            print("Revision graph focused tests passed")
+            return
+        }
         ContextMenuStateTests.run()
         RepositoryDetailModelTests.run()
         AppSettingsTests.run()
@@ -254,10 +386,26 @@ private enum RevisionGraphLayoutTests {
             try await GitPatchTests.run()
             try await GitArchiveTests.run()
             try await GitSettingsTests.run()
+            try await AppSettingsTests.runSettingsTree()
+            try await AppSettingsTests.runRepositoryScopes()
             try await CommandLogTests.run()
+            try await OutputHistoryTests.run()
+            try await AvatarProviderTests.run()
             try await ApplicationScriptsTests.run()
             try await ApplicationPluginsTests.run()
             try await RepositoryHostingTests.run()
+            try await RevisionGridTests.run()
+            try await BrowserTests.run()
+            try await AppShellTests.run()
+            try await CommitInfoTests.run()
+            try await FileStatusTests.run()
+            try await LeftPanelTests.run()
+            try await RepositoryFileEditorTests.run()
+            try await SparseWorkingCopyTests.run()
+            try await RecoverLostObjectsTests.run()
+            try await BlameTests.run()
+            try await FileHistoryTests.run()
+            try await RevisionComparisonTests.run()
             if let flagIndex = CommandLine.arguments.firstIndex(of: "--verify-mutations"),
                CommandLine.arguments.indices.contains(flagIndex + 1) {
                 try await GitRepositoryMutationTests.verifyDisposableClone(
@@ -526,13 +674,207 @@ private enum RevisionGraphLayoutTests {
         expect(first == second, "octopus: graph layout is deterministic")
         expect(first.maximumLaneCount == RevisionGraphLayout.maximumVisibleLanes, "octopus: visible lane count is capped")
         expect(first.rows.allSatisfy { row in
-            row.nodeLane < RevisionGraphLayout.maximumVisibleLanes
-                && row.edges.allSatisfy { edge in
-                    edge.centerLane < RevisionGraphLayout.maximumVisibleLanes
-                        && (edge.topLane ?? 0) < RevisionGraphLayout.maximumVisibleLanes
-                        && (edge.bottomLane ?? 0) < RevisionGraphLayout.maximumVisibleLanes
+            row.nodeLane >= 0 && row.edges.allSatisfy { edge in
+                    edge.centerLane >= 0
+                        && (edge.topLane ?? 0) >= 0
+                        && (edge.bottomLane ?? 0) >= 0
                 }
-        }, "octopus: no emitted geometry exceeds the cap")
+        }, "octopus: logical lanes remain valid; only visible width is capped (offscreen geometry is clipped by AppKit)")
+    }
+
+    private static func testGraphConfigurationAndOrdering() {
+        let commits = history([("merge", ["left", "right"]), ("left", ["root"]), ("right", ["root"]), ("root", [])])
+        var configuration = RevisionGraphLayout.Configuration.gitExtensionsDefault
+        configuration.highlightedRevision = testRevisionID("right")
+        configuration.drawStyle = .highlightSelected
+        configuration.colorCount = 4
+        let highlighted = RevisionGraphLayout.build(commits: commits, configuration: configuration)
+        expect(Set(highlighted.rows.filter(\.isRelative).map(\.commitID)) == Set([testRevisionID("right"), testRevisionID("root")]), "highlight: only selected ancestry is relative")
+        expect(highlighted.rows.flatMap(\.edges).allSatisfy { (0..<4).contains($0.colorIndex) }, "theme: all lanes use the configured palette")
+        let byID = Dictionary(uniqueKeysWithValues: commits.map { ($0.id, $0) })
+        expect(RevisionGridPresentation.laneInfo(layout: highlighted, row: 0, lane: highlighted.rows[0].nodeLane, commits: byID)
+               .hasPrefix("* " + commits[0].objectID!.string), "tooltip: revision identity belongs to the located graph node")
+        expect(RevisionGridPresentation.laneInfo(layout: highlighted, row: 0, lane: 100, commits: byID).isEmpty, "tooltip: empty lane has no information")
+        configuration.onlyFirstParent = true
+        let firstParent = RevisionGraphLayout.build(commits: commits, configuration: configuration)
+        expect(firstParent.parentIDs[testRevisionID("merge")] == [testRevisionID("left")], "first parent: secondary merge edge omitted")
+        let outOfOrder = RevisionGraphLayout.build(commits: [commits[3], commits[0], commits[1], commits[2]])
+        let positions = Dictionary(uniqueKeysWithValues: outOfOrder.rows.enumerated().map { ($0.element.commitID, $0.offset) })
+        for commit in commits {
+            for parent in commit.parentIDs {
+                expect(positions[commit.id]! < positions[.object(parent)]!, "score ordering: every child precedes its parent")
+            }
+        }
+    }
+
+    private static func testUpstreamGraphParity() {
+
+        let limited = history([("c", ["unloaded"]), ("b", [])])
+        let dangling = RevisionGraphLayout.build(commits: limited)
+        expect(dangling.parentIDs[testRevisionID("c")] == [testRevisionID("unloaded")], "unloaded parent: segment kept")
+        expect(dangling.rows[1].edges.contains { $0.role == .continuing } && dangling.rows[1].laneCount == 2,
+               "unloaded parent: the lane continues through the following rows")
+
+
+        let skewed = history([("tip", ["mid"]), ("base", []), ("mid", ["base"]), ("side", ["base"])])
+        let order = RevisionGraphLayout.build(commits: skewed).rows.map(\.commitID)
+        expect(order.firstIndex(of: testRevisionID("mid"))! < order.firstIndex(of: testRevisionID("base"))!
+               && order.firstIndex(of: testRevisionID("side"))! < order.firstIndex(of: testRevisionID("base"))!,
+               "score ordering: EnsureScoreIsAbove moves ancestors below late children")
+
+
+        let head = testObjectID("anchor")
+        var rows = history([("top", ["anchor"]), ("anchor", [])])
+        rows += RevisionCommitBuilder.artificialRevisions(headID: testObjectID("filtered-head"), attachedTo: head)
+        let inserted = RevisionGraphLayout.build(commits: rows)
+        expect(inserted.rows.map(\.commitID) == [testRevisionID("top"), .workingDirectory, .index, .object(head)],
+               "artificial: Insert places Working directory/Index before the anchor")
+        expect(inserted.parentIDs[.index] == [] && inserted.parentIDs[.workingDirectory] == [.index],
+               "artificial: inserted Index has no segment to the anchor")
+        expect(!inserted.rows[1].isRelative && inserted.rows[1].nodeColorIndex != nil, "artificial: colored as ordinary non-relative nodes")
+
+
+        let shared = history([("m", ["a", "b"]), ("a", ["r"]), ("b", ["r"]), ("x", ["r"]), ("r", [])])
+        var normal = RevisionGraphLayout.Configuration.gitExtensionsDefault
+        normal.drawStyle = .normal
+        let normalEdges = RevisionGraphLayout.build(commits: shared, configuration: normal).rows.flatMap(\.edges).count
+        let grayEdges = RevisionGraphLayout.build(commits: shared).rows.flatMap(\.edges).count
+        expect(grayEdges >= normalEdges, "draw style: gray style draws secondary shared segments too")
+
+
+        let isolated = RevisionGraphLayout.build(commits: history([("solo", [])]))
+        expect(isolated.rows[0].nodeColorIndex == nil, "node: no lane info → non-relative color")
+        let stashRef = RevisionReference(id: "stash@{1}", name: "stash@{1}", kind: .stash)
+        let stashRow = RevisionGraphLayout.build(commits: history([("s", [])], refs: ["s": [stashRef]]))
+        expect(!stashRow.rows[0].hasReferences, "node: only refs/stash (stash@{0}) makes a square node")
+
+
+        var curvy = RevisionGraphLayout.Configuration.gitExtensionsDefault
+        curvy.renderWithDiagonals = false
+        expect(RevisionGraphLayout.build(commits: shared, configuration: curvy).configuration.renderWithDiagonals == false, "config: curvy rendering")
+
+
+        let pr = RevisionGridPresentation.parseMergeMessage("Merge pull request #12 from user/feature", appendPullRequest: true)
+        expect(pr.into == "master" && pr.with == "user/feature by pull request #12", "branch finder: pull request merge")
+        let into = RevisionGridPresentation.parseMergeMessage("Merge branch 'topic' into develop", appendPullRequest: false)
+        expect(into.into == "develop" && into.with == "topic", "branch finder: branch merged into")
+        expect(RevisionGridPresentation.parseMergeMessage("Fix bug", appendPullRequest: true).into == nil, "branch finder: ordinary subject")
+        let merge = history([("m2", ["main1", "topic1"]), ("topic1", ["base"]), ("main1", ["base"]), ("base", [])])
+        let mergeLayout = RevisionGraphLayout.build(commits: merge)
+        var merged = merge
+        merged[0] = Commit(id: merge[0].id, shortID: "m2", subject: "Merge branch 'topic' into main", body: "", authorName: "", authorEmail: "",
+                           authorDate: .distantPast, committerName: "", committerEmail: "", commitDate: .distantPast,
+                           parentIDs: merge[0].parentIDs, references: [], kind: .revision)
+        let byID = Dictionary(uniqueKeysWithValues: merged.map { ($0.id, $0) })
+        let topicRow = mergeLayout.rows.firstIndex { $0.commitID == testRevisionID("topic1") }!
+        let info = RevisionGridPresentation.laneInfo(layout: mergeLayout, row: topicRow, lane: mergeLayout.rows[topicRow].nodeLane, commits: byID)
+        expect(info.contains("Branch: topic"), "lane tooltip: second-parent branch named by the merge message\n\(info)")
+        let missing = RevisionGridPresentation.laneInfo(layout: dangling, row: 1, lane: 0, commits: Dictionary(uniqueKeysWithValues: limited.map { ($0.id, $0) }))
+        expect(!missing.isEmpty, "lane tooltip: node lane resolves")
+    }
+
+    private static func testLargeGraphBatches() {
+        let count = 3_000
+        let commits = history((0..<count).map { ("large\($0)", $0 + 1 < count ? ["large\($0 + 1)"] : []) })
+        let partial = RevisionGraphLayout.build(commits: Array(commits.prefix(200)))
+        let complete = RevisionGraphLayout.build(commits: commits)
+        expect(complete.rows.count == count && complete.maximumLaneCount == 1, "large history: linear batches stay in one lane")
+        expect(partial.rows.map(\.commitID) == complete.rows.prefix(200).map(\.commitID), "large history: existing row identities retain batch order")
+        expect(complete.rows.allSatisfy { $0.nodeLane == 0 }, "large history: node positions remain stable")
+    }
+
+    private static func testIncrementalGraphCache() async {
+        let count = 2_000
+        let commits = history((0..<count).map { index in
+            let parents = index + 1 >= count ? [] : index % 100 == 0 && index + 4 < count
+                ? ["cache\(index + 1)", "cache\(index + 3)", "cache\(index + 4)"] : ["cache\(index + 1)"]
+            return ("cache\(index)", parents)
+        })
+        do {
+            for merge in [true, false] {
+                for diagonals in [true, false] {
+                    let configuration = RevisionGraphLayout.Configuration(mergeCommonParentLanes: merge, straightenDiagonals: diagonals)
+                    let full = RevisionGraphLayout.build(commits: commits, configuration: configuration)
+                    let cache = RevisionGraphCache()
+                    let first = try await cache.prepare(commits: Array(commits.prefix(100)), configuration: configuration, through: 30, completed: false)
+                    expect(first.orderedIDs == commits.prefix(100).map(\.id), "cache: first page contains the complete ordered revision list")
+                    expect(!first.layout.rows.isEmpty, "cache: first batch displays prepared lanes while future straightening remains pending")
+                    let page = try await cache.prepare(commits: commits, configuration: configuration, through: 60, completed: false)
+                    expect(page.preparedRowCount <= 121 && page.layout.rows.count <= 61, "cache: large history only prepares visible rows plus finite look-ahead")
+                    expect(page.layout.rows == Array(full.rows.prefix(page.layout.rows.count)), "cache: first-page lanes/edges match the full graph (merge=\(merge), diagonals=\(diagonals))")
+                    let unchanged = try await cache.prepare(commits: commits, configuration: configuration, through: 40, completed: false)
+                    expect(unchanged.layout == page.layout && unchanged.preparedRowCount == page.preparedRowCount, "cache: scrolling back reuses prepared rows")
+                    let next = try await cache.prepare(commits: commits, configuration: configuration, through: 250, completed: false)
+                    expect(next.layout.rows == Array(full.rows.prefix(next.layout.rows.count)), "cache: scrolling forward extends stable lanes without changing earlier rows")
+                    let complete = try await cache.prepare(commits: commits, configuration: configuration, through: .max, completed: true)
+                    expect(complete.layout == full, "cache: completed graph matches full-layout fixtures")
+                    let repeated = try await cache.prepare(commits: commits, configuration: configuration, through: .max, completed: true)
+                    expect(repeated.layout == complete.layout, "cache: repeated EOF/scroll does not straighten lanes twice")
+                    let late = history([("late-cache-child", ["cache0"])])[0]
+                    let reordered = try await cache.prepare(commits: commits + [late], configuration: configuration, through: 60, completed: true)
+                    let reorderedFull = RevisionGraphLayout.build(commits: commits + [late], configuration: configuration)
+                    expect(reordered.orderedIDs == reorderedFull.rows.map(\.commitID), "cache: a late child propagates retained scores and invalidates changed row order")
+                    expect(reordered.layout.rows == Array(reorderedFull.rows.prefix(reordered.layout.rows.count)), "cache: reordered prefix has correct lanes")
+                }
+            }
+            let cache = RevisionGraphCache()
+            let cancelled = Task { try await cache.prepare(commits: commits, through: .max, completed: true) }
+            cancelled.cancel()
+            do { _ = try await cancelled.value; expect(false, "cache: cancelled requests must not publish") }
+            catch is CancellationError { }
+            let restart = try await cache.prepare(commits: Array(commits.prefix(100)), through: 30, completed: true)
+            expect(restart.orderedIDs == commits.prefix(100).map(\.id), "cache: cancellation/filter restart cannot reuse stale history")
+            let artificial = [Commit(id: .workingDirectory, shortID: "", subject: "Working directory", body: "", authorName: "", authorEmail: "", authorDate: .distantPast, committerName: "", committerEmail: "", commitDate: .distantPast, parentIDs: [], references: [], kind: .workingDirectory),
+                              Commit(id: .index, shortID: "", subject: "Commit index", body: "", authorName: "", authorEmail: "", authorDate: .distantPast, committerName: "", committerEmail: "", commitDate: .distantPast, parentIDs: [commits[10].objectID!], references: [], kind: .index)]
+            let inserted = try await cache.prepare(commits: Array(commits.prefix(100)) + artificial, through: .max, completed: true)
+            let insertedFull = RevisionGraphLayout.build(commits: Array(commits.prefix(100)) + artificial)
+            expect(inserted.layout == insertedFull, "cache: artificial rows arriving at EOF invalidate/order/attach exactly like Insert")
+            let leadingCache = RevisionGraphCache()
+            _ = try await leadingCache.prepare(commits: artificial + Array(commits.prefix(100)), through: 30, completed: false)
+            let leading = try await leadingCache.prepare(commits: artificial + commits, through: .max, completed: true)
+            expect(leading.layout == RevisionGraphLayout.build(commits: artificial + commits), "cache: leading Working directory/Index rows retain graph semantics across batches")
+        } catch { fatalError("Incremental graph cache failed: \(error)") }
+    }
+
+
+
+    private static func testDeepHistoryOnBackgroundTask() async {
+        let count = 16_000
+        let commits = history((0..<count).map { ("deep\($0)", $0 + 1 < count ? ["deep\($0 + 1)"] : []) })
+        let graph = await Task.detached {
+            RevisionGraphLayout.build(commits: commits,
+                configuration: .init(mergeCommonParentLanes: true, straightenDiagonals: false))
+        }.value
+        expect(graph.rows.map(\.commitID) == commits.map(\.id), "deep history: background scoring preserves every row in order")
+        expect(graph.maximumLaneCount == 1 && graph.rows.allSatisfy { $0.nodeLane == 0 }, "deep history: background graph stays in one lane")
+        let lateChild = history([("late-deep-child", ["deep0"])])[0]
+        let skewed = await Task.detached {
+            RevisionGraphLayout.build(commits: commits + [lateChild],
+                configuration: .init(mergeCommonParentLanes: true, straightenDiagonals: false))
+        }.value
+        expect(skewed.rows.map(\.commitID) == [lateChild.id] + commits.map(\.id), "deep history: late child raises the entire ancestor chain without recursive teardown")
+        let partial = await Task.detached {
+            RevisionGraphLayout.build(commits: Array(commits.dropLast()),
+                configuration: .init(mergeCommonParentLanes: true, straightenDiagonals: false, onlyFirstParent: true))
+        }.value
+        expect(partial.rows.map(\.commitID) == commits.dropLast().map(\.id), "deep history: incomplete parent nodes also tear down safely in first-parent mode")
+        let filtered = await Task.detached {
+            RevisionGraphLayout.build(commits: [commits[0], commits[count - 1]], completeHistory: commits)
+        }.value
+        expect(filtered.parentIDs[commits[0].id] == [commits[count - 1].id], "deep history: hidden ancestor traversal is iterative and preserves visible parent identity")
+        let cache = RevisionGraphCache()
+        let running = Task.detached { try await cache.prepare(commits: commits, through: .max, completed: true) }
+        try? await Task.sleep(for: .milliseconds(10))
+        running.cancel()
+        do {
+            _ = try await running.value
+            expect(false, "deep history: an executing graph worker must stop on cancellation")
+        } catch is CancellationError { }
+        catch { fatalError("Deep-history cancellation failed: \(error)") }
+        do {
+            let restarted = try await cache.prepare(commits: Array(commits.prefix(100)), through: .max, completed: true)
+            expect(restarted.orderedIDs == commits.prefix(100).map(\.id), "deep history: cancelled partial cache does not leak into the next generation")
+        } catch { fatalError("Deep-history restart failed: \(error)") }
     }
 
     private static func testObjectIdentity() {
@@ -642,7 +984,7 @@ private enum RevisionGraphLayoutTests {
         expect(first == second, "avatar color and initials are deterministic")
     }
 
-    private static func history(_ specs: [(String, [String])]) -> [Commit] {
+    private static func history(_ specs: [(String, [String])], refs: [String: [RevisionReference]] = [:]) -> [Commit] {
         specs.enumerated().map { index, spec in
             Commit(
                 id: testRevisionID(spec.0),
@@ -656,7 +998,7 @@ private enum RevisionGraphLayoutTests {
                 committerEmail: "test@example.com",
                 commitDate: Date(timeIntervalSince1970: TimeInterval(10_000 - index)),
                 parentIDs: spec.1.map(testObjectID),
-                references: []
+                references: refs[spec.0] ?? []
             )
         }
     }

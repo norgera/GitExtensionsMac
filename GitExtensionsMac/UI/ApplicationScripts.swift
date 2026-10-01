@@ -87,11 +87,13 @@ final class ScriptProcessWindow: NSWindowController, NSWindowDelegate {
         }
         controller.showWindow(nil)
         let task = Task {
-            try await ScriptExecution.run(invocation) { [weak controller] event in
-                Task { @MainActor in
-                    guard let controller else { return }
-                    controller.output.textStorage?.append(NSAttributedString(string: String(decoding: event.data, as: UTF8.self)))
-                    controller.output.scrollToEndOfDocument(nil)
+            try await OutputHistoryRecording.perform {
+                try await ScriptExecution.run(invocation) { [weak controller] event in
+                    Task { @MainActor in
+                        guard let controller else { return }
+                        controller.output.textStorage?.append(NSAttributedString(string: String(decoding: event.data, as: UTF8.self)))
+                        controller.output.scrollToEndOfDocument(nil)
+                    }
                 }
             }
         }

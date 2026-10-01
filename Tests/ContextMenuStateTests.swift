@@ -105,7 +105,7 @@ enum ContextMenuStateTests {
 
         expect(menu.entry(id: "revision.branch.checkout") == nil, "revision: current branch is not offered for checkout")
         expect(menu.entry(id: "revision.branch.merge") == nil, "revision: current branch is not offered for self-merge")
-        expect(menu.entry(id: "revision.branch.rebase") == nil, "revision: current branch is not offered for self-rebase")
+        expect(menu.entry(id: "revision.branch.rebase.selected")?.isEnabled == false, "revision: rebase onto the current branch's own commit is disabled")
         expect(menu.entry(id: "revision.branch.delete")?.isEnabled == false, "revision: deleting the current branch remains visible but disabled")
         expect(menu.entry(id: "revision.branch.rename")?.isEnabled == true, "revision: current branch can be renamed")
         expect(menu.entry(id: "revision.branch.push")?.isEnabled == true, "revision: current branch can be pushed")
@@ -115,8 +115,9 @@ enum ContextMenuStateTests {
         expect(menu.entry(id: "revision.other.formatPatch")?.isEnabled == true, "patch: real commit enables format launch")
         expect(menu.entry(id: "revision.commit.archive")?.isEnabled == true, "archive: real revision launch")
         expect(menu.entry(id: "revision.other.createPatch") == nil, "patch: no duplicate placeholder entry")
-        expect(menu.entry(id: "revision.compare.selected")?.isEnabled == true, "revision: a single commit compares with its parent")
-        expect(menu.entry(id: "revision.navigate.parent")?.isEnabled == true, "revision: parent navigation follows topology")
+        expect(menu.entry(id: "revision.compare.difftool")?.isEnabled == true, "revision: a single commit opens difftool against its parent")
+        expect(menu.entry(id: "revision.compare.selected")?.isEnabled == true, "revision: a commit with a parent enables comparison")
+        expect(menu.entry(id: "revision.navigate.parent")?.isEnabled == true, "revision: Navigate submenu uses the grid menu commands")
 
         var bareContext = RevisionContextMenuContext(
             focusedCommit: focused,
@@ -164,7 +165,7 @@ enum ContextMenuStateTests {
 
         expect(menu.entry(id: "revision.branch.rebase.selected")?.isEnabled == false, "revision: ordinary rebase requires one revision")
         expect(menu.entry(id: "revision.branch.rebase.advanced")?.isEnabled == true, "revision: advanced rebase accepts two real revisions")
-        expect(menu.entry(id: "revision.compare.selected")?.isEnabled == true, "revision: selected revisions can be compared")
+        expect(menu.entry(id: "revision.compare.difftool")?.isEnabled == true, "revision: selected revisions open with difftool")
         expect(menu.entry(id: "revision.commit.archive")?.isEnabled == true, "archive: two-revision differential launch")
         let tooMany = RevisionContextMenuBuilder.build(.init(focusedCommit: first, selectedCommits: [first, second, commit("base")], history: [first, second], currentBranchName: "main"))
         expect(tooMany.entry(id: "revision.commit.archive")?.isEnabled != true, "archive: more than two revisions are ineligible")
@@ -183,10 +184,13 @@ enum ContextMenuStateTests {
         ))
 
         expect(
-            menu.entry(id: "revision.commit.cherryPick")?.isEnabled == false,
+            menu.entry(id: "revision.commit.cherryPick")?.isEnabled != true,
             "revision: artificial revisions cannot be cherry-picked"
         )
-        expect(menu.entry(id: "revision.commit.revert")?.isEnabled == false, "revision: artificial revisions cannot be reverted")
+        expect(menu.entry(id: "revision.commit.revert")?.isEnabled != true, "revision: artificial revisions cannot be reverted")
+        expect(menu.entry(id: "revision.artificial.resetChanges")?.isEnabled == true, "revision: artificial rows offer Reset changes")
+        expect(menu.entry(id: "revision.artificial.commit")?.isEnabled == true, "revision: artificial rows offer Commit")
+        expect(menu.entry(id: "revision.copy") == nil, "revision: artificial rows have no copy menu")
         expect(menu.entry(id: "revision.other.formatPatch")?.isEnabled != true, "patch: artificial revisions cannot be exported")
         expect(menu.entry(id: "revision.commit.archive")?.isEnabled != true, "archive: artificial rows are not Git trees")
         expect(menu.entry(id: "revision.branch.merge") == nil, "revision: artificial revisions cannot be merged")
@@ -274,23 +278,42 @@ enum ContextMenuStateTests {
 
     private static func testCurrentBranchTreeCommands() {
         let kind = RepositoryMenuNodeKind.localBranch(isCurrent: true)
-        let menu = RepositoryContextMenuBuilder.build(.init(
+        let commit = Commit(id: testRevisionID("current"), shortID: "abc1234", subject: "s", body: "", authorName: "A", authorEmail: "a@e",
+                            authorDate: Date(), committerName: "A", committerEmail: "a@e", commitDate: Date(), parentIDs: [], references: [])
+        var context = RepositoryContextMenuContext(
             focused: kind,
             selected: [kind],
             selectedHaveChildren: false,
             selectedHaveExpandableChildren: false,
             selectedHaveCollapsibleChildren: false
-        ))
+        )
+        context.copyRevisions = [commit]
+        context.scripts = [("hosted", "Hosted", false), ("direct", "Direct", true)]
+        var menu = RepositoryContextMenuBuilder.build(context)
 
-        expect(menu.entry(id: "repository.copy")?.isEnabled == true, "tree: branch copy appears")
+        expect(menu.entry(id: "revision.copy")?.children.contains { $0.id == "revision.copy.hash" } == true,
+               "tree: branch copy is the grid's Copy to clipboard submenu")
         expect(menu.entry(id: "repository.filter")?.isEnabled == true, "tree: branch filtering appears")
-        expect(menu.entry(id: "repository.branch.checkout") == nil, "tree: current branch checkout is omitted")
-        expect(menu.entry(id: "repository.branch.merge") == nil, "tree: current branch self-merge is omitted")
+
+        for id in ["repository.branch.checkout", "repository.branch.merge", "repository.branch.rebase", "repository.branch.reset", "repository.branch.delete"] {
+            expect(menu.entry(id: id)?.isEnabled == false, "tree: current branch shows \(id) disabled")
+        }
         expect(menu.entry(id: "repository.branch.create")?.isEnabled == true, "tree: create from current branch enabled")
-        expect(menu.entry(id: "repository.branch.reset")?.isEnabled == true, "tree: current branch can reset tracked changes at HEAD")
         expect(menu.entry(id: "repository.branch.rename")?.isEnabled == true, "tree: current branch rename enabled")
-        expect(menu.entry(id: "repository.branch.delete") == nil, "tree: current branch delete is omitted")
-        expect(menu.entry(id: "repository.branch.push") == nil, "tree: current branch push is omitted")
+
+        expect(menu.entry(id: "repository.script")?.children.map(\.id) == ["repository.script.run.hosted"], "tree: hosted scripts under Run script")
+        expect(menu.entry(id: "repository.script.run.direct")?.isEnabled == true, "tree: direct scripts follow Run script")
+        expect(menu.entry(id: "repository.sortOrder") == nil, "tree: Sort order is hidden for Git default sorting")
+        context.sortByIsGitDefault = false
+        menu = RepositoryContextMenuBuilder.build(context)
+        expect(menu.entry(id: "repository.sortOrder.ascending") != nil, "tree: Sort order is shown for an explicit sort")
+        context.focusedRevisionVisible = false
+        menu = RepositoryContextMenuBuilder.build(context)
+        expect(menu.entry(id: "revision.copy") == nil && menu.entry(id: "repository.script") == nil,
+               "tree: refs hidden from the grid offer no copy or scripts")
+        let tag = RepositoryContextMenuBuilder.build(.init(focused: .tag, selected: [.tag], selectedHaveChildren: false,
+                                                           selectedHaveExpandableChildren: false, selectedHaveCollapsibleChildren: false))
+        expect(tag.entry(id: "revision.copy") == nil && tag.entry(id: "repository.script") == nil, "tree: tags have no copy or scripts")
     }
 
     private static func testMergeTreeCommands() {
@@ -395,7 +418,7 @@ enum ContextMenuStateTests {
         expect(menu.entry(id: "repository.remote.prune")?.isEnabled == true, "remotes: active remotes can prune")
         expect(menu.entry(id: "repository.remote.openURL")?.isEnabled == true, "remotes: HTTP remotes can open in a browser")
         expect(menu.entry(id: "repository.remote.disable")?.isEnabled == true, "remotes: active remotes can be disabled")
-        expect(menu.entry(id: "repository.remote.enable")?.isEnabled == false, "remotes: active remotes are not offered Enable")
+        expect(menu.entry(id: "repository.remote.enable") == nil, "remotes: active remotes hide Enable")
 
         menu = RepositoryContextMenuBuilder.build(.init(
             focused: .remote(enabled: false, hasHTTPURL: false),
@@ -404,8 +427,8 @@ enum ContextMenuStateTests {
             selectedHaveExpandableChildren: false,
             selectedHaveCollapsibleChildren: false
         ))
-        expect(menu.entry(id: "repository.remote.fetch")?.isEnabled == false, "remotes: inactive remotes cannot fetch")
-        expect(menu.entry(id: "repository.remote.openURL")?.isEnabled == false, "remotes: non-HTTP URLs do not open in a browser")
+        expect(menu.entry(id: "repository.remote.fetch") == nil, "remotes: inactive remotes hide fetch")
+        expect(menu.entry(id: "repository.remote.openURL") == nil, "remotes: non-HTTP URLs hide Open in browser")
         expect(menu.entry(id: "repository.remote.enable")?.isEnabled == true, "remotes: inactive remotes can be enabled")
         expect(menu.entry(id: "repository.remote.enableFetch")?.isEnabled == true, "remotes: inactive remotes can enable and fetch")
 
@@ -565,11 +588,11 @@ enum ContextMenuStateTests {
         expect(RepositoryOpeningSelection.parse(["--select-revision", "HEAD~2", "--select-revision"]).isEmpty, "submodule: opening selection rejects unresolved expressions and missing values")
         expect(SubmoduleTreePresentation.toolTip(item).contains(testObjectID("old").string), "submodule: tooltip includes recorded gitlink identity")
         let menu = RepositoryContextMenuBuilder.build(.init(focused: .submodule(isInitialized: true, isCurrent: true), selected: [.submodule(isInitialized: true, isCurrent: true)], selectedHaveChildren: true, selectedHaveExpandableChildren: true, selectedHaveCollapsibleChildren: false))
-        expect(menu.entry(id: "repository.submodule.open")?.isEnabled == false, "submodule: current node cannot switch to itself")
+        expect(menu.entry(id: "repository.submodule.open") == nil, "submodule: current node hides Open")
         expect(menu.entry(id: "repository.submodule.openGE")?.isEnabled == true, "submodule: current node can open a new instance")
         expect(menu.entry(id: "repository.submodules.manage")?.isEnabled == true && menu.entry(id: "repository.submodules.synchronize")?.isEnabled == true, "submodule: manage/sync belong to current repository")
         let other = RepositoryContextMenuBuilder.build(.init(focused: .submodule(isInitialized: true), selected: [.submodule(isInitialized: true)], selectedHaveChildren: false, selectedHaveExpandableChildren: false, selectedHaveCollapsibleChildren: false))
-        expect(other.entry(id: "repository.submodule.open")?.isEnabled == true && other.entry(id: "repository.submodules.manage")?.isEnabled == false, "submodule: sibling opens but cannot manage the current repository through its node")
+        expect(other.entry(id: "repository.submodule.open")?.isEnabled == true && other.entry(id: "repository.submodules.manage") == nil, "submodule: sibling opens but cannot manage the current repository through its node")
     }
 
     private static func testRepositoryTreeVisibilityAndOrdering() {
@@ -642,8 +665,8 @@ enum ContextMenuStateTests {
 
         context.isBareRepository = true
         menu = RepositoryContextMenuBuilder.build(context)
-        expect(menu.entry(id: "repository.stash.open")?.isEnabled == false, "stash tree: stash actions are disabled for bare repositories")
-        expect(menu.entry(id: "repository.stash.drop")?.isEnabled == false, "stash tree: destructive actions are disabled for bare repositories")
+        expect(menu.entry(id: "repository.stash.open") == nil, "stash tree: stash actions are hidden for bare repositories")
+        expect(menu.entry(id: "repository.stash.drop") == nil, "stash tree: destructive actions are hidden for bare repositories")
 
         context = RepositoryContextMenuContext(
             focused: .group(.stashes),
@@ -663,48 +686,88 @@ enum ContextMenuStateTests {
         expect(menu.entry(id: "repository.stashes.manage")?.isEnabled == false, "stash root: manager is disabled for bare repositories")
     }
 
+
     private static func testHistoricalFileCommands() {
         let file = changedFile("source", type: .modified)
-        let menu = ChangedFileContextMenuBuilder.build(.init(
-            selectedFiles: [file],
-            scope: .revision,
-            allFilesExist: true
-        ))
+        let head = RevisionID.object(try! ObjectID.parse(String(repeating: "b", count: 40)))
+        let parent = RevisionID.object(try! ObjectID.parse(String(repeating: "a", count: 40)))
+        var context = ChangedFileContextMenuContext(selectedFiles: [file], firstRevisions: [parent], secondRevisions: [head])
+        context.allFilesExist = true
+        context.supportLinePatching = true
+        context.canCherryPick = true
+        context.canShowInFileTree = true
+        context.canFilterInGrid = true
+        context.canUseGrep = true
+        context.firstToSelectedEnabled = true
+        context.resetFirstDescription = "aaaaaaa: parent"
+        context.resetSecondDescription = "bbbbbbb: head"
+        let menu = ChangedFileContextMenuBuilder.build(context)
 
         expect(menu.entry(id: "file.stage") == nil && menu.entry(id: "file.unstage") == nil, "files: historical revision has no stage commands")
         expect(menu.entry(id: "file.reset")?.isEnabled == true, "files: tracked revision file can be reset")
+        expect(menu.entry(id: "file.reset.second") != nil && menu.entry(id: "file.reset.first") != nil, "files: reset to either side of a real pair")
         expect(menu.entry(id: "file.cherryPick")?.isEnabled == true, "files: single revision file supports a patch")
         expect(menu.entry(id: "file.open.revision")?.isEnabled == true, "files: historical blob can be opened")
+        expect(menu.entry(id: "file.save")?.isEnabled == true, "files: historical blob can be saved")
+        expect(menu.entry(id: "file.showFileTree")?.isEnabled == true, "files: tracked file can be shown in the File tree")
         expect(menu.entry(id: "file.ignore.gitignore") == nil, "files: historical revision has no worktree ignore commands")
         expect(menu.entry(id: "file.delete") == nil, "files: historical revision cannot delete the working file")
+        expect(menu.entry(id: "file.history")?.isEnabled == false && menu.entry(id: "file.blame")?.isEnabled == false,
+               "files: File History and Blame stay truthfully disabled")
+        expect(menu.entry(id: "file.edit.local")?.isEnabled == true, "files: an existing working file opens in FormEditor")
+        expect(menu.entry(id: "file.findCommit")?.isEnabled == true, "files: git-grep is bound in Browse")
+
+
+        let plain = ChangedFileContextMenuBuilder.build(ChangedFileContextMenuContext(selectedFiles: [file]))
+        expect(plain.entry(id: "file.cherryPick") == nil && plain.entry(id: "file.showFileTree") == nil
+               && plain.entry(id: "file.filterGrid") == nil && plain.entry(id: "file.findCommit") == nil,
+               "files: unbound lists omit bound commands")
     }
 
     private static func testMultipleHistoricalFiles() {
-        let menu = ChangedFileContextMenuBuilder.build(.init(
-            selectedFiles: [changedFile("one", type: .modified), changedFile("two", type: .added)],
-            scope: .revision,
-            allFilesExist: true
-        ))
+        let head = RevisionID.object(try! ObjectID.parse(String(repeating: "b", count: 40)))
+        let parent = RevisionID.object(try! ObjectID.parse(String(repeating: "a", count: 40)))
+        var context = ChangedFileContextMenuContext(selectedFiles: [changedFile("one", type: .modified), changedFile("two", type: .added)],
+                                                    firstRevisions: [parent, parent], secondRevisions: [head, head])
+        context.allFilesExist = true
+        context.canCherryPick = true
+        context.supportLinePatching = true
+        context.canFilterInGrid = true
+        let menu = ChangedFileContextMenuBuilder.build(context)
 
         expect(menu.entry(id: "file.cherryPick") == nil, "files: patch command requires one file")
         expect(menu.entry(id: "file.open.local") == nil && menu.entry(id: "file.open.revision") == nil, "files: open commands require one file")
         expect(menu.entry(id: "file.move") == nil, "files: move requires one tracked file")
-        expect(menu.entry(id: "file.history")?.isEnabled == false, "files: multi-file history remains present but disabled")
+        expect(menu.entry(id: "file.save")?.isEnabled == true, "files: several files can be saved to a folder")
+        expect(menu.entry(id: "file.filterGrid")?.isEnabled == false, "files: filtering needs one file or a folder")
+        expect(menu.entry(id: "file.difftool.menu")?.children.contains { $0.id == "file.difftool.twoSelected" } == true,
+               "files: two files can be diffed with each other")
     }
 
     private static func testWorktreeFileCommands() {
-        let menu = ChangedFileContextMenuBuilder.build(.init(
-            selectedFiles: [changedFile("source", type: .modified)],
-            scope: .workingTree,
-            allFilesExist: true
-        ))
+        var file = changedFile("source", type: .modified)
+        file.staged = .workTree
+        var context = ChangedFileContextMenuContext(selectedFiles: [file], firstRevisions: [.index], secondRevisions: [.workingDirectory])
+        context.allFilesExist = true
+        context.allFilesOrUntrackedDirectoriesExist = true
+        context.canCherryPick = true
+        context.hideToLocal = true
+        let menu = ChangedFileContextMenuBuilder.build(context)
 
         expect(menu.entry(id: "file.stage")?.isEnabled == true, "files: worktree file can be staged")
+        expect(menu.entry(id: "file.unstage") == nil, "files: worktree file has no unstage command")
+        expect(menu.entry(id: "file.reset")?.isEnabled == true && menu.entry(id: "file.reset.first") != nil
+               && menu.entry(id: "file.reset.second") == nil, "files: worktree resets only to the index (First)")
         expect(menu.entry(id: "file.resetChunk")?.isEnabled == true, "files: worktree file supports interactive reset")
-        expect(menu.entry(id: "file.ignore.gitignore")?.isEnabled == true, "files: worktree file exposes ignore commands")
+        expect(menu.entry(id: "file.ignore.gitignore")?.isEnabled == true && menu.entry(id: "file.ignore.exclude")?.isEnabled == true,
+               "files: worktree file can be added to .gitignore / .git/info/exclude")
+        expect(menu.entry(id: "file.skipWorktree")?.isEnabled == true, "files: tracked worktree file can skip the worktree")
         expect(menu.entry(id: "file.delete")?.isEnabled == true, "files: existing worktree file can be deleted")
-        expect(menu.entry(id: "file.open.revision") == nil, "files: worktree file has no historical temp-file command")
+        expect(menu.entry(id: "file.open.revision") == nil && menu.entry(id: "file.save") == nil,
+               "files: worktree file has no historical temp-file or save command")
         expect(menu.entry(id: "file.cherryPick") == nil, "files: worktree changes are not cherry-picked from themselves")
+        expect(menu.entry(id: "file.difftool.menu")?.children.contains { $0.id == "file.difftool.selectedToLocal" } == false,
+               "files: Worktree <- Index hides the To-local difftool items")
     }
 
     private static func item(_ id: String) -> ContextMenuEntry {

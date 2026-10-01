@@ -68,7 +68,10 @@ enum CommitWorkflowDialog {
         owner: NSWindow,
         onManageRemotes: ((String?, String?) -> Void)? = nil,
         onDifftool: ((Commit, ChangedFile) -> Void)? = nil,
+        onBlame: ((ChangedFile, NSWindow) -> Void)? = nil,
+        onFileHistory: ((ChangedFile, NSWindow) -> Void)? = nil,
         scriptHooks: ApplicationScriptHooks? = nil,
+        onEditIgnoredFiles: ((Bool, NSWindow, @escaping () -> Void) -> Void)? = nil,
         onRepositoryChanged: @escaping (RevisionID?) -> Void,
         onClose: @escaping () -> Void
     ) -> NSWindowController {
@@ -84,6 +87,9 @@ enum CommitWorkflowDialog {
             onRepositoryChanged: onRepositoryChanged
         )
         controller.scriptHooks = scriptHooks
+        controller.onEditIgnoredFiles = onEditIgnoredFiles
+        controller.onBlame = onBlame
+        controller.onFileHistory = onFileHistory
         let commitWindow = NSWindow(contentViewController: controller)
         commitWindow.title = "Commit"
         commitWindow.styleMask = [.titled, .closable, .miniaturizable, .resizable]
@@ -122,6 +128,10 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
 
     weak var commitWindow: NSWindow?
     var onClose: (() -> Void)?
+
+    var onEditIgnoredFiles: ((Bool, NSWindow, @escaping () -> Void) -> Void)?
+    var onBlame: ((ChangedFile, NSWindow) -> Void)?
+    var onFileHistory: ((ChangedFile, NSWindow) -> Void)?
 
     private let source: any RepositoryCommitWorkflowDataSource
     private let pushSource: (any RepositoryPushingDataSource)?
@@ -266,6 +276,18 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
             let table = !unstagedTable.selectedRowIndexes.isEmpty ? unstagedTable : stagedTable
             loadSelectedDiff(from: table)
         }
+        if onBlame != nil {
+            commitDiffView.onBlame = { [weak self] file in
+                guard let self, head?.objectID != nil, let commitWindow else { return }
+                onBlame?(file, commitWindow)
+            }
+            commitDiffView.blameAllowed = { [weak self] in self?.head?.objectID != nil }
+        }
+        commitDiffView.onFileHistory = { [weak self] file in
+            guard let self, let commitWindow else { return }
+            onFileHistory?(file, commitWindow)
+        }
+        commitDiffView.historyAllowed = { [weak self] in self?.onFileHistory != nil }
         if onDifftool != nil {
             commitDiffView.onDifftool = { [weak self] file, direction in
                 guard let self, let context = repositoryContext,
@@ -1105,13 +1127,13 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
     }
 
     private func persistFileListPreferences() {
-        settings.saveFileStatusListPreferences(FileStatusListPreferences(
-            grouping: fileGroupingMode,
-            isTreeMode: fileTreeMode,
-            usesDenseTree: usesDenseTree,
-            showsGroupNodesInFlatList: showsGroupNodesInFlatList,
-            showsUntrackedFiles: showsUntrackedFiles
-        ))
+        var preferences = settings.fileStatusListPreferences
+        preferences.grouping = fileGroupingMode
+        preferences.isTreeMode = fileTreeMode
+        preferences.usesDenseTree = usesDenseTree
+        preferences.showsGroupNodesInFlatList = showsGroupNodesInFlatList
+        preferences.showsUntrackedFiles = showsUntrackedFiles
+        settings.saveFileStatusListPreferences(preferences)
     }
 
     private func updateFileGroupingControls() {
@@ -1171,18 +1193,10 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
         view.window?.makeFirstResponder(unstagedTable.selectedRow >= 0 ? unstagedFilter : stagedFilter)
     }
 
+
     @objc private func editIgnoredFiles(_ sender: NSMenuItem) {
-        guard let repository = repositoryContext?.repository else {
-            status.stringValue = "Repository information is not available."
-            return
-        }
-        let url = sender.tag == 1
-            ? URL(fileURLWithPath: repository.path).appendingPathComponent(".git/info/exclude")
-            : URL(fileURLWithPath: repository.path).appendingPathComponent(".gitignore")
-        if !FileManager.default.fileExists(atPath: url.path) {
-            FileManager.default.createFile(atPath: url.path, contents: Data())
-        }
-        NSWorkspace.shared.open(url)
+        guard let window = view.window else { return }
+        onEditIgnoredFiles?(sender.tag == 1, window) { [weak self] in self?.reloadChanges(preserveMessage: true) }
     }
 
     @objc private func toggleRefreshOnFocus(_ sender: NSMenuItem) {
@@ -1336,6 +1350,16 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
         copy.representedObject = files.map(\.path)
         copy.isEnabled = !files.isEmpty
         menu.addItem(copy)
+        let blame = NSMenuItem(title: "Blame", action: #selector(blameContextFile(_:)), keyEquivalent: "b")
+        blame.keyEquivalentModifierMask = []
+        blame.target = self
+        blame.representedObject = files.first
+        blame.isEnabled = onBlame != nil && head?.objectID != nil && files.count == 1 && files.first?.isTracked == true && files.first?.isSubmodule != true
+        menu.addItem(blame)
+        let history = NSMenuItem(title: "File history", action: #selector(historyContextFile(_:)), keyEquivalent: "h")
+        history.keyEquivalentModifierMask = []; history.target = self; history.representedObject = files.first
+        history.isEnabled = onFileHistory != nil && files.count == 1 && files.first?.isTracked == true
+        menu.addItem(history)
         menu.addItem(.separator())
         let refresh = NSMenuItem(title: "Refresh", action: #selector(refreshChanges), keyEquivalent: "")
         refresh.target = self
@@ -1347,6 +1371,16 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
         guard let path = sender.representedObject as? String,
               let repository = repositoryContext?.repository else { return }
         NSWorkspace.shared.open(URL(fileURLWithPath: repository.path).appendingPathComponent(path))
+    }
+
+    @objc private func historyContextFile(_ sender: NSMenuItem) {
+        guard let file = sender.representedObject as? ChangedFile, let commitWindow else { return }
+        onFileHistory?(file, commitWindow)
+    }
+
+    @objc private func blameContextFile(_ sender: NSMenuItem) {
+        guard let file = sender.representedObject as? ChangedFile, let commitWindow else { return }
+        onBlame?(file, commitWindow)
     }
 
     @objc private func revealContextFile(_ sender: NSMenuItem) {
@@ -1743,9 +1777,11 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
                 let wasAmend = currentCommitMode != .normal
                 let hooks = scriptHooks
                 let scriptContext = scriptFileContext
-                let result = try await source.commit(request, beforeExecution: {
-                    guard await hooks?.runWithOptions(.beforeCommit, options: scriptContext) != false else { throw CancellationError() }
-                })
+                let result = try await OutputHistoryRecording.perform {
+                    try await source.commit(request, beforeExecution: {
+                        guard await hooks?.runWithOptions(.beforeCommit, options: scriptContext) != false else { throw CancellationError() }
+                    })
+                }
                 onRepositoryChanged(result.selectedCommitID)
                 _ = await scriptHooks?.runWithOptions(.afterCommit, options: scriptContext)
                 let repositoryState = try await source.loadRepositoryState()
@@ -2407,7 +2443,7 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
 }
 
 @MainActor
-private final class CommitDiffView: NSView, NSTableViewDataSource, NSTableViewDelegate {
+private final class CommitDiffView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSMenuItemValidation {
     var scriptLineNumber: Int {
         let row = tableView.selectedRow >= 0 ? tableView.selectedRow : caretRow
         guard presentations.indices.contains(row) else { return 1 }
@@ -2431,6 +2467,10 @@ private final class CommitDiffView: NSView, NSTableViewDataSource, NSTableViewDe
     var onAddSelectedText: ((String) -> Void)?
     var onOptionsChanged: (() -> Void)?
     var onDifftool: ((ChangedFile, RepositoryHunkDirection) -> Void)?
+    var onBlame: ((ChangedFile) -> Void)?
+    var onFileHistory: ((ChangedFile) -> Void)?
+    var historyAllowed: () -> Bool = { false }
+    var blameAllowed: () -> Bool = { false }
     var focusView: NSView { tableView }
     var diffOptions: FileDiffOptions { preferences.diffOptions }
 
@@ -2497,6 +2537,12 @@ private final class CommitDiffView: NSView, NSTableViewDataSource, NSTableViewDe
         let addToMessage = NSMenuItem(title: "Add selection to commit message", action: #selector(addSelectedText), keyEquivalent: "")
         addToMessage.target = self
         menu.addItem(addToMessage)
+        menu.addItem(.separator())
+        let blame = NSMenuItem(title: "Show blame", action: #selector(showBlame), keyEquivalent: "")
+        blame.target = self
+        menu.addItem(blame)
+        let history = NSMenuItem(title: "Show file history", action: #selector(showFileHistory), keyEquivalent: "")
+        history.target = self; menu.addItem(history)
         tableView.menu = menu
 
         let scrollView = NSScrollView()
@@ -2543,6 +2589,17 @@ private final class CommitDiffView: NSView, NSTableViewDataSource, NSTableViewDe
         tableView.menu?.items.first?.title = direction == .stage ? "Stage selected line(s)" : "Unstage selected line(s)"
         tableView.menu?.items[1].title = direction == .stage ? "Stage selected hunk" : "Unstage selected hunk"
     }
+
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(showFileHistory) { return historyAllowed() && file?.isTracked == true }
+        if menuItem.action == #selector(showBlame) {
+            return onBlame != nil && blameAllowed() && file?.isTracked == true && file?.isSubmodule != true
+        }
+        return true
+    }
+
+    @objc private func showBlame() { if let file { onBlame?(file) } }
+    @objc private func showFileHistory() { if let file { onFileHistory?(file) } }
 
     func currentSelection(lineID: String, direction: RepositoryHunkDirection) -> RepositoryHunkSelection? {
         guard patchingAllowed, self.direction == direction, let file, let diff else { return nil }

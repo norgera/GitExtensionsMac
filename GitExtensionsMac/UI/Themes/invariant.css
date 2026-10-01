@@ -1,8 +1,8 @@
-/* See (App install)\Themes\README.md for instructions on how to create or modify a theme */
-/* IMPORTANT: DO NOT MODIFY THIS FILE! */
 
-/* System colors cannot be overridden */
-/* These Windows default values are required to adjust invariant (hardcoded) colors for themes */
+
+
+
+
 .ActiveBorder            { color: #b4b4b4; }
 .ActiveCaption           { color: #99b4d1; }
 .ActiveCaptionText       { color: #000000; }
@@ -37,7 +37,7 @@
 .WindowFrame             { color: #646464; }
 .WindowText              { color: #000000; }
 
-/* Application colors */
+
 .PanelBackground { color: #ffffff; }
 .EditorBackground { color: #ffffff; }
 .LineNumberBackground { color: #ffffff; }
@@ -53,7 +53,7 @@
 .GraphBranch5 { color: #dd3228; }
 .GraphBranch6 { color: #1ac6a6; }
 .GraphBranch7 { color: #e7b00f; }
-.GraphBranch8 { } /* color not specified, color slot will not be used */
+.GraphBranch8 { }
 .GraphNonRelativeBranch { color: #d3d3d3; }
 
 .Branch { color: #008000; }
@@ -63,8 +63,8 @@
 .OtherTag { color: #808080; }
 .DiffSection { color: #e6e6e6; }
 
-/* translation of terminal (cli) ansi color output sequences */
-/* Partly based on 3/4 bit colors from the "theme" at https://github.com/mintty/mintty/blob/master/themes/helmholtz */
+
+
 
 .AnsiTerminalBlackForeNormal { color: #000000; }
 .AnsiTerminalBlackBackNormal { color: #606060; }

@@ -67,7 +67,7 @@ enum GitPullTests {
             )
             throw PullFixtureError("command builder: Pull accepted [ All ]")
         } catch RepositoryPullError.allRemotesRequireFetch {
-            // Expected.
+
         }
     }
 
@@ -532,7 +532,7 @@ enum GitPullTests {
             _ = try await task.value
             throw PullFixtureError("cancellation: cancelled streaming command completed")
         } catch is CancellationError {
-            // Expected.
+
         }
         let observedCancellation = await runner.observedCancellation
         try require(observedCancellation, "cancellation: the runner observed cooperative cancellation")
@@ -556,7 +556,7 @@ enum GitPullTests {
             _ = try await task.value
             throw PullFixtureError("cancellation: the real child process completed")
         } catch is CancellationError {
-            // Expected.
+
         }
         try require(Date().timeIntervalSince(started) < 2, "cancellation: the real child process is terminated promptly")
     }

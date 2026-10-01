@@ -222,6 +222,9 @@ enum TagDialogs {
             stack.bottomAnchor.constraint(equalTo: view.bottomAnchor),
             view.widthAnchor.constraint(greaterThanOrEqualToConstant: minimumWidth)
         ])
+
+        view.setFrameSize(view.fittingSize)
+        view.layoutSubtreeIfNeeded()
         return view
     }
 

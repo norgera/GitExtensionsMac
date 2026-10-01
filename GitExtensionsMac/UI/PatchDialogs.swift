@@ -8,6 +8,7 @@ enum PatchDialogMode { case format, apply, view }
 final class PatchWindowController: NSWindowController, NSWindowDelegate {
     private let content: PatchViewController
     private let closed: () -> Void
+    var onViewRevisions: (([Commit]) -> Void)? { didSet { content.onViewRevisions = onViewRevisions } }
 
     init(mode: PatchDialogMode, source: (any RepositoryPatchingDataSource)?, revisions: [Commit],
          selected: [RevisionID], currentBranch: String? = nil, initialFile: URL? = nil, viewPatch: @escaping (URL) -> Void, changed: @escaping () -> Void,
@@ -33,6 +34,7 @@ final class PatchWindowController: NSWindowController, NSWindowDelegate {
 
 @MainActor
 private final class PatchViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate {
+    var onViewRevisions: (([Commit]) -> Void)? { didSet { revisionGrid.onViewSelected = onViewRevisions } }
     let mode: PatchDialogMode
     let source: (any RepositoryPatchingDataSource)?
     let revisions: [Commit]
@@ -372,9 +374,11 @@ private final class PatchViewController: NSViewController, NSTableViewDataSource
         completedApply = false
         operation = Task {
             do {
-                let result = try await action { [weak self] event in
-                    Task { @MainActor in self?.transcript.textStorage?.append(NSAttributedString(string: event.text,
-                        attributes: [.foregroundColor: NSColor.textColor, .font: AppSettingsStore.shared.fontPreferences.font(.monospace, fallback: .monospacedSystemFont(ofSize: 11, weight: .regular))])) }
+                let result = try await OutputHistoryRecording.perform {
+                    try await action { [weak self] event in
+                        Task { @MainActor in self?.transcript.textStorage?.append(NSAttributedString(string: event.text,
+                            attributes: [.foregroundColor: NSColor.textColor, .font: AppSettingsStore.shared.fontPreferences.font(.monospace, fallback: .monospacedSystemFont(ofSize: 11, weight: .regular))])) }
+                    }
                 }
                 patchState = result.state
                 refreshSeries()

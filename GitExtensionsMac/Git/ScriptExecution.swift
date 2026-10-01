@@ -235,15 +235,7 @@ package enum ScriptExecution {
             let invocation = ScriptInvocation(executable: try executable("pwsh", directory: directory, environment: environment),
                 arguments: shellArguments, workingDirectory: directory, environment: environment)
             if script.runInBackground { return invocation }
-            let file = FileManager.default.temporaryDirectory.appendingPathComponent("GitExtensions-Script-\(UUID()).command")
-            func quote(_ value: String) -> String { expand("{{value}}", options: ["value": [value]]) }
-            let exports = environment.sorted(by: { $0.key < $1.key }).map { quote($0.key + "=" + $0.value) }
-            let launch = (["/usr/bin/env"] + exports + [quote(invocation.executable.path)] + invocation.arguments.map(quote)).joined(separator: " ")
-            let contents = "#!/bin/sh\n/bin/rm -f -- \"$0\"\ncd -- \(quote(directory.path)) || exit\nexec \(launch)\n"
-            guard FileManager.default.createFile(atPath: file.path, contents: Data(contents.utf8), attributes: [.posixPermissions: 0o700]) else {
-                throw CocoaError(.fileWriteUnknown)
-            }
-            return ScriptInvocation(executable: URL(fileURLWithPath: "/usr/bin/open"), arguments: ["-a", "Terminal", file.path], workingDirectory: directory, environment: environment)
+            return try terminalInvocation(executable: invocation.executable, arguments: invocation.arguments, directory: directory, environment: environment)
         }
         let args = try arguments(expandedArguments)
         if command.hasPrefix("navigateTo:") { command = String(command.dropFirst("navigateTo:".count)) }
@@ -251,6 +243,20 @@ package enum ScriptExecution {
             throw ScriptExecutionError.unsupportedCommand(command)
         }
         return ScriptInvocation(executable: try executable(command, directory: directory, environment: environment), arguments: args, workingDirectory: directory, environment: environment)
+    }
+
+
+    package static func terminalInvocation(executable: URL, arguments: [String], directory: URL,
+                                           environment: [String: String] = [:]) throws -> ScriptInvocation {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("GitExtensions-Script-\(UUID()).command")
+        func quote(_ value: String) -> String { expand("{{value}}", options: ["value": [value]]) }
+        let exports = environment.sorted(by: { $0.key < $1.key }).map { quote($0.key + "=" + $0.value) }
+        let launch = (["/usr/bin/env"] + exports + [quote(executable.path)] + arguments.map(quote)).joined(separator: " ")
+        let contents = "#!/bin/sh\n/bin/rm -f -- \"$0\"\ncd -- \(quote(directory.path)) || exit\nexec \(launch)\n"
+        guard FileManager.default.createFile(atPath: file.path, contents: Data(contents.utf8), attributes: [.posixPermissions: 0o700]) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        return ScriptInvocation(executable: URL(fileURLWithPath: "/usr/bin/open"), arguments: ["-a", "Terminal", file.path], workingDirectory: directory, environment: environment)
     }
 
     private static func executable(_ command: String, directory: URL, environment: [String: String]) throws -> URL {
@@ -285,9 +291,28 @@ package enum ScriptExecution {
     }
 
     package static func run(_ invocation: ScriptInvocation, output: @escaping GitOutputHandler) async throws -> GitCommandResult {
-        try await GitProcess(executableURL: invocation.executable).runStreaming(
-            arguments: invocation.arguments, in: invocation.workingDirectory,
-            standardInput: nil, environment: invocation.environment, output: output)
+        let process = GitProcess(executableURL: invocation.executable)
+
+
+        guard ProcessOutputHistory.recordsOutput else {
+            return try await process.runStreaming(arguments: invocation.arguments, in: invocation.workingDirectory,
+                standardInput: nil, environment: invocation.environment, output: output)
+        }
+        let id = CommandLog.shared.startProcess(executable: invocation.executable, arguments: invocation.arguments,
+            directory: invocation.workingDirectory, environment: invocation.environment)
+        do {
+            let result = try await CommandLogContext.entryID.withValue(id) {
+                try await process.runStreaming(arguments: invocation.arguments, in: invocation.workingDirectory,
+                    standardInput: nil, environment: invocation.environment, output: { event in
+                        CommandLog.shared.appendOutput(id, event: event); output(event)
+                    })
+            }
+            CommandLog.shared.finish(id, result: result)
+            return result
+        } catch {
+            CommandLog.shared.finish(id, cancelled: error is CancellationError, errorDescription: error.localizedDescription)
+            throw error
+        }
     }
 
     package static func startBackground(_ invocation: ScriptInvocation) async throws -> ScriptExecutionOutcome {

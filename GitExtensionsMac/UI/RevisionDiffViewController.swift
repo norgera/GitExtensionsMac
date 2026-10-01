@@ -2,29 +2,73 @@ import GitExtensionsCore
 import GitCommands
 import AppKit
 
+
 final class RevisionDiffViewController: RetainingSplitViewController {
-    var onScript: ((ScriptDefinition) -> Void)?
-    var onFileMutation: ((String, [ChangedFile], ChangedFileSelectionScope) -> Void)?
+    let mode: FileStatusListMode
+    var onScript: ((ScriptDefinition) -> Void)? { didSet { filesController.onScript = onScript } }
     var onHunkMutation: ((RepositoryHunkSelection) -> Void)?
-    var diffProvider: (@Sendable (Commit, ChangedFile, FileDiffOptions) async throws -> FileDiff?)?
-    var onFileCommand: ((String, Commit, ChangedFile) -> Void)?
+
+    var onFileCommand: ((String, FileStatusListItem) -> Void)?
+
+    var onCommand: ((FileStatusListCommand) -> Void)?
+
+    var onRefreshArtificial: (() -> Void)?
+    var fileStatusSource: (any RepositoryFileStatusDataSource)?
+    var blameSource: (any RepositoryBlameDataSource)? { didSet { blameController.source = blameSource; filesController.canBlame = blameSource != nil } }
+    var blameContext: BlameViewController.Context? { didSet { blameController.context = blameContext } }
+    var onBlameInFileTree: ((String, Int?) -> Void)?
+    var onFileHistory: ((String, RevisionID?) -> Void)? {
+        didSet { filesController.canFileHistory = onFileHistory != nil }
+    }
+
+    var contentProvider: (@Sendable (Commit, RepositoryFileEntry, RepositoryTextEncoding) async throws -> RepositoryFileContent)?
+    var treeEntriesProvider: (@Sendable (Commit) async throws -> [RepositoryFileEntry])?
+    var describe: @Sendable (ObjectID) -> String = { $0.shortString }
+    var isBareRepository = false { didSet { filesController.isBareRepository = isBareRepository } }
+    var repositoryURL: URL? { didSet { filesController.repositoryURL = repositoryURL } }
+    var diffTools: [String] { get { filesController.diffTools } set { filesController.diffTools = newValue } }
+    var parentsOf: (RevisionID) -> [RevisionID] { get { filesController.parentsOf } set { filesController.parentsOf = newValue } }
+    var supportsContinuousFileNavigation = false { didSet { updateContinuousNavigation() } }
+    private var scrollNextFileToBottom = false
+
+    var fallbackFollowedFile: String? {
+        didSet { lastExplicitlySelectedPath = nil }
+    }
     private static let collapsedFilePaneThickness: CGFloat = 1
     private static let collapsedDiffPaneThickness: CGFloat = 1
 
-    private let filesController = ChangedFilesViewController()
+    let filesController: ChangedFilesViewController
+    private let fileListSplit = RetainingSplitViewController(resizeBehavior: .fixedTrailingPane)
+    private let outputReservation = NSViewController()
+    private lazy var outputReservationItem = NSSplitViewItem(viewController: outputReservation)
+    private var reservedOutputHeight: CGFloat = 0
+    private var reservedOutputLength: CGFloat = 0
+    private let viewerContainer = NSViewController()
     private let diffController = DiffContentViewController()
-    private var diffsByFile: [String: FileDiff] = [:]
-    private var currentCommit: Commit?
-    private var selectedFileID: String?
+    private let fileContentController = RevisionFileContentViewController()
+    let blameController = BlameViewController()
+    private var requestedBlameLine: Int?
+    private var selectedBlamePath: String?
+    var requestsBlameForFollowedFile = false
+    private var revisions: [Commit] = []
+    private var headID: ObjectID?
+    private var shownItem: FileStatusListItem?
+    private var shownDiff: FileDiff?
     private var diffTask: Task<Void, Never>?
+    private var setDiffsTask: Task<Void, Never>?
+    private var treeEntries: (commit: RevisionID, entries: [String: RepositoryFileEntry])?
+    private var lastExplicitlySelectedPath: String?
+    private var isImplicitSelection = false
     private var didSetInitialDivider = false
 
     var scriptFileContext: [String: [String]] {
         ["SelectedRelativePaths": filesController.currentlySelectedFiles().map(\.path),
-         "LineNumber": [String(diffController.scriptLineNumber)], "ColumnNumber": ["1"]]
+         "LineNumber": [String(filesController.isBlameShown ? blameController.currentFileLine : diffController.scriptLineNumber)], "ColumnNumber": ["1"]]
     }
 
-    init() {
+    init(mode: FileStatusListMode = .diff) {
+        self.mode = mode
+        filesController = ChangedFilesViewController(mode: mode)
         super.init(resizeBehavior: .fixedLeadingPane)
     }
 
@@ -32,6 +76,18 @@ final class RevisionDiffViewController: RetainingSplitViewController {
 
     deinit {
         diffTask?.cancel()
+        setDiffsTask?.cancel()
+    }
+
+    func reserveOutputHistoryPanel(height: CGFloat) {
+        guard isViewLoaded else { return }
+        let height = max(0, height)
+        let length = fileListSplit.primaryLength
+        guard abs(height - reservedOutputHeight) > 0.5 || abs(length - reservedOutputLength) > 0.5 else { return }
+        reservedOutputHeight = height
+        reservedOutputLength = length
+        fileListSplit.setCollapsed(height == 0, for: outputReservationItem)
+        if height > 0 { fileListSplit.setRetainedPosition(max(0, length - height - fileListSplit.splitView.dividerThickness)) }
     }
 
     override func viewDidLoad() {
@@ -39,81 +95,93 @@ final class RevisionDiffViewController: RetainingSplitViewController {
         splitView.isVertical = true
         splitView.dividerStyle = .paneSplitter
 
-        let filesItem = NSSplitViewItem(viewController: filesController)
+        fileListSplit.splitView.isVertical = false
+        fileListSplit.splitView.dividerStyle = .paneSplitter
+        fileListSplit.addSplitViewItem(NSSplitViewItem(viewController: filesController))
+        outputReservation.view = NSView()
+        outputReservationItem.minimumThickness = 0
+        fileListSplit.addSplitViewItem(outputReservationItem)
+        fileListSplit.setCollapsed(true, for: outputReservationItem)
+        let filesItem = NSSplitViewItem(viewController: fileListSplit)
         filesItem.minimumThickness = Self.collapsedFilePaneThickness
         filesItem.preferredThicknessFraction = 300.0 / 850.0
         filesItem.holdingPriority = NSLayoutConstraint.Priority(rawValue: 260)
         addSplitViewItem(filesItem)
 
-        let diffItem = NSSplitViewItem(viewController: diffController)
+
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 600, height: 400))
+        viewerContainer.view = container
+        for child in [diffController, fileContentController, blameController] as [NSViewController] {
+            viewerContainer.addChild(child)
+            child.view.translatesAutoresizingMaskIntoConstraints = false
+            container.addSubview(child.view)
+            NSLayoutConstraint.activate([
+                child.view.topAnchor.constraint(equalTo: container.topAnchor),
+                child.view.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+                child.view.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+                child.view.bottomAnchor.constraint(equalTo: container.bottomAnchor)
+            ])
+        }
+        fileContentController.view.isHidden = true
+        blameController.view.isHidden = true
+        fileContentController.onBlame = { [weak self] in self?.toggleBlame() }
+        let diffItem = NSSplitViewItem(viewController: viewerContainer)
         diffItem.minimumThickness = Self.collapsedDiffPaneThickness
         diffItem.holdingPriority = .defaultLow
         addSplitViewItem(diffItem)
 
-        filesController.onSelection = { [weak self] file in
+
+        if mode == .fileTree { diffController.supportedFileCommands.remove("file.difftool") }
+        filesController.canCherryPick = true
+        filesController.canShowInFileTree = mode == .diff
+        filesController.canFilterInGrid = true
+        filesController.canOpenSubmodule = true
+        filesController.describe = { [weak self] revision in self?.describeRevision(revision) ?? "" }
+        filesController.supportLinePatching = { [weak self] in self?.supportLinePatching ?? false }
+        filesController.currentLineNumber = { [weak self] in
+            guard let self else { return nil }
+            return filesController.isBlameShown ? blameController.currentFileLine : diffController.scriptLineNumber
+        }
+        filesController.onSelectionChanged = { [weak self] items, folder in self?.selectionChanged(items: items, folder: folder) }
+        filesController.onCommand = { [weak self] command in self?.onCommand?(command) }
+        filesController.onRefreshArtificial = { [weak self] in self?.refreshArtificial() }
+        filesController.onRecalculate = { [weak self] in self?.recalculate() }
+        filesController.onDoubleClick = { [weak self] item in
             guard let self else { return }
-            selectedFileID = file.id
-            if let cached = diffsByFile[file.id] {
-                diffController.apply(file: file, diff: cached)
-                return
-            }
-            diffController.apply(file: file, diff: nil)
-            guard let currentCommit, let diffProvider else { return }
-            diffTask?.cancel()
-            diffTask = Task { @MainActor [weak self] in
-                guard let self else { return }
-                do {
-                    let diff = try await diffProvider(currentCommit, file, diffController.diffOptions)
-                    guard !Task.isCancelled,
-                          self.currentCommit?.id == currentCommit.id,
-                          self.selectedFileID == file.id
-                    else { return }
-                    if let diff { self.diffsByFile[file.id] = diff }
-                    self.diffController.apply(file: file, diff: diff)
-                } catch is CancellationError {
-                    return
-                } catch {
-                    guard !Task.isCancelled, self.selectedFileID == file.id else { return }
-                    self.diffController.apply(error: error, file: file)
-                    BrowserCommandCenter.perform(.showStatus(error.localizedDescription))
-                }
+
+            if AppSettingsStore.shared.preferences.openSubmoduleDiffInSeparateWindow && item.file.isSubmodule {
+                onCommand?(FileStatusListCommand(identifier: "file.openSubmodule", items: [item], folder: nil, tool: nil, focused: item, remembered: nil))
+            } else if item.file.isTracked && !item.file.isStatusOnly && !item.file.isRangeDiff {
+                onFileHistory?(item.file.path, item.second)
             }
         }
-        filesController.onScript = { [weak self] in self?.onScript?($0) }
-        filesController.onMutation = { [weak self] identifier, files, scope in
-            self?.onFileMutation?(identifier, files, scope)
-        }
-        filesController.onFileCommand = { [weak self] identifier, file in
-            guard let self, let currentCommit else { return }
-            onFileCommand?(identifier, currentCommit, file)
-        }
-        diffController.onHunkMutation = { [weak self] selection in
-            self?.onHunkMutation?(selection)
-        }
-        diffController.onOptionsChanged = { [weak self] options in
-            guard let self, let currentCommit,
-                  let file = filesController.currentlySelectedFiles().first,
-                  let diffProvider else { return }
-            let selectedID = file.id
-            diffTask?.cancel()
-            diffTask = Task { @MainActor [weak self] in
-                do {
-                    let diff = try await diffProvider(currentCommit, file, options)
-                    guard !Task.isCancelled, self?.currentCommit?.id == currentCommit.id,
-                          self?.selectedFileID == selectedID else { return }
-                    self?.diffController.apply(file: file, diff: diff)
-                } catch is CancellationError {
-                    return
-                } catch {
-                    self?.diffController.apply(error: error, file: file)
-                    BrowserCommandCenter.perform(.showStatus(error.localizedDescription))
-                }
+        diffController.onHunkMutation = { [weak self] selection in self?.onHunkMutation?(selection) }
+        updateContinuousNavigation()
+        diffController.onOptionsChanged = { [weak self] _ in self?.showSelected() }
+        diffController.onFileCommand = { [weak self] identifier, _ in
+            guard let self, let shownItem else { return }
+            if identifier == "file.blame" {
+                toggleBlame()
+            } else if identifier == "file.difftool" {
+
+                filesController.perform("file.difftool")
+            } else {
+                onFileCommand?(identifier, shownItem)
             }
         }
-        diffController.onFileCommand = { [weak self] identifier, file in
-            guard let self, let currentCommit else { return }
-            onFileCommand?(identifier, currentCommit, file)
+        fileContentController.onEncodingChanged = { [weak self] in self?.showSelected() }
+        fileContentController.onFileHistory = { [weak self] in
+            guard let self, let item = shownItem else { return }
+            onFileHistory?(item.file.path, item.second)
         }
+    }
+
+    private func updateContinuousNavigation() {
+        diffController.onScrollBoundary = supportsContinuousFileNavigation ? { [weak self] forward in
+            guard let self else { return }
+            scrollNextFileToBottom = !forward
+            if !filesController.selectAdjacentVisibleFile(forward: forward) { scrollNextFileToBottom = false }
+        } : nil
     }
 
     override func viewDidLayout() {
@@ -123,19 +191,307 @@ final class RevisionDiffViewController: RetainingSplitViewController {
         setRetainedPosition(300)
     }
 
-    func apply(commit: Commit, comparisonCommit: Commit?, files: [ChangedFile], diffsByFile: [String: FileDiff]) {
+
+    func setDiffs(revisions: [Commit], headID: ObjectID?) {
+        _ = view
+        let previous = filesController.selectedFolder
+            ?? filesController.selectedItems().first.flatMap { item in filesController.firstGroupItems.contains(item) ? item.file.path : nil }
+        self.revisions = revisions
+        self.headID = headID
+        filesController.canBlame = blameSource != nil && (headID != nil || revisions.contains { $0.objectID != nil })
+        calculate(preferredPaths: [lastExplicitlySelectedPath, fallbackFollowedFile, previous].compactMap { $0 })
+    }
+
+
+    func refreshArtificial() {
+        guard revisions.contains(where: \.isArtificial) else { return }
+        onRefreshArtificial?()
+        recalculate()
+    }
+
+    private func recalculate() {
+        let previous = filesController.selectedFolder ?? filesController.selectedItems().first?.file.path
+        calculate(preferredPaths: [lastExplicitlySelectedPath, previous].compactMap { $0 })
+    }
+
+    private func calculate(preferredPaths: [String]) {
+        setDiffsTask?.cancel()
         diffTask?.cancel()
-        currentCommit = commit
-        selectedFileID = nil
-        self.diffsByFile = diffsByFile
-        let comparisonTitle = RevisionDiffSummaryResolver.summary(selected: commit, comparison: comparisonCommit)
-        let scope: ChangedFileSelectionScope = switch commit.kind {
-        case .revision: .revision
+        guard let source = fileStatusSource else { return }
+        let preferences = AppSettingsStore.shared.fileStatusListPreferences
+        let grepText = filesController.grepText
+        var request = FileStatusDiffRequest(
+            revisions: revisions, headID: headID, allowMultiDiff: true,
+            showDiffForAllParents: preferences.showDiffForAllParents,
+            showSkipWorktreeFiles: filesController.showsSkipWorktreeFiles,
+            showUntrackedFiles: filesController.showsUntrackedFiles,
+            grepArguments: (try? FileStatusCommands.grepArguments(for: grepText)) ?? [],
+            grepText: grepText,
+            fileTreeMode: mode == .fileTree && grepText.trimmingCharacters(in: .whitespaces).isEmpty)
+        request.grepSettings = preferences.grepOptions
+        request.includeDiffs = mode != .fileTree
+        let describe = describe
+        let revisionIDs = revisions.map(\.id)
+        filesController.isLoading = true
+        setDiffsTask = Task { @MainActor [weak self] in
+            do {
+                let groups = revisionIDs.isEmpty ? [] : try await source.calculateFileStatus(request, describe: describe)
+                guard let self, !Task.isCancelled else { return }
+                isImplicitSelection = true
+                filesController.apply(groups: groups, revisions: revisionIDs, preferredPaths: preferredPaths)
+                isImplicitSelection = false
+                if requestsBlameForFollowedFile, let path = fallbackFollowedFile {
+                    selectFileOrFolder(path, requestBlame: true)
+                }
+
+
+                for group in groups {
+                    for file in group.files where file.isSubmodule {
+                        try Task.checkCancellation()
+                        let status = try? await source.fileStatusSubmodule(group: group, file: file)
+                        try Task.checkCancellation()
+                        if let status { filesController.apply(submodule: status, fileID: group.id + "|" + file.id) }
+                    }
+                }
+            } catch is CancellationError {
+                return
+            } catch {
+                guard let self, !Task.isCancelled else { return }
+                filesController.apply(groups: [], revisions: revisionIDs)
+                BrowserCommandCenter.perform(.showStatus(error.localizedDescription))
+            }
+        }
+    }
+
+
+    func selectFileOrFolder(_ path: String, requestBlame: Bool? = nil, line: Int? = nil) {
+        lastExplicitlySelectedPath = path
+        if let requestBlame { filesController.isBlameShown = requestBlame; selectedBlamePath = path }
+        requestedBlameLine = line
+        if !filesController.selectFileOrFolder(path) { return }
+        filesController.focusList()
+    }
+
+    func focusFileList() { filesController.focusList() }
+
+    func cancelLoads() {
+        diffTask?.cancel()
+        setDiffsTask?.cancel()
+        blameController.cancel()
+    }
+
+    func toggleBlame() {
+        if mode != .fileTree && !AppSettingsStore.shared.blamePreferences.useDiffViewerForBlame {
+            if let folder = filesController.selectedFolder { onBlameInFileTree?(folder, nil); return }
+            guard let item = filesController.focusedItem ?? filesController.selectedItems().first,
+                  item.file.isTracked, item.file.changeType != .deleted else { return }
+            filesController.isBlameShown = false
+            onBlameInFileTree?(item.file.path, diffController.scriptLineNumber)
+            return
+        }
+        guard let item = filesController.focusedItem ?? filesController.selectedItems().first,
+              item.file.isTracked, !item.file.isSubmodule, blameSource != nil else { return }
+        let line = filesController.isBlameShown ? blameController.currentFileLine : diffController.scriptLineNumber
+        if mode == .fileTree || AppSettingsStore.shared.blamePreferences.useDiffViewerForBlame {
+            filesController.isBlameShown.toggle()
+            selectedBlamePath = filesController.isBlameShown ? item.file.path : nil
+            requestedBlameLine = line
+            showSelected()
+        } else {
+            filesController.isBlameShown = false
+            onBlameInFileTree?(item.file.path, line)
+        }
+    }
+
+    private func describeRevision(_ revision: RevisionID?) -> String {
+        switch revision {
+        case .object(let id)?: describe(id)
+        case .workingDirectory?: "Working directory"
+        case .index?: "Commit index"
+        case nil: ""
+        }
+    }
+
+    private func selectionChanged(items: [FileStatusListItem], folder: String?) {
+        if mode != .fileTree, filesController.isBlameShown, let path = items.first?.file.path, path != selectedBlamePath {
+            filesController.isBlameShown = false
+        }
+        if !isImplicitSelection {
+            lastExplicitlySelectedPath = folder ?? items.first.flatMap { $0.file.isRangeDiff ? nil : $0.file.path }
+        }
+        showSelected()
+    }
+
+
+    private func showSelected() {
+        diffTask?.cancel()
+        diffController.supportedFileCommands.remove("file.blame")
+        fileContentController.canBlame = false
+        let items = filesController.selectedItems()
+        if let folder = filesController.selectedFolder {
+            shownItem = nil
+            showText(Self.folderDescription(folder, items: items), title: folder)
+            return
+        }
+        guard let item = filesController.focusedItem ?? items.first else {
+            shownItem = nil
+            shownDiff = nil
+            showDiffViewer()
+            diffController.apply(file: ChangedFile(id: "none", path: "", oldPath: nil, changeType: .modified, additions: 0, deletions: 0),
+                                 diff: FileDiff(id: "none", fileID: "none", lines: []))
+            return
+        }
+        shownItem = item
+        shownDiff = nil
+        let canBlame = blameSource != nil && (item.second.objectID ?? headID) != nil && item.file.isTracked && !item.file.isSubmodule && !item.file.isRangeDiff && !item.file.isStatusOnly
+        if onFileHistory != nil && item.file.isTracked && !item.file.isRangeDiff && !item.file.isStatusOnly { diffController.supportedFileCommands.insert("file.history") }
+        else { diffController.supportedFileCommands.remove("file.history") }
+        if canBlame { diffController.supportedFileCommands.insert("file.blame") }
+        else { diffController.supportedFileCommands.remove("file.blame") }
+        fileContentController.canBlame = canBlame
+        if filesController.isBlameShown, item.file.isTracked, !item.file.isSubmodule,
+           let revision = item.second.objectID ?? headID, blameSource != nil {
+            diffController.view.isHidden = true
+            fileContentController.view.isHidden = true
+            blameController.view.isHidden = false
+            let encoding = AppSettingsStore.shared.fileViewerPreferences.textEncoding
+            blameController.load(revision: revision, file: item.file.path, encoding: encoding, initialLine: requestedBlameLine)
+            requestedBlameLine = nil
+            return
+        }
+
+        let displayOnly = item.group.isGrep || item.group.kind == .range || item.group.kind == .combined
+        diffController.selectionScope = switch item.second {
+        case _ where displayOnly: .revision
         case .workingDirectory: .workingTree
         case .index: .index
+        case .object: .revision
         }
-        diffController.selectionScope = scope
-        filesController.apply(files: files, scope: scope, comparisonTitle: comparisonTitle)
+        if mode == .fileTree && filesController.grepText.isEmpty && !item.file.isStatusOnly {
+            showFileView(item)
+            return
+        }
+        showDiffViewer()
+        diffController.apply(file: item.file, diff: nil)
+        guard let source = fileStatusSource else { return }
+        let options = diffController.diffOptions
+        let grep = AppSettingsStore.shared.fileStatusListPreferences.grepOptions
+        diffTask = Task { @MainActor [weak self] in
+            do {
+                let content = try await source.loadFileStatusDiff(group: item.group, file: item.file, options: options, grep: grep)
+                guard let self, !Task.isCancelled, shownItem == item else { return }
+                switch content {
+                case .diff(let diff):
+                    shownDiff = diff
+                    diffController.apply(file: item.file, diff: diff ?? FileDiff(id: item.file.id, fileID: item.file.id, lines: []))
+                    if scrollNextFileToBottom { diffController.scrollToBottom(); scrollNextFileToBottom = false }
+                case .text(let text):
+                    diffController.apply(file: item.file, diff: Self.textDiff(text, id: item.file.id))
+                }
+            } catch is CancellationError {
+                return
+            } catch {
+                guard let self, !Task.isCancelled, shownItem == item else { return }
+                diffController.apply(error: error, file: item.file)
+            }
+        }
+    }
+
+
+    static func folderDescription(_ folder: String, items: [FileStatusListItem]) -> String {
+        var path = folder
+        var nameStart = path.count
+        if !path.hasSuffix("/") {
+            path += "/"
+            if path.count > 1 { nameStart += 1 }
+        }
+        var lines = ["(\(items.count)) \(path)", ""]
+        lines += items.map { String($0.file.path.dropFirst(min(nameStart, $0.file.path.count))) }
+        return lines.joined(separator: "\n")
+    }
+
+    static func textDiff(_ text: String, id: String) -> FileDiff {
+
+        let lines = text.components(separatedBy: "\n").enumerated().map {
+            DiffLine(id: String($0.offset), oldLineNumber: nil, newLineNumber: nil, kind: .context, text: $0.element)
+        }
+        return FileDiff(id: id, fileID: id, lines: lines)
+    }
+
+    private func showText(_ text: String, title: String) {
+        showDiffViewer()
+        shownDiff = nil
+        let file = ChangedFile(id: "folder:\(title)", path: title, oldPath: nil, changeType: .modified, additions: 0, deletions: 0)
+        diffController.apply(file: file, diff: Self.textDiff(text, id: file.id))
+    }
+
+    private func showDiffViewer() {
+        blameController.cancel()
+        blameController.view.isHidden = true
+        diffController.view.isHidden = false
+        fileContentController.view.isHidden = true
+    }
+
+
+    private func showFileView(_ item: FileStatusListItem) {
+        blameController.cancel()
+        blameController.view.isHidden = true
+        diffController.view.isHidden = true
+        fileContentController.view.isHidden = false
+        guard let commit = revisions.first(where: { $0.id == item.second }), let contentProvider else { return }
+        let path = item.file.path
+        fileContentController.applyRevision(commit)
+        fileContentController.apply(file: nil, selectedPath: path)
+        let encoding = fileContentController.selectedEncoding
+        let treeEntriesProvider = treeEntriesProvider
+        let cached = treeEntries?.commit == commit.id ? treeEntries?.entries : nil
+        diffTask = Task { @MainActor [weak self] in
+            do {
+                var entries = cached
+                if entries == nil, commit.kind != .workingDirectory, let treeEntriesProvider {
+                    let loaded = try await treeEntriesProvider(commit)
+                    entries = Dictionary(loaded.map { ($0.path, $0) }, uniquingKeysWith: { first, _ in first })
+                    self?.treeEntries = (commit.id, entries ?? [:])
+                }
+                let entry = entries?[path] ?? RepositoryFileEntry(path: path, content: "")
+                guard let self, !Task.isCancelled, shownItem == item else { return }
+                fileContentController.apply(file: entry, selectedPath: path)
+                let loaded = try await contentProvider(commit, entry, encoding)
+                guard !Task.isCancelled, shownItem == item else { return }
+                fileContentController.apply(content: loaded, file: entry)
+            } catch is CancellationError {
+                return
+            } catch {
+                guard let self, !Task.isCancelled, shownItem == item else { return }
+                fileContentController.apply(error: error, selectedPath: path)
+            }
+        }
+    }
+
+
+    var supportLinePatching: Bool {
+        guard !isBareRepository, let item = shownItem, let diff = shownDiff else { return false }
+        let hasHunks = diff.lines.contains { $0.kind == .header || $0.text.hasPrefix("@@") }
+        let exists = repositoryURL.map { FileManager.default.fileExists(atPath: $0.appendingPathComponent(item.file.path).path) } ?? false
+        let isNew = item.file.changeType == .added || !item.file.isTracked
+        return (hasHunks && exists) || (isNew && (item.file.staged == .workTree || item.file.staged == .index || !exists))
+    }
+
+    func repositoryChanged() {
+        ChangedFilesViewController.repositoryChanged()
+        treeEntries = nil
+        lastExplicitlySelectedPath = nil
+    }
+}
+
+
+enum RevisionDescription {
+    static func describe(_ commit: Commit) -> String {
+        let prefix = commit.isArtificial ? "" : commit.shortID + ": "
+        let branches = commit.references.filter { $0.kind == .currentBranch || $0.kind == .localBranch }
+            + commit.references.filter { $0.kind == .remoteBranch }
+        let tags = commit.references.filter { $0.kind == .tag }
+        return prefix + ((branches + tags).first?.name ?? commit.subject)
     }
 }
 
@@ -144,591 +500,6 @@ struct ChangedFileSection: Sendable {
     let title: String
     let imageName: String
     let files: [ChangedFile]
-}
-
-private final class FileStatusOutlineView: NSOutlineView {
-    var onShortcut: ((String) -> Void)?
-    override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        if window?.firstResponder === self,
-           let command = ApplicationHotkeys.shared.matching(event, category: "File status list") {
-            onShortcut?(command)
-            return true
-        }
-        return super.performKeyEquivalent(with: event)
-    }
-    override func keyDown(with event: NSEvent) {
-        if let command = ApplicationHotkeys.shared.matching(event, category: "File status list") { onShortcut?(command) }
-        else { super.keyDown(with: event) }
-    }
-}
-
-final class ChangedFilesViewController: NSViewController, NSOutlineViewDelegate, NSOutlineViewDataSource, NSMenuDelegate, NSTextFieldDelegate {
-    var onScript: ((ScriptDefinition) -> Void)?
-    var onSelection: ((ChangedFile) -> Void)?
-    var onMutation: ((String, [ChangedFile], ChangedFileSelectionScope) -> Void)?
-    var onFileCommand: ((String, ChangedFile) -> Void)?
-
-    private let outlineView = FileStatusOutlineView()
-    private let filterField = NSTextField()
-    private let treeModeButton = NSButton()
-    private weak var showUntrackedMenuItem: NSMenuItem?
-    private var groupingButtons: [FileStatusGrouping: NSButton] = [:]
-    private var allFiles: [ChangedFile] = []
-    private var files: [ChangedFile] = []
-    private var explicitSections: [ChangedFileSection]?
-    private var rootNodes: [ChangedFileNode] = []
-    private var selectionScope: ChangedFileSelectionScope = .revision
-    private var comparisonTitle = "Diff with parent"
-    private var isTreeMode = AppSettingsStore.shared.fileStatusListPreferences.isTreeMode
-    private var grouping = AppSettingsStore.shared.fileStatusListPreferences.grouping
-    private var usesDenseTree = AppSettingsStore.shared.fileStatusListPreferences.usesDenseTree
-    private var showsGroupNodesInFlatList = AppSettingsStore.shared.fileStatusListPreferences.showsGroupNodesInFlatList
-    private var showsUntrackedFiles = AppSettingsStore.shared.fileStatusListPreferences.showsUntrackedFiles
-    private weak var viewModeMenu: NSMenu?
-
-    override func loadView() {
-        let root = NSView()
-
-        let toolbar = AppKitFactory.toolbarBackground()
-        toolbar.translatesAutoresizingMaskIntoConstraints = false
-        let stack = NSStackView()
-        stack.orientation = .horizontal
-        stack.spacing = 0
-        stack.alignment = .centerY
-        stack.translatesAutoresizingMaskIntoConstraints = false
-
-        stack.addArrangedSubview(AppKitFactory.resourceButton("CollapseAll", tooltip: "Collapse all groups, otherwise expand the selected group", target: self, action: #selector(toggleGroupExpansion)))
-        stack.addArrangedSubview(AppKitFactory.separator())
-        let refresh = AppKitFactory.resourceButton("ReloadRevisions", tooltip: "Refresh artificial commit", target: self, action: #selector(placeholder(_:)))
-        refresh.isEnabled = false
-        stack.addArrangedSubview(refresh)
-        stack.addArrangedSubview(AppKitFactory.separator())
-
-        let viewMode = NSStackView()
-        viewMode.orientation = .horizontal
-        viewMode.spacing = 0
-        treeModeButton.image = AppKitFactory.resourceImage("FileTree", accessibilityDescription: "Toggle flat list / tree")
-        treeModeButton.imagePosition = .imageOnly
-        treeModeButton.isBordered = false
-        treeModeButton.setButtonType(.pushOnPushOff)
-        treeModeButton.state = isTreeMode ? .on : .off
-        treeModeButton.toolTip = "Toggle flat list / tree"
-        treeModeButton.target = self
-        treeModeButton.action = #selector(toggleTreeMode)
-        treeModeButton.translatesAutoresizingMaskIntoConstraints = false
-        treeModeButton.widthAnchor.constraint(equalToConstant: 22).isActive = true
-        treeModeButton.heightAnchor.constraint(equalToConstant: 22).isActive = true
-        viewMode.addArrangedSubview(treeModeButton)
-        viewMode.addArrangedSubview(makeViewModeMenu())
-        stack.addArrangedSubview(viewMode)
-        stack.addArrangedSubview(AppKitFactory.separator())
-
-        stack.addArrangedSubview(makeGroupingButton(.path, tag: 0, image: "FolderClosed", tooltip: "Group by file path"))
-        stack.addArrangedSubview(makeGroupingButton(.fileExtension, tag: 1, image: "File", tooltip: "Group by file type (extension)"))
-        stack.addArrangedSubview(makeGroupingButton(.status, tag: 2, image: "FileStatusModified", tooltip: "Group by diff status"))
-        stack.addArrangedSubview(AppKitFactory.separator())
-        stack.addArrangedSubview(makeFindMenu())
-        stack.addArrangedSubview(AppKitFactory.separator())
-        stack.addArrangedSubview(makeSettingsMenu())
-        toolbar.addSubview(stack)
-
-        let fileColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("File"))
-        fileColumn.title = "File"
-        fileColumn.minWidth = 140
-        fileColumn.width = 300
-        outlineView.addTableColumn(fileColumn)
-        outlineView.outlineTableColumn = fileColumn
-        outlineView.headerView = nil
-        outlineView.rowHeight = BrowserMetrics.fileRowHeight
-        outlineView.indentationPerLevel = 15
-        outlineView.intercellSpacing = .zero
-        outlineView.delegate = self
-        outlineView.dataSource = self
-        outlineView.allowsEmptySelection = false
-        outlineView.allowsMultipleSelection = true
-        outlineView.selectionHighlightStyle = .regular
-        outlineView.backgroundColor = .controlBackgroundColor
-        outlineView.doubleAction = #selector(openFile)
-        outlineView.target = self
-        outlineView.onShortcut = { [weak self] command in
-            guard let self else { return }
-            let menu = NSMenu()
-            populateFileMenu(menu)
-            guard let item = menuItem(withIdentifier: command, in: menu), item.isEnabled,
-                  let action = item.action else { return }
-            NSApp.sendAction(action, to: item.target, from: item)
-        }
-
-        let menu = NSMenu()
-        menu.delegate = self
-        outlineView.menu = menu
-
-        let scroll = NSScrollView()
-        scroll.documentView = outlineView
-        scroll.hasVerticalScroller = true
-        scroll.hasHorizontalScroller = true
-        scroll.autohidesScrollers = true
-        scroll.borderType = .noBorder
-        scroll.translatesAutoresizingMaskIntoConstraints = false
-
-        filterField.placeholderString = "Filter files using a regular expression..."
-        filterField.font = AppSettingsStore.shared.applicationFont(size: 11)
-        filterField.controlSize = .small
-        filterField.isBezeled = true
-        filterField.isBordered = true
-        filterField.bezelStyle = .squareBezel
-        filterField.focusRingType = .exterior
-        filterField.delegate = self
-        filterField.translatesAutoresizingMaskIntoConstraints = false
-
-        root.addSubview(toolbar)
-        root.addSubview(filterField)
-        root.addSubview(scroll)
-        let toolbarHeight = toolbar.heightAnchor.constraint(equalToConstant: 25)
-        toolbarHeight.priority = .defaultHigh
-        NSLayoutConstraint.activate([
-            toolbar.topAnchor.constraint(equalTo: root.topAnchor),
-            toolbar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            toolbar.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            toolbarHeight,
-            stack.leadingAnchor.constraint(equalTo: toolbar.leadingAnchor, constant: 3),
-            stack.centerYAnchor.constraint(equalTo: toolbar.centerYAnchor),
-            filterField.topAnchor.constraint(equalTo: toolbar.bottomAnchor),
-            filterField.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            filterField.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            filterField.heightAnchor.constraint(equalToConstant: 23),
-            scroll.topAnchor.constraint(equalTo: filterField.bottomAnchor),
-            scroll.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            scroll.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            scroll.bottomAnchor.constraint(equalTo: root.bottomAnchor)
-        ])
-        view = root
-    }
-
-    func apply(files: [ChangedFile], scope: ChangedFileSelectionScope, comparisonTitle: String) {
-        let selectedIDs = selectedFileIDs()
-        allFiles = files
-        explicitSections = nil
-        selectionScope = scope
-        showUntrackedMenuItem?.isEnabled = scope == .workingTree
-        self.comparisonTitle = comparisonTitle
-        reloadFilteredFiles(preferredIDs: selectedIDs)
-    }
-
-    func apply(sections: [ChangedFileSection], scope: ChangedFileSelectionScope) {
-        let selectedIDs = selectedFileIDs()
-        allFiles = sections.flatMap(\.files)
-        selectionScope = scope
-        showUntrackedMenuItem?.isEnabled = scope == .workingTree
-        comparisonTitle = "Changes"
-        explicitSections = sections
-        reloadFilteredFiles(preferredIDs: selectedIDs)
-    }
-
-    func currentlySelectedFiles() -> [ChangedFile] {
-        selectedFiles()
-    }
-
-    func controlTextDidChange(_ obj: Notification) {
-        guard let field = obj.object as? NSTextField, field === filterField else { return }
-        reloadFilteredFiles(preferredIDs: selectedFileIDs())
-    }
-
-    private func reloadFilteredFiles(preferredIDs: Set<String>) {
-        let pattern = filterField.stringValue
-        if pattern.isEmpty {
-            files = allFiles
-            filterField.backgroundColor = .textBackgroundColor
-            filterField.toolTip = nil
-        } else if let expression = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) {
-            files = allFiles.filter { file in
-                let range = NSRange(file.path.startIndex..<file.path.endIndex, in: file.path)
-                return expression.firstMatch(in: file.path, range: range) != nil
-            }
-            filterField.backgroundColor = .textBackgroundColor
-            filterField.toolTip = nil
-        } else {
-            files = allFiles
-            filterField.backgroundColor = NSColor.systemRed.withAlphaComponent(0.16)
-            filterField.toolTip = "The file filter is not a valid regular expression."
-        }
-        if selectionScope == .workingTree, !showsUntrackedFiles {
-            files.removeAll { $0.changeType == .added }
-        }
-
-        rootNodes = makeRootNodes()
-        outlineView.reloadData()
-        if isTreeMode {
-            rootNodes.forEach { outlineView.expandItem($0, expandChildren: true) }
-        }
-
-        var selectedRows = IndexSet()
-        for row in 0..<outlineView.numberOfRows {
-            guard let node = outlineView.item(atRow: row) as? ChangedFileNode,
-                  let file = node.file,
-                  preferredIDs.contains(file.id) else { continue }
-            selectedRows.insert(row)
-        }
-        if selectedRows.isEmpty, let row = firstFileRow() { selectedRows.insert(row) }
-        outlineView.selectRowIndexes(selectedRows, byExtendingSelection: false)
-        if let first = selectedFiles().first {
-            onSelection?(first)
-        }
-    }
-
-    private func makeRootNodes() -> [ChangedFileNode] {
-        if let explicitSections {
-            let visibleIDs = Set(files.map(\.id))
-            return explicitSections.compactMap { section in
-                let sectionFiles = section.files.filter { visibleIDs.contains($0.id) }
-                guard !sectionFiles.isEmpty else { return nil }
-                let children = ChangedFileListTreeBuilder.build(
-                    files: sectionFiles,
-                    grouping: grouping,
-                    isTreeMode: isTreeMode,
-                    usesDenseTree: usesDenseTree,
-                    showsGroupNodesInFlatList: showsGroupNodesInFlatList
-                )
-                return ChangedFileNode(
-                    id: "section:\(section.id)",
-                    title: "(\(sectionFiles.count)) \(section.title)",
-                    imageName: section.imageName,
-                    children: children
-                )
-            }
-        }
-        let leaves = ChangedFileListTreeBuilder.build(
-            files: files,
-            grouping: grouping,
-            isTreeMode: isTreeMode,
-            usesDenseTree: usesDenseTree,
-            showsGroupNodesInFlatList: showsGroupNodesInFlatList
-        )
-        guard isTreeMode else { return leaves }
-        guard !leaves.isEmpty else { return [] }
-        let title = "(\(files.count)) \(comparisonTitle)"
-        return [ChangedFileNode(id: "diff-root", title: title, imageName: "Diff", children: leaves)]
-    }
-
-    func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
-        (item as? ChangedFileNode)?.children.count ?? rootNodes.count
-    }
-
-    func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
-        (item as? ChangedFileNode)?.children[index] ?? rootNodes[index]
-    }
-
-    func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool {
-        guard let node = item as? ChangedFileNode else { return false }
-        return !node.children.isEmpty
-    }
-
-    func outlineView(_ outlineView: NSOutlineView, rowViewForItem item: Any) -> NSTableRowView? {
-        GitExtensionsSelectionRowView()
-    }
-
-    func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
-        guard let node = item as? ChangedFileNode else { return nil }
-        guard let identifier = tableColumn?.identifier else { return nil }
-        let cell = (outlineView.makeView(withIdentifier: identifier, owner: self) as? ChangedFileCellView) ?? ChangedFileCellView()
-        cell.identifier = identifier
-        cell.apply(node: node)
-        return cell
-    }
-
-    func outlineViewSelectionDidChange(_ notification: Notification) {
-        if let first = selectedFiles().first { onSelection?(first) }
-    }
-
-    @objc private func placeholder(_ sender: NSButton) {
-        BrowserCommandCenter.perform(.unavailable(sender.toolTip ?? "File list option"))
-    }
-
-    @objc private func toggleTreeMode() {
-        isTreeMode.toggle()
-        treeModeButton.state = isTreeMode ? .on : .off
-        updateGroupingButtonStates()
-        persistViewPreferences()
-        reloadFilteredFiles(preferredIDs: selectedFileIDs())
-    }
-
-    @objc private func chooseGrouping(_ sender: NSButton) {
-        let next: FileStatusGrouping = switch sender.tag {
-        case 1: .fileExtension
-        case 2: .status
-        default: .path
-        }
-        grouping = next
-        updateGroupingButtonStates()
-        persistViewPreferences()
-        reloadFilteredFiles(preferredIDs: selectedFileIDs())
-    }
-
-    @objc private func chooseViewMode(_ sender: NSMenuItem) {
-        switch sender.tag {
-        case 0, 1: grouping = .path
-        case 2, 3: grouping = .fileExtension
-        case 4, 5: grouping = .status
-        case 10:
-            usesDenseTree.toggle()
-            sender.state = usesDenseTree ? .on : .off
-        case 11:
-            showsGroupNodesInFlatList.toggle()
-            sender.state = showsGroupNodesInFlatList ? .on : .off
-        default: return
-        }
-        if sender.tag < 10 { isTreeMode = sender.tag.isMultiple(of: 2) }
-        treeModeButton.state = isTreeMode ? .on : .off
-        updateGroupingButtonStates()
-        persistViewPreferences()
-        reloadFilteredFiles(preferredIDs: selectedFileIDs())
-    }
-
-    @objc private func toggleGroupExpansion() {
-        let expandable = (0..<outlineView.numberOfRows).compactMap { outlineView.item(atRow: $0) as? ChangedFileNode }.filter { !$0.children.isEmpty }
-        if expandable.contains(where: { outlineView.isItemExpanded($0) }) {
-            rootNodes.forEach { outlineView.collapseItem($0, collapseChildren: true) }
-        } else {
-            rootNodes.forEach { outlineView.expandItem($0, expandChildren: true) }
-        }
-    }
-
-    @objc private func openFile() {
-        let row = outlineView.clickedRow
-        guard row >= 0, let node = outlineView.item(atRow: row) as? ChangedFileNode else { return }
-        if let file = node.file {
-            onFileCommand?("file.open.local", file)
-        } else if outlineView.isItemExpanded(node) {
-            outlineView.collapseItem(node)
-        } else {
-            outlineView.expandItem(node)
-        }
-    }
-
-    func menuNeedsUpdate(_ menu: NSMenu) {
-        let row = outlineView.clickedRow
-        if row >= 0, !outlineView.selectedRowIndexes.contains(row) {
-            outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
-        }
-        populateFileMenu(menu)
-    }
-
-    private func populateFileMenu(_ menu: NSMenu) {
-        let selectedNodes = outlineView.selectedRowIndexes.compactMap { outlineView.item(atRow: $0) as? ChangedFileNode }
-        let selectedFiles = Array(Set(selectedNodes.flatMap(\.descendantFiles)))
-        let context = ChangedFileContextMenuContext(
-            selectedFiles: selectedFiles,
-            scope: selectionScope,
-            supportPatches: true,
-            allFilesExist: selectedFiles.allSatisfy { $0.changeType != .deleted }
-        )
-        populatePlaceholderMenu(menu, with: ChangedFileContextMenuBuilder.build(context))
-        if onScript != nil {
-            let scripts = NSMenuItem(title: "Scripts", action: nil, keyEquivalent: "")
-            scripts.submenu = ApplicationScriptsMenu(placement: .files, execute: { [weak self] in self?.onScript?($0) })
-            menu.addItem(scripts)
-        }
-        retargetMenuItems(
-            in: menu,
-            where: { ["file.stage", "file.unstage", "file.stageAll", "file.unstageAll"].contains($0) },
-            target: self,
-            action: #selector(performMutationMenuCommand(_:))
-        )
-        retargetMenuItems(
-            in: menu,
-            where: { ["file.difftool", "file.open.local", "file.showFinder", "file.copyPaths"].contains($0) },
-            target: self,
-            action: #selector(performFileMenuCommand(_:))
-        )
-
-        if selectedNodes.contains(where: { !$0.children.isEmpty }) {
-            let selectAll = NSMenuItem(title: "Select all", action: #selector(selectAllDescendantFiles), keyEquivalent: "")
-            selectAll.target = self
-            let collapse = NSMenuItem(title: "Collapse all", action: #selector(collapseSelectedNodes), keyEquivalent: "")
-            collapse.target = self
-            let expand = NSMenuItem(title: "Expand all", action: #selector(expandSelectedNodes), keyEquivalent: "")
-            expand.target = self
-            menu.insertItem(.separator(), at: 0)
-            menu.insertItem(expand, at: 0)
-            menu.insertItem(collapse, at: 0)
-            menu.insertItem(selectAll, at: 0)
-        }
-    }
-
-    @objc private func performMutationMenuCommand(_ sender: NSMenuItem) {
-        guard let identifier = sender.identifier?.rawValue else { return }
-        onMutation?(identifier, selectedFiles(), selectionScope)
-    }
-
-    @objc private func performFileMenuCommand(_ sender: NSMenuItem) {
-        guard let identifier = sender.identifier?.rawValue else { return }
-        let files = selectedFiles()
-        if identifier == "file.copyPaths" {
-            let value = files.map(\.path).joined(separator: "\n")
-            guard !value.isEmpty else { return }
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(value, forType: .string)
-        } else if let file = files.first {
-            onFileCommand?(identifier, file)
-        }
-    }
-
-    @objc private func selectAllDescendantFiles() {
-        let nodes = outlineView.selectedRowIndexes.compactMap { outlineView.item(atRow: $0) as? ChangedFileNode }
-        nodes.forEach { outlineView.expandItem($0, expandChildren: true) }
-        let IDs = Set(nodes.flatMap(\.descendantFiles).map(\.id))
-        var rows = IndexSet()
-        for row in 0..<outlineView.numberOfRows {
-            if let file = (outlineView.item(atRow: row) as? ChangedFileNode)?.file, IDs.contains(file.id) { rows.insert(row) }
-        }
-        outlineView.selectRowIndexes(rows, byExtendingSelection: false)
-    }
-
-    @objc private func collapseSelectedNodes() {
-        outlineView.selectedRowIndexes.compactMap { outlineView.item(atRow: $0) }.forEach { outlineView.collapseItem($0, collapseChildren: true) }
-    }
-
-    @objc private func expandSelectedNodes() {
-        outlineView.selectedRowIndexes.compactMap { outlineView.item(atRow: $0) }.forEach { outlineView.expandItem($0, expandChildren: true) }
-    }
-
-    private func selectedFiles() -> [ChangedFile] {
-        outlineView.selectedRowIndexes.compactMap { (outlineView.item(atRow: $0) as? ChangedFileNode)?.file }
-    }
-
-    private func selectedFileIDs() -> Set<String> { Set(selectedFiles().map(\.id)) }
-
-    private func firstFileRow() -> Int? {
-        (0..<outlineView.numberOfRows).first { (outlineView.item(atRow: $0) as? ChangedFileNode)?.file != nil }
-    }
-
-    private func makeGroupingButton(_ grouping: FileStatusGrouping, tag: Int, image: String, tooltip: String) -> NSButton {
-        let button = AppKitFactory.resourceButton(image, tooltip: tooltip, target: self, action: #selector(chooseGrouping(_:)))
-        button.setButtonType(.pushOnPushOff)
-        button.tag = tag
-        button.state = self.grouping == grouping ? .on : .off
-        groupingButtons[grouping] = button
-        return button
-    }
-
-    private func updateGroupingButtonStates() {
-        groupingButtons.forEach { $0.value.state = $0.key == grouping ? .on : .off }
-        viewModeMenu?.items.forEach { item in
-            if item.action == #selector(chooseViewMode(_:)), item.tag < 10 {
-                let itemGrouping: FileStatusGrouping = switch item.tag {
-                case 2, 3: .fileExtension
-                case 4, 5: .status
-                default: .path
-                }
-                let itemIsTree = item.tag.isMultiple(of: 2)
-                item.state = itemGrouping == grouping && itemIsTree == isTreeMode ? .on : .off
-            } else if item.tag == 10 {
-                item.state = usesDenseTree ? .on : .off
-                item.isEnabled = isTreeMode
-            } else if item.tag == 11 {
-                item.state = showsGroupNodesInFlatList ? .on : .off
-                item.isEnabled = !isTreeMode && grouping != .path
-            }
-        }
-    }
-
-    private func persistViewPreferences() {
-        AppSettingsStore.shared.saveFileStatusListPreferences(FileStatusListPreferences(
-            grouping: grouping,
-            isTreeMode: isTreeMode,
-            usesDenseTree: usesDenseTree,
-            showsGroupNodesInFlatList: showsGroupNodesInFlatList,
-            showsUntrackedFiles: showsUntrackedFiles
-        ))
-    }
-
-    private func makeViewModeMenu() -> NSPopUpButton {
-        let button = imagePullDown("FileTree", tooltip: "File list grouping options", width: 10)
-        [
-            ("Group by file path - tree", 0), ("Group by file path - flat", 1),
-            ("Group by file extension - tree", 2), ("Group by file extension - flat", 3),
-            ("Group by file status - tree", 4), ("Group by file status - flat", 5)
-        ].forEach { title, tag in
-            let item = NSMenuItem(title: title, action: #selector(chooseViewMode(_:)), keyEquivalent: "")
-            item.target = self
-            item.tag = tag
-            button.menu?.addItem(item)
-        }
-        button.menu?.addItem(.separator())
-        let dense = NSMenuItem(title: "Dense tree (merge single item with its folder node)", action: #selector(chooseViewMode(_:)), keyEquivalent: "")
-        dense.target = self
-        dense.tag = 10
-        dense.state = usesDenseTree ? .on : .off
-        dense.isEnabled = isTreeMode
-        button.menu?.addItem(dense)
-        let groups = NSMenuItem(title: "Show group nodes in flat list (if multiple)", action: #selector(chooseViewMode(_:)), keyEquivalent: "")
-        groups.target = self
-        groups.tag = 11
-        groups.state = showsGroupNodesInFlatList ? .on : .off
-        groups.isEnabled = !isTreeMode && grouping != .path
-        button.menu?.addItem(groups)
-        viewModeMenu = button.menu
-        return button
-    }
-
-    private func makeFindMenu() -> NSPopUpButton {
-        let button = imagePullDown("ViewFile", tooltip: "Toggle 'Find in commit files using git-grep'", width: 32)
-        ["Match case", "Match whole word", "Options", "Using dialog", "Using input box", "Using both"].forEach {
-            let item = NSMenuItem(title: $0, action: nil, keyEquivalent: "")
-            item.isEnabled = false
-            button.menu?.addItem(item)
-        }
-        button.isEnabled = false
-        return button
-    }
-
-    private func makeSettingsMenu() -> NSPopUpButton {
-        let button = imagePullDown("Settings", tooltip: "Settings", width: 29)
-        let ignoredFiles = NSMenuItem(title: "Show ignored files", action: nil, keyEquivalent: "")
-        ignoredFiles.isEnabled = false
-        button.menu?.addItem(ignoredFiles)
-        let skipWorktree = NSMenuItem(title: "Show skip-worktree files", action: nil, keyEquivalent: "")
-        skipWorktree.isEnabled = false
-        button.menu?.addItem(skipWorktree)
-        let assumeUnchanged = NSMenuItem(title: "Show assumed-unchanged files", action: nil, keyEquivalent: "")
-        assumeUnchanged.isEnabled = false
-        button.menu?.addItem(assumeUnchanged)
-        let untracked = NSMenuItem(title: "Show untracked files", action: #selector(toggleShowUntracked(_:)), keyEquivalent: "")
-        untracked.target = self
-        untracked.state = showsUntrackedFiles ? .on : .off
-        untracked.isEnabled = false
-        showUntrackedMenuItem = untracked
-        button.menu?.addItem(untracked)
-        button.menu?.addItem(.separator())
-        for title in ["Edit ignored files", "Edit locally ignored files", "Show file differences for all parents", "Toolbar"] {
-            let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
-            item.isEnabled = false
-            button.menu?.addItem(item)
-        }
-        return button
-    }
-
-    @objc private func toggleShowUntracked(_ sender: NSMenuItem) {
-        guard selectionScope == .workingTree else { return }
-        showsUntrackedFiles.toggle()
-        sender.state = showsUntrackedFiles ? .on : .off
-        persistViewPreferences()
-        reloadFilteredFiles(preferredIDs: selectedFileIDs())
-    }
-
-    private func imagePullDown(_ imageName: String, tooltip: String, width: CGFloat) -> NSPopUpButton {
-        let button = NSPopUpButton(frame: .zero, pullsDown: true)
-        button.isBordered = false
-        button.controlSize = .small
-        button.toolTip = tooltip
-        button.translatesAutoresizingMaskIntoConstraints = false
-        button.widthAnchor.constraint(equalToConstant: width).isActive = true
-        button.heightAnchor.constraint(equalToConstant: 22).isActive = true
-        button.addItem(withTitle: "")
-        button.item(at: 0)?.image = AppKitFactory.resourceImage(imageName, accessibilityDescription: tooltip)
-        button.imagePosition = .imageOnly
-        return button
-    }
 }
 
 final class ChangedFileCellView: NSTableCellView {
@@ -758,14 +529,30 @@ final class ChangedFileCellView: NSTableCellView {
 
     required init?(coder: NSCoder) { nil }
 
-    func apply(node: ChangedFileNode) {
-        textField?.stringValue = node.title
+    func apply(node: ChangedFileNode, submodule: FileStatusSubmodule? = nil) {
+        textField?.stringValue = node.title + (submodule?.countSuffix ?? "")
         textField?.font = AppSettingsStore.shared.applicationFont(size: 11)
+        toolTip = submodule.map { "From: \($0.first?.string ?? "—")\nTo: \($0.second?.string ?? "—")\($0.isDirty ? "\nDirty working directory" : "")" }
         if let file = node.file {
-            statusImage.image = AppKitFactory.resourceImage(node.imageName, accessibilityDescription: file.changeType.description)
+            let icon = submodule.flatMap { Self.submoduleImage($0, file: file) } ?? node.imageName
+            statusImage.image = AppKitFactory.resourceImage(icon, accessibilityDescription: file.changeType.description)
         } else {
             statusImage.image = AppKitFactory.resourceImage(node.imageName, accessibilityDescription: node.title)
         }
+    }
+
+    static func submoduleImage(_ status: FileStatusSubmodule, file: ChangedFile) -> String? {
+
+        guard file.changeType != .added, file.changeType != .deleted, !file.isConflict else { return nil }
+        let direction: String? = switch status.state {
+        case .ahead: "Up"
+        case .behind: "Down"
+        case .newer: "SemiUp"
+        case .older: "SemiDown"
+        default: nil
+        }
+        if let direction { return "SubmoduleRevision\(direction)\(status.isDirty ? "Dirty" : "")" }
+        return status.state == .same && !status.isDirty ? "FolderSubmodule" : "SubmoduleDirty"
     }
 
     func apply(file: ChangedFile, title: String? = nil) {
@@ -781,7 +568,7 @@ enum ChangedFileStatusPresentation {
         switch changeType {
         case .added: "FileStatusAdded"
         case .modified: "FileStatusModified"
-        case .deleted: "FileStatusModifiedOnlyA"
+        case .deleted: "FileStatusRemoved"
         case .renamed: "FileStatusRenamed"
         case .copied: "FileStatusCopied"
         }
@@ -795,6 +582,13 @@ final class ChangedFileNode: NSObject {
     let file: ChangedFile?
     let children: [ChangedFileNode]
 
+    var folderPath: String?
+
+    var isGroupKey = false
+
+    var isDiffGroup = false
+    var groupID: String?
+
     init(id: String, title: String, imageName: String, file: ChangedFile? = nil, children: [ChangedFileNode] = []) {
         self.id = id
         self.title = title
@@ -803,9 +597,14 @@ final class ChangedFileNode: NSObject {
         self.children = children
     }
 
-    static func file(_ file: ChangedFile, title: String) -> ChangedFileNode {
-        let imageName = ChangedFileStatusPresentation.imageName(for: file.changeType)
+    static func file(_ file: ChangedFile, title: String, imageName: String? = nil) -> ChangedFileNode {
+        let imageName = imageName ?? ChangedFileStatusPresentation.imageName(for: file.changeType)
         return ChangedFileNode(id: "file:\(file.id)", title: title, imageName: imageName, file: file)
+    }
+
+    func assignGroup(_ id: String) {
+        groupID = id
+        children.forEach { $0.assignGroup(id) }
     }
 
     var descendantFiles: [ChangedFile] {
@@ -827,7 +626,8 @@ enum ChangedFilePathTreeBuilder {
         }
     }
 
-    static func build(files: [ChangedFile], dense: Bool) -> [ChangedFileNode] {
+    static func build(files: [ChangedFile], dense: Bool,
+                      imageName: ((ChangedFile) -> String)? = nil) -> [ChangedFileNode] {
         let root = Branch(name: "", path: "")
         for file in files {
             var current = root
@@ -841,10 +641,10 @@ enum ChangedFilePathTreeBuilder {
             }
             current.file = file
         }
-        return sortedChildren(of: root).map { makeNode($0, dense: dense) }
+        return sortedChildren(of: root).map { makeNode($0, dense: dense, imageName: imageName) }
     }
 
-    private static func makeNode(_ branch: Branch, dense: Bool) -> ChangedFileNode {
+    private static func makeNode(_ branch: Branch, dense: Bool, imageName: ((ChangedFile) -> String)?) -> ChangedFileNode {
         var current = branch
         var title = branch.name
         while dense, current.file == nil, current.children.count == 1, let child = current.children.values.first {
@@ -852,10 +652,12 @@ enum ChangedFilePathTreeBuilder {
             current = child
         }
         if let file = current.file {
-            return ChangedFileNode.file(file, title: title)
+            return ChangedFileNode.file(file, title: title, imageName: imageName?(file))
         }
-        let children = sortedChildren(of: current).map { makeNode($0, dense: dense) }
-        return ChangedFileNode(id: "folder:\(current.path)", title: title, imageName: "FolderClosed", children: children)
+        let children = sortedChildren(of: current).map { makeNode($0, dense: dense, imageName: imageName) }
+        let node = ChangedFileNode(id: "folder:\(current.path)", title: title, imageName: "FolderClosed", children: children)
+        node.folderPath = current.path
+        return node
     }
 
     private static func sortedChildren(of branch: Branch) -> [Branch] {
@@ -869,14 +671,16 @@ enum ChangedFileListTreeBuilder {
         grouping: FileStatusGrouping,
         isTreeMode: Bool,
         usesDenseTree: Bool,
-        showsGroupNodesInFlatList: Bool
+        showsGroupNodesInFlatList: Bool,
+        imageName: ((ChangedFile) -> String)? = nil,
+        title: ((ChangedFile) -> String)? = nil
     ) -> [ChangedFileNode] {
         if isTreeMode, grouping == .path {
-            return ChangedFilePathTreeBuilder.build(files: files, dense: usesDenseTree)
+            return ChangedFilePathTreeBuilder.build(files: files, dense: usesDenseTree, imageName: imageName)
         }
 
         let leaves = sorted(files: files, grouping: grouping).map {
-            ChangedFileNode.file($0, title: $0.path)
+            ChangedFileNode.file($0, title: title?($0) ?? $0.path, imageName: imageName?($0))
         }
         guard grouping != .path,
               isTreeMode || showsGroupNodesInFlatList,
@@ -903,12 +707,14 @@ enum ChangedFileListTreeBuilder {
                 $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending
             }
             let imageName = grouping == .status ? children.first?.imageName ?? "FileStatusModified" : "File"
-            return ChangedFileNode(
+            let node = ChangedFileNode(
                 id: "group:\(grouping.rawValue):\(key)",
                 title: "(\(children.count)) \(key)",
                 imageName: imageName,
                 children: children
             )
+            node.isGroupKey = true
+            return node
         }
     }
 
@@ -926,6 +732,11 @@ enum ChangedFileListTreeBuilder {
 }
 
 final class DiffContentViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate {
+    var onScrollBoundary: ((Bool) -> Void)? { didSet { tableView.onScrollBoundary = onScrollBoundary } }
+    func scrollToBottom() {
+        guard !presentations.isEmpty else { return }
+        tableView.scrollRowToVisible(presentations.count - 1)
+    }
     var onHunkMutation: ((RepositoryHunkSelection) -> Void)?
     var onOptionsChanged: ((FileDiffOptions) -> Void)?
     var onFileCommand: ((String, ChangedFile) -> Void)?
@@ -978,6 +789,7 @@ final class DiffContentViewController: NSViewController, NSTableViewDataSource, 
             }
             return true
         }
+        tableView.onScrollBoundary = onScrollBoundary
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("DiffLine"))
         column.width = 900
         column.minWidth = 500
@@ -1186,8 +998,8 @@ final class DiffContentViewController: NSViewController, NSTableViewDataSource, 
         }
 
         menu.addItem(.separator())
-        addMenuItem("Show blame", action: nil, to: menu, enabled: false)
-        addMenuItem("Show file history", action: nil, to: menu, enabled: false)
+        addMenuItem("Show blame", action: #selector(showBlame), to: menu, enabled: currentFile != nil && supportedFileCommands.contains("file.blame"))
+        addMenuItem("Show file history", action: #selector(showFileHistory), to: menu, enabled: currentFile != nil && supportedFileCommands.contains("file.history"))
     }
 
     private func addMenuItem(_ title: String, action: Selector?, to menu: NSMenu, enabled: Bool) {
@@ -1205,6 +1017,9 @@ final class DiffContentViewController: NSViewController, NSTableViewDataSource, 
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
     }
+
+    @objc private func showBlame() { if let currentFile { onFileCommand?("file.blame", currentFile) } }
+    @objc private func showFileHistory() { if let currentFile { onFileCommand?("file.history", currentFile) } }
 
     @objc private func copyPatch() {
         copyToPasteboard(renderedPatchLines())
@@ -1579,7 +1394,7 @@ enum FileViewerWhitespace {
     }
 }
 
-@MainActor private enum DiffSyntaxHighlighter {
+@MainActor enum DiffSyntaxHighlighter {
     private static var font: NSFont { AppSettingsStore.shared.codeFont }
     private static let keywordExpression = try! NSRegularExpression(
         pattern: #"\b(?:using|namespace|internal|sealed|class|public|private|protected|readonly|static|void|return|new|if|else|for|while|async|await|var|let)\b"#
@@ -1781,303 +1596,6 @@ final class DiffTrackingView: NSView {
     }
 }
 
-final class FileTreeViewController: RetainingSplitViewController {
-    private static let collapsedPaneThickness: CGFloat = 1
-
-    private let outlineController = RevisionFileTreeOutlineViewController()
-    private let contentController = RevisionFileContentViewController()
-    private var didSetInitialDivider = false
-    private var currentCommit: Commit?
-    private var contentLoadTask: Task<Void, Never>?
-    var contentProvider: (@Sendable (Commit, RepositoryFileEntry, RepositoryTextEncoding) async throws -> RepositoryFileContent)?
-    var onFileCommand: ((String, Commit, RepositoryFileEntry) -> Void)?
-
-    init() {
-        super.init(resizeBehavior: .fixedLeadingPane)
-    }
-
-    required init?(coder: NSCoder) { nil }
-
-    override func viewDidLoad() {
-        super.viewDidLoad()
-        splitView.isVertical = true
-        splitView.dividerStyle = .paneSplitter
-
-        let treeItem = NSSplitViewItem(viewController: outlineController)
-        treeItem.minimumThickness = Self.collapsedPaneThickness
-        treeItem.preferredThicknessFraction = 300.0 / 850.0
-        treeItem.holdingPriority = NSLayoutConstraint.Priority(rawValue: 260)
-        addSplitViewItem(treeItem)
-
-        let contentItem = NSSplitViewItem(viewController: contentController)
-        contentItem.minimumThickness = Self.collapsedPaneThickness
-        contentItem.holdingPriority = .defaultLow
-        addSplitViewItem(contentItem)
-
-        outlineController.onSelection = { [weak self] file, path in
-            guard let self else { return }
-            contentLoadTask?.cancel()
-            contentController.apply(file: file, selectedPath: path)
-            guard let file, let commit = currentCommit, let contentProvider else { return }
-            let encoding = contentController.selectedEncoding
-            contentLoadTask = Task { @MainActor [weak self] in
-                do {
-                    let loaded = try await contentProvider(commit, file, encoding)
-                    guard !Task.isCancelled,
-                          self?.currentCommit?.id == commit.id,
-                          self?.outlineController.selectedFilePath == file.path
-                    else { return }
-                    self?.contentController.apply(content: loaded, file: file)
-                } catch is CancellationError {
-                    return
-                } catch {
-                    guard !Task.isCancelled else { return }
-                    self?.contentController.apply(error: error, selectedPath: file.path)
-                }
-            }
-        }
-        contentController.onEncodingChanged = { [weak self] in
-            guard let self, let file = outlineController.selectedFile else { return }
-            outlineController.onSelection?(file, file.path)
-        }
-        outlineController.onCommand = { [weak self] identifier, file in
-            guard let self, let currentCommit else { return }
-            onFileCommand?(identifier, currentCommit, file)
-        }
-    }
-
-    override func viewDidLayout() {
-        super.viewDidLayout()
-        guard !didSetInitialDivider, splitView.bounds.width >= 650 else { return }
-        didSetInitialDivider = true
-        setRetainedPosition(300)
-    }
-
-    func apply(commit: Commit, files: [RepositoryFileEntry]) {
-        _ = view
-        currentCommit = commit
-        contentLoadTask?.cancel()
-        contentController.applyRevision(commit)
-        outlineController.apply(files: files)
-    }
-}
-
-private final class RevisionFileTreeOutlineViewController: NSViewController, NSOutlineViewDataSource, NSOutlineViewDelegate, NSMenuDelegate {
-    var onSelection: ((RepositoryFileEntry?, String?) -> Void)?
-    var onCommand: ((String, RepositoryFileEntry) -> Void)?
-
-    private let outlineView = NSOutlineView()
-    private var roots: [RevisionFileTreeItem] = []
-    private(set) var selectedFilePath: String?
-    var selectedFile: RepositoryFileEntry? {
-        guard let selectedFilePath else { return nil }
-        return fileItem(path: selectedFilePath)?.node.file
-    }
-    private var isApplyingSnapshot = false
-
-    override func loadView() {
-        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("RevisionFileTree"))
-        column.title = "File"
-        column.minWidth = 100
-        column.width = 300
-        outlineView.addTableColumn(column)
-        outlineView.outlineTableColumn = column
-        outlineView.headerView = nil
-        outlineView.rowHeight = BrowserMetrics.fileRowHeight
-        outlineView.intercellSpacing = .zero
-        outlineView.indentationPerLevel = 19
-        outlineView.selectionHighlightStyle = .regular
-        outlineView.allowsEmptySelection = true
-        outlineView.allowsMultipleSelection = true
-        outlineView.backgroundColor = .controlBackgroundColor
-        outlineView.dataSource = self
-        outlineView.delegate = self
-        outlineView.doubleAction = #selector(openSelectedItem)
-        outlineView.target = self
-
-        let menu = NSMenu()
-        menu.delegate = self
-        outlineView.menu = menu
-
-        let scroll = NSScrollView()
-        scroll.documentView = outlineView
-        scroll.hasVerticalScroller = true
-        scroll.hasHorizontalScroller = true
-        scroll.borderType = .noBorder
-        view = scroll
-    }
-
-    func apply(files: [RepositoryFileEntry]) {
-        _ = view
-        let pathToRestore = FileTreeSelectionResolver.selectedPath(previousPath: selectedFilePath, files: files)
-        roots = RepositoryFileTreeBuilder.build(files: files).map { RevisionFileTreeItem(node: $0) }
-
-        isApplyingSnapshot = true
-        outlineView.reloadData()
-        if let pathToRestore, let item = fileItem(path: pathToRestore) {
-            expandAncestors(of: item)
-            let row = outlineView.row(forItem: item)
-            if row >= 0 {
-                outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
-                outlineView.scrollRowToVisible(row)
-                selectedFilePath = pathToRestore
-                onSelection?(item.node.file, item.node.path)
-            }
-        } else {
-            selectedFilePath = nil
-            outlineView.deselectAll(nil)
-            onSelection?(nil, nil)
-        }
-        isApplyingSnapshot = false
-    }
-
-    func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
-        (item as? RevisionFileTreeItem)?.children.count ?? roots.count
-    }
-
-    func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
-        (item as? RevisionFileTreeItem)?.children[index] ?? roots[index]
-    }
-
-    func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool {
-        (item as? RevisionFileTreeItem)?.node.kind == .folder
-    }
-
-    func outlineView(_ outlineView: NSOutlineView, rowViewForItem item: Any) -> NSTableRowView? {
-        GitExtensionsSelectionRowView()
-    }
-
-    func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
-        guard let item = item as? RevisionFileTreeItem else { return nil }
-        let identifier = NSUserInterfaceItemIdentifier("RevisionFileTreeCell")
-        let cell = (outlineView.makeView(withIdentifier: identifier, owner: self) as? NSTableCellView) ?? NSTableCellView()
-        cell.identifier = identifier
-
-        let text: NSTextField
-        let icon: NSImageView
-        if let existingText = cell.textField, let existingIcon = cell.imageView {
-            text = existingText
-            icon = existingIcon
-        } else {
-            text = NSTextField(labelWithString: "")
-            text.font = AppSettingsStore.shared.applicationFont(size: 11)
-            text.lineBreakMode = .byTruncatingMiddle
-            text.translatesAutoresizingMaskIntoConstraints = false
-            icon = NSImageView()
-            icon.translatesAutoresizingMaskIntoConstraints = false
-            cell.textField = text
-            cell.imageView = icon
-            cell.addSubview(icon)
-            cell.addSubview(text)
-            NSLayoutConstraint.activate([
-                icon.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 1),
-                icon.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
-                icon.widthAnchor.constraint(equalToConstant: 16),
-                icon.heightAnchor.constraint(equalToConstant: 16),
-                text.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 3),
-                text.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -3),
-                text.centerYAnchor.constraint(equalTo: cell.centerYAnchor)
-            ])
-        }
-
-        text.stringValue = item.node.name
-        icon.image = AppKitFactory.resourceImage(
-            item.node.kind == .folder ? "FolderClosed" : "FileTree",
-            accessibilityDescription: item.node.kind == .folder ? "Folder" : "File"
-        )
-        return cell
-    }
-
-    func outlineViewSelectionDidChange(_ notification: Notification) {
-        guard !isApplyingSnapshot else { return }
-        let row = outlineView.selectedRow
-        guard row >= 0, let item = outlineView.item(atRow: row) as? RevisionFileTreeItem else {
-            onSelection?(nil, nil)
-            return
-        }
-        if let file = item.node.file {
-            selectedFilePath = file.path
-            onSelection?(file, item.node.path)
-        } else {
-            onSelection?(nil, item.node.path)
-        }
-    }
-
-    func menuNeedsUpdate(_ menu: NSMenu) {
-        let row = outlineView.clickedRow
-        if row >= 0, !outlineView.selectedRowIndexes.contains(row) {
-            outlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
-        }
-        menu.removeAllItems()
-        guard let file = selectedFile else { return }
-        addCommand("Open file", identifier: "tree.open", enabled: true, to: menu)
-        addCommand("Open containing folder", identifier: "tree.reveal", enabled: true, to: menu)
-        addCommand("Copy full path", identifier: "tree.copyPath", enabled: true, to: menu)
-        menu.addItem(.separator())
-        addCommand("Show file history", identifier: "tree.history", enabled: false, to: menu)
-        addCommand("Blame", identifier: "tree.blame", enabled: false, to: menu)
-        _ = file
-    }
-
-    private func addCommand(_ title: String, identifier: String, enabled: Bool, to menu: NSMenu) {
-        let item = NSMenuItem(title: title, action: #selector(performCommand(_:)), keyEquivalent: "")
-        item.target = self
-        item.identifier = NSUserInterfaceItemIdentifier(identifier)
-        item.isEnabled = enabled
-        menu.addItem(item)
-    }
-
-    @objc private func performCommand(_ sender: NSMenuItem) {
-        guard let identifier = sender.identifier?.rawValue, let selectedFile else { return }
-        onCommand?(identifier, selectedFile)
-    }
-
-    @objc private func openSelectedItem() {
-        let row = outlineView.clickedRow >= 0 ? outlineView.clickedRow : outlineView.selectedRow
-        guard row >= 0, let item = outlineView.item(atRow: row) as? RevisionFileTreeItem else { return }
-        if item.node.kind == .folder {
-            outlineView.isItemExpanded(item) ? outlineView.collapseItem(item) : outlineView.expandItem(item)
-        } else {
-            if let file = item.node.file { onCommand?("tree.open", file) }
-        }
-    }
-
-    private func fileItem(path: String) -> RevisionFileTreeItem? {
-        func search(_ items: [RevisionFileTreeItem]) -> RevisionFileTreeItem? {
-            for item in items {
-                if item.node.path == path, item.node.file != nil { return item }
-                if let match = search(item.children) { return match }
-            }
-            return nil
-        }
-        return search(roots)
-    }
-
-    private func expandAncestors(of item: RevisionFileTreeItem) {
-        var ancestors: [RevisionFileTreeItem] = []
-        var current = item.parent
-        while let value = current {
-            ancestors.append(value)
-            current = value.parent
-        }
-        ancestors.reversed().forEach { outlineView.expandItem($0) }
-    }
-}
-
-private final class RevisionFileTreeItem: NSObject {
-    let node: RepositoryFileTreeNode
-    weak var parent: RevisionFileTreeItem?
-    private(set) var children: [RevisionFileTreeItem] = []
-
-    init(node: RepositoryFileTreeNode, parent: RevisionFileTreeItem? = nil) {
-        self.node = node
-        self.parent = parent
-        super.init()
-        children = node.children.map { RevisionFileTreeItem(node: $0, parent: self) }
-    }
-}
-
-@MainActor
 enum FileViewerNavigationDialogs {
     static func find(lines: [DiffLine], after caret: Int, query: inout String) -> Int? {
         let alert = NSAlert()
@@ -2125,6 +1643,9 @@ enum FileViewerNavigationDialogs {
 }
 
 final class RevisionFileContentViewController: NSViewController, NSMenuDelegate {
+    var onBlame: (() -> Void)?
+    var onFileHistory: (() -> Void)?
+    var canBlame = false
     private let pathLabel = NSTextField(labelWithString: "Select a file")
     private let metadataLabel = NSTextField(labelWithString: "")
     private let textView = NSTextView()
@@ -2311,11 +1832,13 @@ final class RevisionFileContentViewController: NSViewController, NSMenuDelegate 
         save.isEnabled = content != nil
         menu.addItem(save)
         menu.addItem(.separator())
-        let blame = NSMenuItem(title: "Show blame", action: nil, keyEquivalent: "")
-        blame.isEnabled = false
+        let blame = NSMenuItem(title: "Show blame", action: #selector(showBlame), keyEquivalent: "")
+        blame.target = self
+        blame.isEnabled = canBlame && onBlame != nil && content != nil
         menu.addItem(blame)
-        let history = NSMenuItem(title: "Show file history", action: nil, keyEquivalent: "")
-        history.isEnabled = false
+        let history = NSMenuItem(title: "Show file history", action: #selector(showFileHistory), keyEquivalent: "")
+        history.target = self
+        history.isEnabled = onFileHistory != nil && content != nil
         menu.addItem(history)
     }
 
@@ -2327,6 +1850,9 @@ final class RevisionFileContentViewController: NSViewController, NSMenuDelegate 
         }
         encodingButton.selectItem(at: encodingButton.itemArray.firstIndex { ($0.representedObject as? String) == selectedEncoding.rawValue } ?? 0)
     }
+
+    @objc private func showBlame() { onBlame?() }
+    @objc private func showFileHistory() { onFileHistory?() }
 
     @objc private func settingsApplied() {
         reloadEncodingChoices()

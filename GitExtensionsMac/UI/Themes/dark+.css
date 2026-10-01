@@ -1,8 +1,8 @@
-/* See (App install)\Themes\README.md for instructions on how to create or modify a theme */
+
 
 @import url("dark.css");
 
-/* Application colors */
+
 .PanelBackground { color: #191a1b; }
 .EditorBackground { color: #121314; }
 .LineNumberBackground { color: #252526; }

@@ -6,7 +6,25 @@ import SwiftUI
 enum RepositoryBrowserLaunch {
     case dashboard
     case mock
-    case repository(URL, selection: [RevisionID] = [])
+    case repository(URL, selection: [RevisionID] = [], fileHistory: FileHistoryBrowseRequest? = nil)
+}
+
+
+struct FileHistoryBrowseRequest: Equatable {
+    let path: String
+    var filterRevision: ObjectID?
+
+    var arguments: [String] {
+        ["--file-history-path", path] + (filterRevision.map { ["--file-history-revision", $0.string] } ?? [])
+    }
+    static func parse(_ arguments: [String]) -> Self? {
+        func value(_ key: String) -> String? {
+            guard let index = arguments.firstIndex(of: key), index + 1 < arguments.count else { return nil }
+            return arguments[index + 1]
+        }
+        guard let path = value("--file-history-path"), !path.isEmpty else { return nil }
+        return Self(path: path, filterRevision: value("--file-history-revision").flatMap { try? ObjectID.parse($0) })
+    }
 }
 
 enum RepositoryOpeningSelection {
@@ -29,10 +47,17 @@ struct RepositoryBrowserHost: NSViewControllerRepresentable {
     let launch: RepositoryBrowserLaunch
 
     func makeNSViewController(context: Context) -> ApplicationHostViewController {
-        ApplicationHostViewController(launch: launch)
+        ApplicationHostViewController(launch: launch, checksSettingsAtStartup: true)
     }
 
     func updateNSViewController(_ nsViewController: ApplicationHostViewController, context: Context) {}
+}
+
+
+@MainActor
+enum ApplicationLifecycle {
+
+    static var terminatesWithMainWindow = false
 }
 
 @MainActor
@@ -40,12 +65,17 @@ final class ApplicationHostViewController: NSViewController {
     private let launch: RepositoryBrowserLaunch
     private let store = AppSettingsStore.shared
     private let container = NSView()
-    private var activeController: NSViewController?
+    private(set) var activeController: NSViewController?
     private var commandObserver: NSObjectProtocol?
+    private var windowCloseObserver: NSObjectProtocol?
     private var openTask: Task<Void, Never>?
+    private let checksSettingsAtStartup: Bool
+    private var startupSettingsTask: Task<Void, Never>?
+    private var didCheckStartupSettings = false
 
-    init(launch: RepositoryBrowserLaunch) {
+    init(launch: RepositoryBrowserLaunch, checksSettingsAtStartup: Bool = false) {
         self.launch = launch
+        self.checksSettingsAtStartup = checksSettingsAtStartup
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -53,7 +83,9 @@ final class ApplicationHostViewController: NSViewController {
 
     deinit {
         openTask?.cancel()
+        startupSettingsTask?.cancel()
         if let commandObserver { NotificationCenter.default.removeObserver(commandObserver) }
+        if let windowCloseObserver { NotificationCenter.default.removeObserver(windowCloseObserver) }
     }
 
     override func loadView() {
@@ -84,36 +116,86 @@ final class ApplicationHostViewController: NSViewController {
             showDashboard()
         case .mock:
             showBrowser(repositoryModule: MockRepositoryDataSource())
-        case .repository(let url, let selection):
+        case .repository(let url, let selection, let fileHistory):
             showDashboard()
-            openRepository(url, selection: selection)
+            openRepository(url, selection: selection, fileHistory: fileHistory)
         }
     }
 
     override func viewDidAppear() {
         super.viewDidAppear()
-        if activeController is RepositoryStartupViewController {
+        if activeController is DashboardViewController {
             view.window?.title = "Git Extensions"
+        }
+        if windowCloseObserver == nil, let window = view.window {
+
+            window.tabbingMode = .disallowed
+
+            window.isRestorable = false
+            window.setFrameAutosaveName("GitExtensionsMac.Browse")
+            windowCloseObserver = NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: window, queue: .main) { _ in
+                Task { @MainActor in
+                    if ApplicationLifecycle.terminatesWithMainWindow { NSApp.terminate(nil) }
+                }
+            }
+        }
+        if checksSettingsAtStartup, !didCheckStartupSettings, let window = view.window {
+            didCheckStartupSettings = true
+            startupSettingsTask = Task { @MainActor in
+                await GitUICommands.checkStartupSettings(owner: window)
+            }
         }
     }
 
-    private func performApplicationCommand(_ command: BrowserCommand) {
+
+    var dashboard: DashboardViewController? { activeController as? DashboardViewController }
+
+    private var browser: RepositoryBrowserViewController? { activeController as? RepositoryBrowserViewController }
+
+
+    private var toolsWorkingDirectory: URL {
+        browser?.networkContext.map { URL(fileURLWithPath: $0.repository.path, isDirectory: true) }
+            ?? FileManager.default.homeDirectoryForCurrentUser
+    }
+
+
+    private func performShellCommand(_ command: BrowserCommand) -> Bool {
         switch command {
-        case .openRepository: presentOpenRepositoryPanel()
+        case .openRepository: presentOpenRepositoryDialog()
         case .closeToDashboard: showDashboard()
         case .cloneRepository: presentCloneShell()
         case .forkHostedRepository: presentForkAndClone()
         case .initializeRepository: presentInitializeRepository()
+        case .clearRecentRepositories:
+            store.clearRecentRepositories()
+            dashboard?.refreshContent()
+        case .openRecentRepository(let url): openRepository(url)
+        case .openRepositoryAtRevisions(let url, let selection): openRepository(url, selection: selection)
+        case .gitGui: GitUICommands.runGitGui(workingDirectory: toolsWorkingDirectory, owner: view.window)
+        case .gitK: GitUICommands.runGitK(workingDirectory: toolsWorkingDirectory, owner: view.window)
+        case .refreshDashboard: dashboard?.refreshContent()
+        case .recentRepositoriesSettings:
+            guard let window = view.window else { return true }
+            RecentRepositoriesSettingsDialog.present(owner: window) { [weak self] saved in
+                if saved { self?.dashboard?.refreshContent() }
+            }
+        default: return false
+        }
+        return true
+    }
+
+    private func performApplicationCommand(_ command: BrowserCommand) {
+        if performShellCommand(command) { return }
+        switch command {
         case .settings: presentSettings()
         case .plugins: GitUICommands.startPlugins(owner: view.window)
         case .viewPatch: GitUICommands.startPatchViewer(owner: view.window)
-        case .clearRecentRepositories:
-            store.clearRecentRepositories()
-            (activeController as? RepositoryStartupViewController)?.reloadRecents()
-        case .openRecentRepository(let url):
-            openRepository(url)
-        case .openRepositoryAtRevisions(let url, let selection):
-            openRepository(url, selection: selection)
+        case .openTerminal:
+
+            if let terminal = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.Terminal") {
+                NSWorkspace.shared.open([FileManager.default.homeDirectoryForCurrentUser], withApplicationAt: terminal,
+                                        configuration: NSWorkspace.OpenConfiguration())
+            }
         default: break
         }
     }
@@ -123,41 +205,32 @@ final class ApplicationHostViewController: NSViewController {
         DispatchQueue.main.async {
             BrowserCommandAvailability.shared.canPatch = false
             BrowserCommandAvailability.shared.canArchive = false
+            BrowserCommandAvailability.shared.gridMenuState = nil
+            BrowserCommandAvailability.shared.isDashboard = true
         }
-        let controller = RepositoryStartupViewController(store: store)
-        controller.onOpenRepository = { [weak self] in self?.presentOpenRepositoryPanel() }
+        let controller = DashboardViewController(store: store)
+        controller.onOpenRepository = { [weak self] in self?.presentOpenRepositoryDialog() }
         controller.onOpenRecentRepository = { [weak self] url in self?.openRepository(url) }
         controller.onCloneRepository = { [weak self] in self?.presentCloneShell() }
         controller.onCloneHostedRepository = { [weak self] in self?.presentForkAndClone() }
         controller.onInitializeRepository = { [weak self] in self?.presentInitializeRepository() }
-        controller.onSettings = { [weak self] in self?.presentSettings() }
         install(controller)
         view.window?.title = "Git Extensions"
         if let error { controller.show(error: error) }
+        RepositoryHistoryUIService.shared.triggerBranchNameCacheUpdate()
     }
 
-    private func showBrowser(repositoryModule: any RepositoryBrowsingDataSource, selection: [RevisionID] = []) {
-        let controller = RepositoryBrowserViewController(repositoryModule: repositoryModule, openingSelection: selection)
+    private func showBrowser(repositoryModule: any RepositoryBrowsingDataSource, selection: [RevisionID] = [], fileHistory: FileHistoryBrowseRequest? = nil) {
+        let controller = RepositoryBrowserViewController(repositoryModule: repositoryModule, openingSelection: selection, fileHistory: fileHistory)
         controller.onApplicationCommand = { [weak self] command in
             guard let self else { return false }
-            switch command {
-            case .openRepository: self.presentOpenRepositoryPanel()
-            case .closeToDashboard: self.showDashboard()
-            case .cloneRepository: self.presentCloneShell()
-            case .forkHostedRepository: self.presentForkAndClone()
-            case .initializeRepository: self.presentInitializeRepository()
-            case .settings: return false // Browser supplies its existing module's Settings capability.
-            case .clearRecentRepositories:
-                self.store.clearRecentRepositories()
-            case .openRecentRepository(let url):
-                self.openRepository(url)
-            case .openRepositoryAtRevisions(let url, let selection):
-                self.openRepository(url, selection: selection)
-            default: return false
-            }
-            return true
+
+            if case .settings = command { return false }
+            return performShellCommand(command)
         }
         install(controller)
+        BrowserCommandAvailability.shared.isDashboard = false
+        RepositoryHistoryUIService.shared.triggerBranchNameCacheUpdate()
     }
 
     private func install(_ controller: NSViewController) {
@@ -178,28 +251,19 @@ final class ApplicationHostViewController: NSViewController {
         ])
     }
 
-    private func presentOpenRepositoryPanel() {
-        let panel = NSOpenPanel()
-        panel.title = "Open repository"
-        panel.prompt = "Open"
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.allowsMultipleSelection = false
-        panel.resolvesAliases = true
-        let completion: (NSApplication.ModalResponse) -> Void = { [weak self] response in
-            guard response == .OK, let url = panel.url else { return }
+
+    private func presentOpenRepositoryDialog() {
+        guard let window = view.window else { return }
+        let current = browser?.networkContext.map { URL(fileURLWithPath: $0.repository.path, isDirectory: true) }
+        OpenLocalRepositoryDialog.present(owner: window, currentRepository: current) { [weak self] url in
+            guard let url else { return }
             self?.openRepository(url)
-        }
-        if let window = view.window {
-            panel.beginSheetModal(for: window, completionHandler: completion)
-        } else {
-            completion(panel.runModal())
         }
     }
 
-    private func openRepository(_ url: URL, selection: [RevisionID] = []) {
+    func openRepository(_ url: URL, selection: [RevisionID] = [], fileHistory: FileHistoryBrowseRequest? = nil) {
         openTask?.cancel()
-        if !(activeController is RepositoryStartupViewController) { showDashboard() }
+        if !(activeController is DashboardViewController) { showDashboard() }
         let gitURL = URL(fileURLWithPath: store.preferences.gitExecutablePath)
         let repositoryModule = GitRepositoryModule(repositoryURL: url, git: GitProcess(executableURL: gitURL))
         openTask = Task { @MainActor [weak self] in
@@ -208,7 +272,7 @@ final class ApplicationHostViewController: NSViewController {
                 _ = try await repositoryModule.loadRepositoryState()
                 guard !Task.isCancelled else { return }
                 store.recordOpenedRepository(url)
-                showBrowser(repositoryModule: repositoryModule, selection: selection)
+                showBrowser(repositoryModule: repositoryModule, selection: selection, fileHistory: fileHistory)
             } catch is CancellationError {
                 return
             } catch {
@@ -217,7 +281,6 @@ final class ApplicationHostViewController: NSViewController {
             }
         }
     }
-
     private func presentSettings() {
         guard let window = view.window else { return }
         Task { await ApplicationShellDialogs.presentSettings(from: window) }
@@ -255,7 +318,7 @@ final class ApplicationHostViewController: NSViewController {
         ) { [weak self, weak window] result in
             guard let self else { return }
             store.recordRecentRepository(result.repositoryURL)
-            (activeController as? RepositoryStartupViewController)?.reloadRecents()
+            dashboard?.refreshContent()
             let alert = NSAlert()
             alert.messageText = "Repository cloned successfully"
             alert.informativeText = "Do you want to open \(result.repositoryURL.path) now?"

@@ -1,45 +1,45 @@
-/* See (App install)\Themes\README.md for instructions on how to create or modify a theme */
 
-/* SystemColorMode.Dark listed for reference
-System colors cannot be changed, used when adapting colors (many occurrences are not themeable)
 
-ActiveBorder: ff464646
-ActiveCaption: ff3c5f78
-ActiveCaptionText: ffffffff
-AppWorkspace: ff3c3c3c
-ButtonFace: ff202020
-ButtonHighlight: ff101010
-ButtonShadow: ff464646
-Control: ff202020
-ControlDark: ff4a4a4a
-ControlDarkDark: ff5a5a5a
-ControlLight: ff2e2e2e
-ControlLightLight: ff1f1f1f
-ControlText: ffffffff
-Desktop: ff101010
-GradientActiveCaption: ff416482
-GradientInactiveCaption: ff557396
-GrayText: ff969696
-Highlight: ff2864b4
-HighlightText: ff000000
-HotTrack: ff2d5faf
-InactiveBorder: ff3c3f41
-InactiveCaption: ff374b5a
-InactiveCaptionText: ffbebebe
-Info: ff50503c
-InfoText: ffbebebe
-Menu: ff373737
-MenuBar: ff373737
-MenuHighlight: ff2a80d2
-MenuText: fff0f0f0
-ScrollBar: ff505050
-Window: ff323232
-WindowFrame: ff282828
-WindowText: fff0f0f0
-*/
 
-/* Application colors */
-/* PanelBackground sets Windows Dark mode */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 .PanelBackground { color: #323232; }
 .EditorBackground { color: #323232; }
 .LineNumberBackground { color: #323232; }
@@ -55,19 +55,19 @@ WindowText: fff0f0f0
 .GraphBranch5 { color: #c02a22; }
 .GraphBranch6 { color: #17aa8f; }
 .GraphBranch7 { color: #ca9b0d; }
-.GraphBranch8 { } /* color not specified, color slot will not be used */
+.GraphBranch8 { }
 .GraphNonRelativeBranch { color: #707070; }
 
 .Branch { color: #7FE28A; }
-.RemoteBranch { color: #fd9797; } /* hsl(0, 100%, 70%) */
-.RemoteBranch.colorblind { color: #0080ff; } /* hsl(210, 100%, 50%) */
+.RemoteBranch { color: #fd9797; }
+.RemoteBranch.colorblind { color: #0080ff; }
 .Tag { color: #40BAF7; }
 .OtherTag { color: #cfb3b3; }
 .DiffSection { color: #5f5e5e; }
 
-/* translation of terminal (cli) ansi color output sequences */
-/* Colors match VS Code Dark terminal ANSI palette */
-/* https://github.com/microsoft/vscode/blob/main/src/vs/workbench/contrib/terminal/common/terminalColorRegistry.ts */
+
+
+
 
 .AnsiTerminalBlackForeNormal { color: #000000; }
 .AnsiTerminalBlackBackNormal { color: #4d4d4d; }

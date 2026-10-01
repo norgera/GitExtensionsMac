@@ -11,9 +11,68 @@ package struct RevisionReadRequest: Sendable {
     }
 }
 
+package struct FileHistoryReadRequest: Sendable {
+    package let context: RevisionReadContext
+    package let reader: RevisionReader
+    package let identity: RepositoryIdentityState
+    package let references: RepositoryReferenceState
+}
+
+package protocol RepositoryFileHistoryDataSource: Sendable {
+
+
+    func fileHistoryReadRequest() async throws -> FileHistoryReadRequest
+}
+
+extension GitRepositoryModule: RepositoryFileHistoryDataSource {
+    package func fileHistoryReadRequest() async throws -> FileHistoryReadRequest {
+        let state = try await loadRepositoryState()
+        guard let repository = resolvedRepository else { throw RepositoryDataSourceError.unavailable }
+        return FileHistoryReadRequest(context: state.revisionReadRequest.context,
+            reader: RevisionReader(git: git, directory: repository.rootURL), identity: state.identity, references: state.references)
+    }
+}
+
+
+
+package struct RevisionBatchPolicy: Sendable {
+    package let initialCount: Int
+    package let subsequentCount: Int
+    package let maximumDelay: TimeInterval
+
+    package static let upstream = RevisionBatchPolicy(initialCount: 100, subsequentCount: 25_000, maximumDelay: 0.5)
+    package static func fixed(_ count: Int) -> Self {
+        Self(initialCount: max(1, count), subsequentCount: max(1, count), maximumDelay: .infinity)
+    }
+
+    package func shouldPublish(count: Int, firstBatch: Bool, elapsed: TimeInterval) -> Bool {
+        count >= (firstBatch ? initialCount : subsequentCount) || (count > 0 && elapsed >= maximumDelay)
+    }
+}
+
 package actor RevisionReader {
     private let source: Source
     private var activeSession: RevisionStreamSession?
+    private var readGeneration = 0
+    private var filePaths: [ObjectID: String] = [:]
+
+
+    package func fileName(at revision: ObjectID, path: String, exactOnly: Bool = false) async -> String {
+        guard !path.hasSuffix("/") else { return path }
+        if let name = filePaths[revision] { return name }
+        guard case .repository(let git, let directory) = source else { return path }
+        let generation = readGeneration
+        let result = try? await git.run(RevisionLogCommands.fileName(path: path, revision: revision, exactOnly: exactOnly), in: directory)
+        guard generation == readGeneration, result?.succeeded == true else { return path }
+        let parsed = RevisionLogCommands.followedPaths(result!.standardOutputString)
+        filePaths.merge(parsed.byRevision) { first, _ in first }
+        return filePaths[revision] ?? parsed.names.first ?? path
+    }
+
+    private func rememberPaths(_ paths: [ObjectID: String], generation: Int) {
+        guard readGeneration == generation else { return }
+        filePaths = paths
+    }
 
     private enum Source: Sendable {
         case repository(git: any GitCommandRunning, directory: URL)
@@ -28,13 +87,16 @@ package actor RevisionReader {
         source = .revisions(revisions)
     }
 
-    package func read(_ context: RevisionReadContext, batchSize: Int = 200, maximumCount: Int = 0) -> AsyncThrowingStream<[Commit], Error> {
+    package func read(_ context: RevisionReadContext, batchSize: Int? = nil, maximumCount: Int = 0) -> AsyncThrowingStream<[Commit], Error> {
         activeSession?.cancel()
+        readGeneration += 1
+        let generation = readGeneration
+        filePaths = [:]
         var createdSession: RevisionStreamSession?
         let stream = AsyncThrowingStream<[Commit], Error> { continuation in
             let session = RevisionStreamSession(
                 context: context,
-                batchSize: max(1, batchSize),
+                batching: batchSize.map(RevisionBatchPolicy.fixed) ?? .upstream,
                 continuation: continuation
             )
             createdSession = session
@@ -44,15 +106,24 @@ package actor RevisionReader {
                     case .revisions(let revisions):
                         session.publish(revisions)
                     case .repository(let git, let directory):
-                        var arguments = ["log", "-z", "--all"]
-                        if maximumCount > 0 { arguments.append("--max-count=\(maximumCount)") }
-                        if context.showReflogReferences { arguments.append("--reflog") }
-                        arguments.append("--format=%H%x00%P%x00%at%x00%ct%x00%aN%x00%aE%x00%cN%x00%cE%x00%B")
-                        let command = GitCommand(
-                            arguments: arguments,
-                            accessesRemote: false,
-                            changesRepositoryState: false
-                        )
+                        let options = context.options
+                        var paths = options.filter.pathArguments
+                        if options.followRenames, options.filter.followsRenames {
+
+                            let follow = try await git.run(RevisionLogCommands.follow(path: paths[0], exactOnly: options.followRenamesExactOnly), in: directory)
+                            guard !Task.isCancelled else { throw CancellationError() }
+                            let parsed = RevisionLogCommands.followedPaths(follow.standardOutputString)
+                            await self.rememberPaths(parsed.byRevision, generation: generation)
+                            let names = parsed.names
+                            if follow.succeeded, !names.isEmpty { paths = names }
+                        }
+                        let command = RevisionLogCommands.log(
+                            sortOrder: options.sortOrder,
+                            revisionArguments: options.filter.revisionArguments(
+                                currentCheckout: context.headID, defaultCommitsLimit: maximumCount,
+                                showStashes: options.showStashes, showGitNotes: options.showGitNotes,
+                                showSessionRefs: options.showSessionRefs),
+                            paths: paths, notes: options.loadNotes)
                         let result = try await git.runStreaming(command, in: directory) { event in
                             guard event.stream == .standardOutput else { return }
                             session.receive(event.data)
@@ -64,7 +135,11 @@ package actor RevisionReader {
                                 stderr: result.standardErrorString
                             )
                         }
-                        try session.finishHistory()
+                        try await session.finishHistory { headID in
+
+                            let parents = try? await git.run(RevisionLogCommands.parents(of: headID), in: directory)
+                            return (parents?.standardOutputString ?? "").split(separator: "\n").compactMap { try? ObjectID.parse(String($0)) }
+                        }
                     }
                     session.finish()
                 } catch is CancellationError {
@@ -86,7 +161,9 @@ package actor RevisionReader {
 private final class RevisionStreamSession: @unchecked Sendable {
     private let lock = NSLock()
     private let context: RevisionReadContext
-    private let batchSize: Int
+    private let batching: RevisionBatchPolicy
+    private var firstBatch = true
+    private var lastPublication = ProcessInfo.processInfo.systemUptime
     private let continuation: AsyncThrowingStream<[Commit], Error>.Continuation
     private var input = Data()
     private var fields: [String] = []
@@ -99,18 +176,21 @@ private final class RevisionStreamSession: @unchecked Sendable {
     private let requiredStashIDs: Set<ObjectID>
     private var seenStashIDs = Set<ObjectID>()
     private var streamingEnabled: Bool
+    private let fieldCount: Int
+    private var publishedIDs = Set<ObjectID>()
     var task: Task<Void, Never>?
 
     init(
         context: RevisionReadContext,
-        batchSize: Int,
+        batching: RevisionBatchPolicy,
         continuation: AsyncThrowingStream<[Commit], Error>.Continuation
     ) {
         self.context = context
-        self.batchSize = batchSize
+        self.batching = batching
         self.continuation = continuation
-        requiredStashIDs = Set(context.stashes.map(\.objectID))
-        streamingEnabled = context.stashes.isEmpty
+        requiredStashIDs = Set(context.effectiveStashes.map(\.objectID))
+        streamingEnabled = requiredStashIDs.isEmpty
+        fieldCount = context.options.loadNotes ? 10 : 9
         incrementalBuilder = RevisionIncrementalCommitBuilder(context: context, knownHistoryIDs: [])
     }
 
@@ -123,7 +203,7 @@ private final class RevisionStreamSession: @unchecked Sendable {
             while let separator = input.firstIndex(of: 0) {
                 fields.append(String(decoding: input[..<separator], as: UTF8.self))
                 input.removeSubrange(input.startIndex...separator)
-                if fields.count == 9 {
+                if fields.count == fieldCount {
                     let record = try GitOutputParser.parseLogRecord(fields, recordIndex: recordIndex)
                     records.append(record)
                     if requiredStashIDs.contains(record.objectID) { seenStashIDs.insert(record.objectID) }
@@ -137,23 +217,38 @@ private final class RevisionStreamSession: @unchecked Sendable {
         }
     }
 
-    func finishHistory() throws {
-        lock.lock()
-        defer { lock.unlock() }
-        if let parseError { throw parseError }
-        guard input.isEmpty, fields.isEmpty else {
-            throw GitError.malformedOutput(command: "log", detail: "incomplete trailing revision record")
+    func finishHistory(headAncestors: @escaping @Sendable (ObjectID) async -> [ObjectID]) async throws {
+        let pending: (artificial: Bool, head: ObjectID?) = try lock.withLock {
+            if let parseError { throw parseError }
+            guard input.isEmpty, fields.isEmpty else {
+                throw GitError.malformedOutput(command: "log", detail: "incomplete trailing revision record")
+            }
+            guard !cancelled else { return (false, nil) }
+            if streamingEnabled {
+                publish(incrementalBuilder.finish(), locked: true)
+            } else if !records.isEmpty {
+                publish(RevisionCommitBuilder.build(history: records, context: context), locked: true)
+                records.removeAll()
+            }
+            return (context.showsArtificial && !artificialPublished, context.headID)
         }
-        guard !cancelled else { return }
-        if streamingEnabled {
-            publish(incrementalBuilder.finish(), locked: true)
-        } else if !records.isEmpty {
-            publish(RevisionCommitBuilder.build(history: records, context: context), locked: true)
-            records.removeAll()
-        } else if context.includeArtificial {
-            publish(RevisionCommitBuilder.artificialRevisions(headID: context.headID), locked: true)
+        guard pending.artificial else { return }
+
+        var anchor: ObjectID?
+        if let head = pending.head {
+            let ancestors = await headAncestors(head)
+            anchor = lock.withLock { ancestors.first { publishedIDs.contains($0) } }
+        }
+        lock.withLock {
+            guard !cancelled else { return }
+            publish(RevisionCommitBuilder.artificialRevisions(headID: context.headID, attachedTo: anchor), locked: true)
         }
     }
+
+    private var artificialPublished: Bool {
+        commits.contains { $0.isArtificial } || publishedArtificial
+    }
+    private var publishedArtificial = false
 
     func publish(_ revisions: [Commit]) {
         lock.lock()
@@ -200,11 +295,19 @@ private final class RevisionStreamSession: @unchecked Sendable {
 
     private func publish(_ revisions: [Commit], locked: Bool) {
         guard !cancelled else { return }
-        commits.append(contentsOf: revisions)
-        while commits.count >= batchSize {
-            let batch = Array(commits.prefix(batchSize))
-            commits.removeFirst(batchSize)
-            continuation.yield(batch)
+        for revision in revisions {
+            if let objectID = revision.objectID { publishedIDs.insert(objectID) }
+            if revision.isArtificial { publishedArtificial = true }
+        }
+        for revision in revisions {
+            commits.append(revision)
+            let now = ProcessInfo.processInfo.systemUptime
+            if batching.shouldPublish(count: commits.count, firstBatch: firstBatch, elapsed: now - lastPublication) {
+                continuation.yield(commits)
+                commits.removeAll(keepingCapacity: true)
+                firstBatch = false
+                lastPublication = now
+            }
         }
     }
 }
@@ -219,8 +322,8 @@ private struct RevisionIncrementalCommitBuilder {
     init(context: RevisionReadContext, knownHistoryIDs: Set<ObjectID>) {
         self.context = context
         historyIDs = knownHistoryIDs
-        stashByID = Dictionary(uniqueKeysWithValues: context.stashes.map { ($0.objectID, $0) })
-        stashByBase = Dictionary(grouping: context.stashes.compactMap { stash in
+        stashByID = Dictionary(uniqueKeysWithValues: context.effectiveStashes.map { ($0.objectID, $0) })
+        stashByBase = Dictionary(grouping: context.effectiveStashes.compactMap { stash in
             stash.parentIDs.first.map { ($0, stash) }
         }, by: \.0).mapValues { $0.map(\.1) }
     }
@@ -241,14 +344,10 @@ private struct RevisionIncrementalCommitBuilder {
         return revisions
     }
 
-    mutating func finish() -> [Commit] {
-        var revisions: [Commit] = []
-        appendArtificial(to: &revisions)
-        return revisions
-    }
+    mutating func finish() -> [Commit] { [] }
 
     private mutating func appendArtificial(to revisions: inout [Commit]) {
-        guard context.includeArtificial, !insertedArtificial else { return }
+        guard context.showsArtificial, !insertedArtificial else { return }
         insertedArtificial = true
         revisions.append(contentsOf: RevisionCommitBuilder.artificialRevisions(headID: context.headID))
     }
@@ -260,12 +359,32 @@ package struct ResolvedGitRepository: Sendable {
     package let isBare: Bool
 }
 
+
+package struct RevisionReadOptions: Sendable, Equatable {
+    package var filter = RevisionGridFilter()
+    package var sortOrder: RevisionSortOrder = .gitDefault
+
+    package var showStashes = true
+    package var showGitNotes = false
+    package var showSessionRefs = false
+    package var showArtificialCommits = true
+
+    package var loadNotes = false
+
+    package var followRenames = true
+
+
+    package var followRenamesExactOnly: Bool? = nil
+    package init() {}
+}
+
 package struct RevisionReadContext: Sendable {
     package let stashes: [GitStashRecord]
     package let referencesByCommit: [ObjectID: [RevisionReference]]
     package let headID: ObjectID?
     package let includeArtificial: Bool
-    package let showReflogReferences: Bool
+    package private(set) var options: RevisionReadOptions
+    package var showReflogReferences: Bool { options.filter.showReflogReferences }
 
     package init(
         stashes: [GitStashRecord],
@@ -278,18 +397,26 @@ package struct RevisionReadContext: Sendable {
         self.referencesByCommit = referencesByCommit
         self.headID = headID
         self.includeArtificial = includeArtificial
-        self.showReflogReferences = showReflogReferences
+        var options = RevisionReadOptions()
+        options.filter.showReflogReferences = showReflogReferences
+        self.options = options
     }
 
     package func showingReflogReferences(_ show: Bool) -> RevisionReadContext {
-        RevisionReadContext(
-            stashes: stashes,
-            referencesByCommit: referencesByCommit,
-            headID: headID,
-            includeArtificial: includeArtificial,
-            showReflogReferences: show
-        )
+        var context = self
+        context.options.filter.showReflogReferences = show
+        return context
     }
+
+    package func with(_ options: RevisionReadOptions) -> RevisionReadContext {
+        var context = self
+        context.options = options
+        return context
+    }
+
+
+    package var effectiveStashes: [GitStashRecord] { options.showStashes ? stashes : [] }
+    package var showsArtificial: Bool { includeArtificial && options.showArtificialCommits }
 }
 
 package enum RevisionCommitBuilder {
@@ -308,6 +435,19 @@ package enum RevisionCommitBuilder {
             parentIDs: [],
             references: []
         )
+    }
+
+
+    package static func artificialRevisions(headID: ObjectID?, attachedTo anchor: ObjectID?) -> [Commit] {
+        var rows = artificialRevisions(headID: headID)
+        if headID != nil {
+            let index = rows[1]
+            rows[1] = Commit(id: index.id, shortID: index.shortID, subject: index.subject, body: index.body,
+                             authorName: index.authorName, authorEmail: index.authorEmail, authorDate: index.authorDate,
+                             committerName: index.committerName, committerEmail: index.committerEmail, commitDate: index.commitDate,
+                             parentIDs: anchor.map { [$0] } ?? [], references: [], kind: .index)
+        }
+        return rows
     }
 
     package static func artificialRevisions(headID: ObjectID?) -> [Commit] {
@@ -377,16 +517,16 @@ package enum RevisionCommitBuilder {
             commitDate: record.commitDate,
             parentIDs: record.parentIDs,
             references: references
-        )
+        ).withNotes(record.notes)
     }
 
     package static func build(history: [GitLogRecord], context: RevisionReadContext) -> [Commit] {
         let historyIDs = Set(history.map(\.objectID))
-        let byID = Dictionary(uniqueKeysWithValues: context.stashes.map { ($0.objectID, $0) })
-        let byBase = Dictionary(grouping: context.stashes.compactMap { stash in stash.parentIDs.first.map { ($0, stash) } }, by: \.0).mapValues { $0.map(\.1) }
+        let byID = Dictionary(uniqueKeysWithValues: context.effectiveStashes.map { ($0.objectID, $0) })
+        let byBase = Dictionary(grouping: context.effectiveStashes.compactMap { stash in stash.parentIDs.first.map { ($0, stash) } }, by: \.0).mapValues { $0.map(\.1) }
         var commits: [Commit] = []; var inserted = false
         func artificial() {
-            guard context.includeArtificial, !inserted else { return }
+            guard context.showsArtificial, !inserted else { return }
             inserted = true
             commits.append(contentsOf: artificialRevisions(headID: context.headID))
         }
@@ -396,7 +536,7 @@ package enum RevisionCommitBuilder {
             if let value = byID[record.objectID] { commits.append(stashRevision(value)); continue }
             commits.append(revision(record, references: context.referencesByCommit[record.objectID] ?? []))
         }
-        artificial(); return commits
+        return commits
     }
 }
 
@@ -993,7 +1133,12 @@ package actor GitRepositoryModule: RepositoryOpeningDataSource {
                 let name = String(record.fullName.dropFirst("refs/tags/".count))
                 let target = record.peeledObjectID ?? record.objectID
                 tags.append(Tag(id: record.fullName, name: name, commitID: target, sortMetadata: record.sortMetadata))
-                references[target, default: []].append(RevisionReference(id: record.fullName, name: name, kind: .tag))
+                references[target, default: []].append(RevisionReference(id: record.fullName, name: name, kind: .tag,
+                                                                         isAnnotated: record.peeledObjectID != nil))
+            } else if record.fullName.hasPrefix("refs/bisect/bad") || record.fullName.hasPrefix("refs/bisect/good") {
+                references[record.objectID, default: []].append(RevisionReference(
+                    id: record.fullName, name: String(record.fullName.dropFirst("refs/bisect/".count)),
+                    kind: record.fullName.hasPrefix("refs/bisect/bad") ? .bisectBad : .bisectGood))
             }
         }
 

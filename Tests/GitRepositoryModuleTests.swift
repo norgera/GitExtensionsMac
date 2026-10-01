@@ -5,6 +5,12 @@ import Foundation
 
 enum GitRepositoryModuleTests {
     static func runRevisionReader() async throws {
+        let policy = RevisionBatchPolicy.upstream
+        require(!policy.shouldPublish(count: 99, firstBatch: true, elapsed: 0), "adaptive reader: first page waits for 100 rows")
+        require(policy.shouldPublish(count: 100, firstBatch: true, elapsed: 0), "adaptive reader: initial page is 100 rows")
+        require(!policy.shouldPublish(count: 200, firstBatch: false, elapsed: 0.49), "adaptive reader: later rows coalesce")
+        require(policy.shouldPublish(count: 1, firstBatch: false, elapsed: 0.5), "adaptive reader: half-second publication bound")
+        require(policy.shouldPublish(count: 25_000, firstBatch: false, elapsed: 0), "adaptive reader: later batch capacity matches upstream")
         let fixture = try GitFixture.make()
         defer { try? FileManager.default.removeItem(at: fixture.rootURL) }
 
@@ -31,6 +37,15 @@ enum GitRepositoryModuleTests {
         require(revisions.firstIndex(where: { $0.id == state.identity.headID.map(RevisionID.object) }) != nil, "revision reader: HEAD is present in reader-owned history")
 
         let manyRevisions = Array(repeating: revisions, count: 500).flatMap { $0 }
+        let adaptiveReader = RevisionReader(revisions: manyRevisions)
+        var adaptiveSizes: [Int] = []
+        var adaptiveRevisions: [Commit] = []
+        for try await batch in await adaptiveReader.read(state.revisionReadRequest.context) {
+            adaptiveSizes.append(batch.count)
+            adaptiveRevisions.append(contentsOf: batch)
+        }
+        require(adaptiveSizes.first == 100 && adaptiveSizes.count < 5, "adaptive reader: large history avoids fixed 200-row update storms")
+        require(adaptiveRevisions == manyRevisions, "adaptive reader: coalescing preserves all rows, artificial rows and order")
         let cancellableReader = RevisionReader(revisions: manyRevisions)
         let stale = await cancellableReader.read(state.revisionReadRequest.context, batchSize: 1)
         let consumer = Task { () -> Int in

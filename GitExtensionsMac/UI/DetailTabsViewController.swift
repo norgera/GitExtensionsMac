@@ -135,6 +135,7 @@ private final class DetailTabButton: NSButton {
 
     init(title: String, imageName: String, target: AnyObject?, action: Selector?) {
         tabImage = AppKitFactory.resourceImage(imageName, accessibilityDescription: title)
+            ?? (imageName == "GitCommandLog" ? NSImage(systemSymbolName: "terminal", accessibilityDescription: title) : nil)
         super.init(frame: .zero)
         isBordered = false
         focusRingType = .none

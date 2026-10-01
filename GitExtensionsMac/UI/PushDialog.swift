@@ -1636,8 +1636,10 @@ private final class PushProcessViewController: NSViewController, NSWindowDelegat
         task = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
-                let value = try await operation { [weak self] event in
-                    Task { @MainActor in self?.append(event) }
+                let value = try await OutputHistoryRecording.perform {
+                    try await operation { [weak self] event in
+                        Task { @MainActor in self?.append(event) }
+                    }
                 }
                 result = .success(value)
                 switch value.outcome {

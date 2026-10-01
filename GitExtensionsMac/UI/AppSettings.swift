@@ -79,11 +79,14 @@ struct BrowseDisplayPreferences: Codable, Equatable, Sendable {
 }
 
 struct AppPreferences: Codable, Equatable, Sendable {
-    var reopenLastRepository = true
+
+    var reopenLastRepository = false
+
     var maximumRecentRepositories = 20
     var theme: ApplicationTheme = .system
     var mergeCommonParentLanes = true
     var straightenGraphDiagonals = true
+    var renderGraphWithDiagonals = true
     var diffContextLines = 3
     var ignoreWhitespace = false
     var defaultSignOff = false
@@ -95,6 +98,47 @@ struct AppPreferences: Codable, Equatable, Sendable {
     var externalDiffToolPath = ""
     var externalMergeToolPath = ""
     var signingKey = ""
+
+    var openSubmoduleDiffInSeparateWindow = false
+    var automaticContinuousScroll = false
+    var automaticContinuousScrollDelay = 600
+    var outputHistoryDepth = 20
+    var showOutputHistoryAsTab = true
+    var outputHistoryPanelVisible = false
+
+    init() {}
+    private enum CodingKeys: String, CodingKey {
+        case reopenLastRepository, maximumRecentRepositories, theme, mergeCommonParentLanes, straightenGraphDiagonals, renderGraphWithDiagonals, diffContextLines, ignoreWhitespace, defaultSignOff, defaultAllowEmpty, autoStashDuringRebase, gitExecutablePath, editorPath, shellPath, externalDiffToolPath, externalMergeToolPath, signingKey, openSubmoduleDiffInSeparateWindow, automaticContinuousScroll, automaticContinuousScrollDelay, outputHistoryDepth, showOutputHistoryAsTab, outputHistoryPanelVisible
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        func value<T: Decodable>(_ key: CodingKeys, _ fallback: T) -> T { ((try? values.decodeIfPresent(T.self, forKey: key)) ?? nil) ?? fallback }
+        let defaults = AppPreferences()
+        reopenLastRepository = value(.reopenLastRepository, defaults.reopenLastRepository)
+        maximumRecentRepositories = value(.maximumRecentRepositories, defaults.maximumRecentRepositories)
+        theme = value(.theme, defaults.theme)
+        mergeCommonParentLanes = value(.mergeCommonParentLanes, defaults.mergeCommonParentLanes)
+        straightenGraphDiagonals = value(.straightenGraphDiagonals, defaults.straightenGraphDiagonals)
+        renderGraphWithDiagonals = value(.renderGraphWithDiagonals, defaults.renderGraphWithDiagonals)
+        diffContextLines = value(.diffContextLines, defaults.diffContextLines)
+        ignoreWhitespace = value(.ignoreWhitespace, defaults.ignoreWhitespace)
+        defaultSignOff = value(.defaultSignOff, defaults.defaultSignOff)
+        defaultAllowEmpty = value(.defaultAllowEmpty, defaults.defaultAllowEmpty)
+        autoStashDuringRebase = value(.autoStashDuringRebase, defaults.autoStashDuringRebase)
+        gitExecutablePath = value(.gitExecutablePath, defaults.gitExecutablePath)
+        editorPath = value(.editorPath, defaults.editorPath)
+        shellPath = value(.shellPath, defaults.shellPath)
+        externalDiffToolPath = value(.externalDiffToolPath, defaults.externalDiffToolPath)
+        externalMergeToolPath = value(.externalMergeToolPath, defaults.externalMergeToolPath)
+        signingKey = value(.signingKey, defaults.signingKey)
+        openSubmoduleDiffInSeparateWindow = value(.openSubmoduleDiffInSeparateWindow, defaults.openSubmoduleDiffInSeparateWindow)
+        automaticContinuousScroll = value(.automaticContinuousScroll, defaults.automaticContinuousScroll)
+        automaticContinuousScrollDelay = value(.automaticContinuousScrollDelay, defaults.automaticContinuousScrollDelay)
+        outputHistoryDepth = max(0, value(.outputHistoryDepth, defaults.outputHistoryDepth))
+        showOutputHistoryAsTab = value(.showOutputHistoryAsTab, defaults.showOutputHistoryAsTab)
+        outputHistoryPanelVisible = value(.outputHistoryPanelVisible, defaults.outputHistoryPanelVisible)
+    }
 }
 
 enum PullActionPreference: String, Codable, CaseIterable, Sendable {
@@ -156,6 +200,116 @@ struct StashPreferences: Codable, Equatable, Sendable {
     var windowWidth = 708.0
     var windowHeight = 520.0
     var dividerPosition = 280.0
+}
+
+
+struct RevisionGridPreferences: Codable, Equatable, Sendable {
+    var showGraphColumn = true
+    var showNotesColumn = false
+
+    var showAuthorAvatarColumn = true
+    var showAuthorNameColumn = true
+    var showDateColumn = true
+    var showObjectIDColumn = true
+    var showAuthorDate = true
+    var relativeDate = true
+    var showCommitBody = true
+    var showRemoteBranches = true
+    var showArtificialCommits = true
+    var showStashes = true
+    var showGitNotes = false
+    var showSessionRefs = false
+    var showOnlyFirstParent = false
+    var hideMergeCommits = false
+    var showSimplifyByDecoration = false
+    var fullHistoryInFileHistory = false
+    var simplifyMergesInFileHistory = false
+    var followRenamesInFileHistory = true
+    var followRenamesInFileHistoryExactOnly = false
+    var loadFileHistoryOnShow = true
+    var loadBlameOnShow = true
+    var useBrowseForFileHistory = true
+    var showSuperprojectTags = false
+    var showSuperprojectBranches = true
+    var showSuperprojectRemoteBranches = false
+
+    var showAnnotatedTagsMessages = true
+
+    var showRevisionGridTooltips = true
+
+    var revisionFilterHistory: [String] = []
+
+    init() {}
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        let fallback = RevisionGridPreferences()
+        func value<T: Decodable>(_ key: CodingKeys, _ current: T) throws -> T { try values.decodeIfPresent(T.self, forKey: key) ?? current }
+        showGraphColumn = try value(.showGraphColumn, fallback.showGraphColumn)
+        showNotesColumn = try value(.showNotesColumn, fallback.showNotesColumn)
+        showAuthorAvatarColumn = try value(.showAuthorAvatarColumn, fallback.showAuthorAvatarColumn)
+        showAuthorNameColumn = try value(.showAuthorNameColumn, fallback.showAuthorNameColumn)
+        showDateColumn = try value(.showDateColumn, fallback.showDateColumn)
+        showObjectIDColumn = try value(.showObjectIDColumn, fallback.showObjectIDColumn)
+        showAuthorDate = try value(.showAuthorDate, fallback.showAuthorDate)
+        relativeDate = try value(.relativeDate, fallback.relativeDate)
+        showCommitBody = try value(.showCommitBody, fallback.showCommitBody)
+        showRemoteBranches = try value(.showRemoteBranches, fallback.showRemoteBranches)
+        showArtificialCommits = try value(.showArtificialCommits, fallback.showArtificialCommits)
+        showStashes = try value(.showStashes, fallback.showStashes)
+        showGitNotes = try value(.showGitNotes, fallback.showGitNotes)
+        showSessionRefs = try value(.showSessionRefs, fallback.showSessionRefs)
+        showOnlyFirstParent = try value(.showOnlyFirstParent, fallback.showOnlyFirstParent)
+        hideMergeCommits = try value(.hideMergeCommits, fallback.hideMergeCommits)
+        showSimplifyByDecoration = try value(.showSimplifyByDecoration, fallback.showSimplifyByDecoration)
+        fullHistoryInFileHistory = try value(.fullHistoryInFileHistory, fallback.fullHistoryInFileHistory)
+        simplifyMergesInFileHistory = try value(.simplifyMergesInFileHistory, fallback.simplifyMergesInFileHistory)
+        followRenamesInFileHistory = try value(.followRenamesInFileHistory, fallback.followRenamesInFileHistory)
+        followRenamesInFileHistoryExactOnly = try value(.followRenamesInFileHistoryExactOnly, fallback.followRenamesInFileHistoryExactOnly)
+        loadFileHistoryOnShow = try value(.loadFileHistoryOnShow, fallback.loadFileHistoryOnShow)
+        loadBlameOnShow = try value(.loadBlameOnShow, fallback.loadBlameOnShow)
+        useBrowseForFileHistory = try value(.useBrowseForFileHistory, fallback.useBrowseForFileHistory)
+        showSuperprojectTags = try value(.showSuperprojectTags, fallback.showSuperprojectTags)
+        showSuperprojectBranches = try value(.showSuperprojectBranches, fallback.showSuperprojectBranches)
+        showSuperprojectRemoteBranches = try value(.showSuperprojectRemoteBranches, fallback.showSuperprojectRemoteBranches)
+        showAnnotatedTagsMessages = try value(.showAnnotatedTagsMessages, fallback.showAnnotatedTagsMessages)
+        showRevisionGridTooltips = try value(.showRevisionGridTooltips, fallback.showRevisionGridTooltips)
+        revisionFilterHistory = try value(.revisionFilterHistory, fallback.revisionFilterHistory)
+    }
+}
+
+
+
+struct RevisionGridRuntimeSettings: Codable, Equatable, Sendable {
+    var sortOrder: RevisionSortOrder = .gitDefault
+    var showCurrentBranchOnly = false
+    var branchFilterEnabled = false
+    var showReflogReferences = false
+}
+
+
+struct CommitInfoPreferences: Codable, Equatable, Sendable {
+    var showContainedInBranchesLocal = true
+    var showContainedInBranchesRemote = false
+    var showContainedInBranchesRemoteIfNoLocal = false
+    var showContainedInTags = true
+    var showTagThisCommitDerivesFrom = true
+
+
+    var showContainedInBranches: Bool {
+        showContainedInBranchesLocal || showContainedInBranchesRemote || showContainedInBranchesRemoteIfNoLocal
+    }
+
+    init() {}
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        let fallback = CommitInfoPreferences()
+        func value(_ key: CodingKeys, _ current: Bool) -> Bool { ((try? values.decodeIfPresent(Bool.self, forKey: key)) ?? nil) ?? current }
+        showContainedInBranchesLocal = value(.showContainedInBranchesLocal, fallback.showContainedInBranchesLocal)
+        showContainedInBranchesRemote = value(.showContainedInBranchesRemote, fallback.showContainedInBranchesRemote)
+        showContainedInBranchesRemoteIfNoLocal = value(.showContainedInBranchesRemoteIfNoLocal, fallback.showContainedInBranchesRemoteIfNoLocal)
+        showContainedInTags = value(.showContainedInTags, fallback.showContainedInTags)
+        showTagThisCommitDerivesFrom = value(.showTagThisCommitDerivesFrom, fallback.showTagThisCommitDerivesFrom)
+    }
 }
 
 struct TagPreferences: Codable, Equatable, Sendable {
@@ -249,6 +403,45 @@ struct RepositoryTreePreferences: Codable, Equatable, Sendable {
         rootOrder = rootOrder.filter { seen.insert($0).inserted }
         rootOrder.append(contentsOf: RepositoryTreeRoot.allCases.filter { seen.insert($0).inserted })
         visibleRoots.formIntersection(RepositoryTreeRoot.allCases)
+    }
+}
+
+
+
+struct BrowserLayoutPreferences: Codable, Equatable, Sendable {
+    enum CommitInfoPosition: Int, Codable, Sendable, CaseIterable {
+        case belowList, leftwardFromList, rightwardFromList
+    }
+    struct Splitter: Codable, Equatable, Sendable {
+        var distance: Double
+        var size: Double
+    }
+    var commitInfoPosition = CommitInfoPosition.belowList
+    var showSplitViewLayout = true
+    var leftPanelCollapsed = false
+
+    var toolbarItemVisibility: [String: Bool] = [:]
+    var splitters: [String: Splitter] = [:]
+
+    init() {}
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        commitInfoPosition = try values.decodeIfPresent(CommitInfoPosition.self, forKey: .commitInfoPosition) ?? .belowList
+        showSplitViewLayout = try values.decodeIfPresent(Bool.self, forKey: .showSplitViewLayout) ?? true
+        leftPanelCollapsed = try values.decodeIfPresent(Bool.self, forKey: .leftPanelCollapsed) ?? false
+        toolbarItemVisibility = try values.decodeIfPresent([String: Bool].self, forKey: .toolbarItemVisibility) ?? [:]
+        splitters = try values.decodeIfPresent([String: Splitter].self, forKey: .splitters) ?? [:]
+    }
+
+
+    static func restoredDistance(_ saved: Splitter?, size: Double, fixed: RetainingSplitViewController.ResizeBehavior) -> Double? {
+        guard let saved, saved.size > 0, saved.distance > 0, size > 0 else { return nil }
+        if saved.size == size { return saved.distance }
+        switch fixed {
+        case .proportional: return size * saved.distance / saved.size
+        case .fixedLeadingPane: return saved.distance
+        case .fixedTrailingPane: return size - (saved.size - saved.distance)
+        }
     }
 }
 
@@ -359,12 +552,57 @@ enum FileStatusGrouping: String, Codable, CaseIterable, Sendable {
     case status
 }
 
+
+struct BlamePreferences: Codable, Equatable, Sendable {
+    var ignoreWhitespace = true
+    var detectCopyInFile = false
+    var detectCopyInAll = false
+    var displayAuthorFirst = false
+    var showAuthor = true
+    var showAuthorDate = true
+    var showAuthorTime = true
+    var showLineNumbers = false
+    var showOriginalFilePath = true
+    var showAuthorAvatar = true
+
+    var useDiffViewerForBlame = false
+
+    init() {}
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        let defaults = BlamePreferences()
+        ignoreWhitespace = try values.decodeIfPresent(Bool.self, forKey: .ignoreWhitespace) ?? defaults.ignoreWhitespace
+        detectCopyInFile = try values.decodeIfPresent(Bool.self, forKey: .detectCopyInFile) ?? defaults.detectCopyInFile
+        detectCopyInAll = try values.decodeIfPresent(Bool.self, forKey: .detectCopyInAll) ?? defaults.detectCopyInAll
+        displayAuthorFirst = try values.decodeIfPresent(Bool.self, forKey: .displayAuthorFirst) ?? defaults.displayAuthorFirst
+        showAuthor = try values.decodeIfPresent(Bool.self, forKey: .showAuthor) ?? defaults.showAuthor
+        showAuthorDate = try values.decodeIfPresent(Bool.self, forKey: .showAuthorDate) ?? defaults.showAuthorDate
+        showAuthorTime = try values.decodeIfPresent(Bool.self, forKey: .showAuthorTime) ?? defaults.showAuthorTime
+        showLineNumbers = try values.decodeIfPresent(Bool.self, forKey: .showLineNumbers) ?? defaults.showLineNumbers
+        showOriginalFilePath = try values.decodeIfPresent(Bool.self, forKey: .showOriginalFilePath) ?? defaults.showOriginalFilePath
+        showAuthorAvatar = try values.decodeIfPresent(Bool.self, forKey: .showAuthorAvatar) ?? defaults.showAuthorAvatar
+        useDiffViewerForBlame = try values.decodeIfPresent(Bool.self, forKey: .useDiffViewerForBlame) ?? defaults.useDiffViewerForBlame
+    }
+}
+
 struct FileStatusListPreferences: Codable, Equatable, Sendable {
     var grouping: FileStatusGrouping = .path
     var isTreeMode = true
     var usesDenseTree = true
     var showsGroupNodesInFlatList = false
     var showsUntrackedFiles = true
+
+    var showDiffForAllParents = true
+
+    var showFindInCommitFilesGitGrep = false
+
+    var findInFilesGitGrepTypeIndex = 1
+
+    var gitGrepUserArguments = ""
+    var gitGrepIgnoreCase = false
+    var gitGrepMatchWholeWord = false
+
+    var hiddenToolbarItems: [String] = []
 
     init(
         grouping: FileStatusGrouping = .path,
@@ -380,17 +618,32 @@ struct FileStatusListPreferences: Codable, Equatable, Sendable {
         self.showsUntrackedFiles = showsUntrackedFiles
     }
 
+    var grepOptions: GitGrepOptions {
+        GitGrepOptions(userArguments: gitGrepUserArguments, ignoreCase: gitGrepIgnoreCase, matchWholeWord: gitGrepMatchWholeWord)
+    }
+
     private enum CodingKeys: String, CodingKey {
-        case grouping, isTreeMode, usesDenseTree, showsGroupNodesInFlatList, showsUntrackedFiles
+        case grouping, isTreeMode, usesDenseTree, showsGroupNodesInFlatList, showsUntrackedFiles, showDiffForAllParents,
+             showFindInCommitFilesGitGrep, findInFilesGitGrepTypeIndex, gitGrepUserArguments, gitGrepIgnoreCase,
+             gitGrepMatchWholeWord, hiddenToolbarItems
     }
 
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
-        grouping = try values.decodeIfPresent(FileStatusGrouping.self, forKey: .grouping) ?? .path
-        isTreeMode = try values.decodeIfPresent(Bool.self, forKey: .isTreeMode) ?? true
-        usesDenseTree = try values.decodeIfPresent(Bool.self, forKey: .usesDenseTree) ?? true
-        showsGroupNodesInFlatList = try values.decodeIfPresent(Bool.self, forKey: .showsGroupNodesInFlatList) ?? false
-        showsUntrackedFiles = try values.decodeIfPresent(Bool.self, forKey: .showsUntrackedFiles) ?? true
+        func value<T: Decodable>(_ key: CodingKeys, _ fallback: T) -> T { ((try? values.decodeIfPresent(T.self, forKey: key)) ?? nil) ?? fallback }
+        let defaults = FileStatusListPreferences()
+        grouping = value(.grouping, defaults.grouping)
+        isTreeMode = value(.isTreeMode, defaults.isTreeMode)
+        usesDenseTree = value(.usesDenseTree, defaults.usesDenseTree)
+        showsGroupNodesInFlatList = value(.showsGroupNodesInFlatList, defaults.showsGroupNodesInFlatList)
+        showsUntrackedFiles = value(.showsUntrackedFiles, defaults.showsUntrackedFiles)
+        showDiffForAllParents = value(.showDiffForAllParents, defaults.showDiffForAllParents)
+        showFindInCommitFilesGitGrep = value(.showFindInCommitFilesGitGrep, defaults.showFindInCommitFilesGitGrep)
+        findInFilesGitGrepTypeIndex = value(.findInFilesGitGrepTypeIndex, defaults.findInFilesGitGrepTypeIndex)
+        gitGrepUserArguments = value(.gitGrepUserArguments, defaults.gitGrepUserArguments)
+        gitGrepIgnoreCase = value(.gitGrepIgnoreCase, defaults.gitGrepIgnoreCase)
+        gitGrepMatchWholeWord = value(.gitGrepMatchWholeWord, defaults.gitGrepMatchWholeWord)
+        hiddenToolbarItems = value(.hiddenToolbarItems, defaults.hiddenToolbarItems)
     }
 }
 
@@ -576,9 +829,9 @@ enum CommitMessageAutoFormatter {
     }
 }
 
-struct RecentRepository: Codable, Equatable, Sendable {
+
+private struct LegacyRecentRepository: Codable {
     let path: String
-    var lastOpened: Date
 }
 
 @MainActor
@@ -588,12 +841,16 @@ final class AppSettingsStore {
     private enum Key {
         static let preferences = "GitExtensionsMac.preferences.v1"
         static let fonts = "GitExtensionsMac.fonts.v1"
-        static let recentRepositories = "GitExtensionsMac.recentRepositories.v1"
+        static let legacyRecentRepositories = "GitExtensionsMac.recentRepositories.v1"
+        static let recentHistory = "GitExtensionsMac.repositoryHistory.recent.v1"
+        static let favouriteHistory = "GitExtensionsMac.repositoryHistory.favourite.v1"
+        static let recentRepositorySettings = "GitExtensionsMac.recentRepositorySettings.v1"
         static let lastRepository = "GitExtensionsMac.lastRepository"
         static let pullPreferences = "GitExtensionsMac.pullPreferences.v1"
         static let pushPreferences = "GitExtensionsMac.pushPreferences.v1"
         static let commitPreferences = "GitExtensionsMac.commitPreferences.v1"
         static let fileStatusListPreferences = "GitExtensionsMac.fileStatusListPreferences.v1"
+        static let blamePreferences = "GitExtensionsMac.blamePreferences.v1"
         static let fileViewerPreferences = "GitExtensionsMac.fileViewerPreferences.v1"
         static let fileViewerRemember = "GitExtensionsMac.fileViewerRemember.v1"
         static let rebasePreferences = "GitExtensionsMac.rebasePreferences.v1"
@@ -603,16 +860,58 @@ final class AppSettingsStore {
         static let tagPreferences = "GitExtensionsMac.tagPreferences.v1"
         static let repositoryTreePreferences = "GitExtensionsMac.repositoryTreePreferences.v1"
         static let remoteManagementPreferences = "GitExtensionsMac.remoteManagementPreferences.v1"
+        static let browserLayoutPreferences = "GitExtensionsMac.browserLayoutPreferences.v1"
         static let mergePreferences = "GitExtensionsMac.mergePreferences.v1"
+        static let unsetDetailedSettings = "GitExtensionsMac.detailedSettings.unset.v1"
         static let checkoutBranchPreferences = "GitExtensionsMac.checkoutBranchPreferences.v1"
         static let repositoryCreationPreferences = "GitExtensionsMac.repositoryCreationPreferences.v1"
         static let resetPreferences = "GitExtensionsMac.resetPreferences.v1"
         static let showReflogReferences = "GitExtensionsMac.showReflogReferences"
+        static let revisionGridPreferences = "GitExtensionsMac.revisionGridPreferences.v1"
+        static let revisionGridRuntimeDefaults = "GitExtensionsMac.revisionGridRuntimeDefaults.v1"
         static let showBuildStatusIconColumn = "GitExtensionsMac.showbuildstatusiconcolumn"
         static let showBuildStatusTextColumn = "GitExtensionsMac.showbuildstatustextcolumn"
     }
 
     private let defaults: UserDefaults
+
+
+
+    var unsetDetailedSettingKeys: Set<String> {
+        get { Set(defaults.stringArray(forKey: Key.unsetDetailedSettings) ?? []) }
+        set { defaults.set(newValue.sorted(), forKey: Key.unsetDetailedSettings) }
+    }
+
+    func saveDetailedSetting(_ key: String, value: String?) {
+        switch key {
+        case DistributedSettings.remoteBranches:
+            var preferences = pushPreferences
+            preferences.loadRemoteBranchesDirectly = value?.lowercased() == "true"
+            savePushPreferences(preferences)
+        case DistributedSettings.mergeLog:
+            var preferences = mergePreferences
+            preferences.addLogMessages = value?.lowercased() == "true"
+            saveMergePreferences(preferences)
+        case DistributedSettings.mergeLogCount:
+            var preferences = mergePreferences
+            preferences.logMessagesCount = value.flatMap(DistributedSettings.normalizedMergeLogCount).flatMap(Int.init) ?? 20
+            saveMergePreferences(preferences)
+        default: return
+        }
+        var unset = unsetDetailedSettingKeys
+        if value == nil { unset.insert(key) } else { unset.remove(key) }
+        unsetDetailedSettingKeys = unset
+    }
+
+
+    var checkSettingsAtStartup: Bool {
+        get { defaults.object(forKey: "GitExtensionsMac.checkSettingsAtStartup") as? Bool ?? true }
+        set { defaults.set(newValue, forKey: "GitExtensionsMac.checkSettingsAtStartup") }
+    }
+
+    func recordSettingsCheck(allValid: Bool) {
+        if allValid { checkSettingsAtStartup = false }
+    }
 
     private var cachedColorPreferences: ApplicationColorPreferences?
     var colorPreferences: ApplicationColorPreferences {
@@ -667,11 +966,11 @@ final class AppSettingsStore {
     private(set) var preferences: AppPreferences
     private(set) var fontPreferences: ApplicationFontPreferences
     private(set) var browseDisplayPreferences: BrowseDisplayPreferences
-    private(set) var recentRepositories: [RecentRepository]
     private(set) var pullPreferences: PullPreferences
     private(set) var pushPreferences: PushPreferences
     private(set) var commitPreferences: CommitPreferences
     private(set) var fileStatusListPreferences: FileStatusListPreferences
+    private(set) var blamePreferences: BlamePreferences
     private(set) var fileViewerPreferences: FileViewerPreferences
     private(set) var fileViewerDefaults: FileViewerPreferences
     private(set) var fileViewerRemember: FileViewerRememberPreferences
@@ -681,11 +980,17 @@ final class AppSettingsStore {
     private(set) var tagPreferences: TagPreferences
     private(set) var repositoryTreePreferences: RepositoryTreePreferences
     private(set) var remoteManagementPreferences: RemoteManagementPreferences
+    private(set) var browserLayoutPreferences: BrowserLayoutPreferences
     private(set) var mergePreferences: MergePreferences
     private(set) var checkoutBranchPreferences: CheckoutBranchPreferences
     private(set) var repositoryCreationPreferences: RepositoryCreationPreferences
     private(set) var resetPreferences: ResetPreferences
-    private(set) var showReflogReferences: Bool
+
+    var showReflogReferences: Bool { revisionGridRuntime.showReflogReferences }
+    private(set) var revisionGridPreferences: RevisionGridPreferences
+
+    var revisionGridRuntime: RevisionGridRuntimeSettings
+    private(set) var revisionGridRuntimeDefaults: RevisionGridRuntimeSettings
     private(set) var showBuildStatusIconColumn: Bool
     private(set) var showBuildStatusTextColumn: Bool
 
@@ -696,9 +1001,6 @@ final class AppSettingsStore {
             .flatMap { try? decoder.decode(AppPreferences.self, from: $0) }
             ?? AppPreferences()
         preferences = loadedPreferences
-        recentRepositories = defaults.data(forKey: Key.recentRepositories)
-            .flatMap { try? decoder.decode([RecentRepository].self, from: $0) }
-            ?? []
         pullPreferences = defaults.data(forKey: Key.pullPreferences)
             .flatMap { try? decoder.decode(PullPreferences.self, from: $0) }
             ?? PullPreferences()
@@ -711,6 +1013,9 @@ final class AppSettingsStore {
         fileStatusListPreferences = defaults.data(forKey: Key.fileStatusListPreferences)
             .flatMap { try? decoder.decode(FileStatusListPreferences.self, from: $0) }
             ?? FileStatusListPreferences()
+        blamePreferences = defaults.data(forKey: Key.blamePreferences)
+            .flatMap { try? decoder.decode(BlamePreferences.self, from: $0) }
+            ?? BlamePreferences()
         fileViewerPreferences = defaults.data(forKey: Key.fileViewerPreferences)
             .flatMap { try? decoder.decode(FileViewerPreferences.self, from: $0) }
             ?? {
@@ -749,6 +1054,9 @@ final class AppSettingsStore {
             if !tagPreferences.showTagsInRepositoryTree { repositoryTreePreferences.visibleRoots.remove(.tags) }
             if !stashPreferences.showStashesInRepositoryTree { repositoryTreePreferences.visibleRoots.remove(.stashes) }
         }
+        browserLayoutPreferences = defaults.data(forKey: Key.browserLayoutPreferences)
+            .flatMap { try? decoder.decode(BrowserLayoutPreferences.self, from: $0) }
+            ?? BrowserLayoutPreferences()
         remoteManagementPreferences = defaults.data(forKey: Key.remoteManagementPreferences)
             .flatMap { try? decoder.decode(RemoteManagementPreferences.self, from: $0) }
             ?? RemoteManagementPreferences()
@@ -764,10 +1072,28 @@ final class AppSettingsStore {
         resetPreferences = defaults.data(forKey: Key.resetPreferences)
             .flatMap { try? decoder.decode(ResetPreferences.self, from: $0) }
             ?? ResetPreferences()
-        showReflogReferences = defaults.object(forKey: Key.showReflogReferences) as? Bool ?? false
+        revisionGridPreferences = defaults.data(forKey: Key.revisionGridPreferences)
+            .flatMap { try? decoder.decode(RevisionGridPreferences.self, from: $0) } ?? RevisionGridPreferences()
+        var runtimeDefaults = defaults.data(forKey: Key.revisionGridRuntimeDefaults)
+            .flatMap { try? decoder.decode(RevisionGridRuntimeSettings.self, from: $0) } ?? RevisionGridRuntimeSettings()
+        if defaults.data(forKey: Key.revisionGridRuntimeDefaults) == nil {
+
+            runtimeDefaults.showReflogReferences = defaults.object(forKey: Key.showReflogReferences) as? Bool ?? false
+        }
+        revisionGridRuntimeDefaults = runtimeDefaults
+        revisionGridRuntime = runtimeDefaults
         showBuildStatusIconColumn = defaults.object(forKey: Key.showBuildStatusIconColumn) as? Bool ?? true
         showBuildStatusTextColumn = defaults.object(forKey: Key.showBuildStatusTextColumn) as? Bool ?? false
-        recentRepositories.removeAll { !FileManager.default.fileExists(atPath: $0.path) }
+        if defaults.object(forKey: Key.unsetDetailedSettings) == nil {
+            var unset: Set<String> = []
+
+
+            if defaults.data(forKey: Key.pushPreferences) == nil { unset.insert(DistributedSettings.remoteBranches) }
+            if defaults.data(forKey: Key.mergePreferences) == nil {
+                unset.formUnion([DistributedSettings.mergeLog, DistributedSettings.mergeLogCount])
+            }
+            unsetDetailedSettingKeys = unset
+        }
         applyAppearance()
     }
 
@@ -776,6 +1102,7 @@ final class AppSettingsStore {
     }
 
     func save(_ preferences: AppPreferences) {
+        if defaults === UserDefaults.standard { CommandLog.shared.setOutputHistoryDepth(preferences.outputHistoryDepth) }
         let previous = self.preferences
         self.preferences = preferences
         defaults.set(try? JSONEncoder().encode(preferences), forKey: Key.preferences)
@@ -788,7 +1115,6 @@ final class AppSettingsStore {
             defaults.set(try? JSONEncoder().encode(viewer), forKey: Key.fileViewerPreferences)
             NotificationCenter.default.post(name: .fileViewerPreferencesDidChange, object: self)
         }
-        trimRecentRepositories()
         applyAppearance()
         NotificationCenter.default.post(name: .appPreferencesDidChange, object: self)
     }
@@ -800,6 +1126,9 @@ final class AppSettingsStore {
     }
 
     func savePushPreferences(_ preferences: PushPreferences) {
+        if preferences.loadRemoteBranchesDirectly != pushPreferences.loadRemoteBranchesDirectly {
+            unsetDetailedSettingKeys.remove(DistributedSettings.remoteBranches)
+        }
         pushPreferences = preferences
         defaults.set(try? JSONEncoder().encode(preferences), forKey: Key.pushPreferences)
         NotificationCenter.default.post(name: .pushPreferencesDidChange, object: self)
@@ -815,6 +1144,12 @@ final class AppSettingsStore {
         fileStatusListPreferences = preferences
         defaults.set(try? JSONEncoder().encode(preferences), forKey: Key.fileStatusListPreferences)
         NotificationCenter.default.post(name: .fileStatusListPreferencesDidChange, object: self)
+    }
+
+    func saveBlamePreferences(_ preferences: BlamePreferences) {
+        blamePreferences = preferences
+        defaults.set(try? JSONEncoder().encode(preferences), forKey: Key.blamePreferences)
+        NotificationCenter.default.post(name: .blamePreferencesDidChange, object: self)
     }
 
     func saveFileViewerPreferences(_ preferences: FileViewerPreferences) {
@@ -922,6 +1257,11 @@ final class AppSettingsStore {
         defaults.set(try? JSONEncoder().encode(preferences), forKey: Key.repositoryTreePreferences)
     }
 
+    func saveBrowserLayoutPreferences(_ preferences: BrowserLayoutPreferences) {
+        browserLayoutPreferences = preferences
+        defaults.set(try? JSONEncoder().encode(preferences), forKey: Key.browserLayoutPreferences)
+    }
+
     func saveRemoteManagementPreferences(_ preferences: RemoteManagementPreferences) {
         remoteManagementPreferences = preferences
         defaults.set(try? JSONEncoder().encode(preferences), forKey: Key.remoteManagementPreferences)
@@ -953,6 +1293,12 @@ final class AppSettingsStore {
     }
 
     func saveMergePreferences(_ preferences: MergePreferences) {
+        if preferences.addLogMessages != mergePreferences.addLogMessages {
+            unsetDetailedSettingKeys.remove(DistributedSettings.mergeLog)
+        }
+        if preferences.logMessagesCount != mergePreferences.logMessagesCount {
+            unsetDetailedSettingKeys.remove(DistributedSettings.mergeLogCount)
+        }
         mergePreferences = preferences
         defaults.set(try? JSONEncoder().encode(preferences), forKey: Key.mergePreferences)
     }
@@ -978,9 +1324,45 @@ final class AppSettingsStore {
         defaults.set(text, forKey: Key.showBuildStatusTextColumn)
     }
 
+
     func saveShowReflogReferences(_ show: Bool) {
-        showReflogReferences = show
-        defaults.set(show, forKey: Key.showReflogReferences)
+        revisionGridRuntime.showReflogReferences = show
+    }
+
+    var commitInfoPreferences: CommitInfoPreferences {
+        defaults.data(forKey: "GitExtensionsMac.commitInfoPreferences.v1")
+            .flatMap { try? JSONDecoder().decode(CommitInfoPreferences.self, from: $0) } ?? CommitInfoPreferences()
+    }
+
+    var avatarPreferences: AvatarPreferences {
+        defaults.data(forKey: "GitExtensionsMac.avatarPreferences.v1")
+            .flatMap { try? JSONDecoder().decode(AvatarPreferences.self, from: $0) } ?? AvatarPreferences()
+    }
+
+    func saveAvatarPreferences(_ preferences: AvatarPreferences) {
+        let previous = avatarPreferences
+        let clear = previous.provider != preferences.provider || previous.fallback != preferences.fallback || previous.customTemplate != preferences.customTemplate
+        defaults.set(try? JSONEncoder().encode(preferences), forKey: "GitExtensionsMac.avatarPreferences.v1")
+        if defaults === UserDefaults.standard {
+            Task { await AvatarService.shared.configure(preferences, clear: clear) }
+        }
+    }
+
+    func saveCommitInfoPreferences(_ preferences: CommitInfoPreferences) {
+        defaults.set(try? JSONEncoder().encode(preferences), forKey: "GitExtensionsMac.commitInfoPreferences.v1")
+    }
+
+    func saveRevisionGridPreferences(_ preferences: RevisionGridPreferences) {
+        revisionGridPreferences = preferences
+        defaults.set(try? JSONEncoder().encode(preferences), forKey: Key.revisionGridPreferences)
+    }
+
+
+
+    func saveCurrentViewSettingsAsDefault() {
+        revisionGridRuntimeDefaults = revisionGridRuntime
+        defaults.set(try? JSONEncoder().encode(revisionGridRuntime), forKey: Key.revisionGridRuntimeDefaults)
+        saveFileViewerPreferences(fileViewerPreferences)
     }
 
     func recordCloneSource(_ source: String) {
@@ -1015,33 +1397,101 @@ final class AppSettingsStore {
 
     func recordOpenedRepository(_ url: URL) {
         recordRecentRepository(url)
-        defaults.set(url.standardizedFileURL.path, forKey: Key.lastRepository)
+        defaults.set(RepositoryHistory.normalizedPath(url.path), forKey: Key.lastRepository)
     }
+
+
+
+
+    var recentRepositorySettings: RecentRepositorySettings {
+        if let data = defaults.data(forKey: Key.recentRepositorySettings),
+           let settings = try? JSONDecoder().decode(RecentRepositorySettings.self, from: data) { return settings }
+        var settings = RecentRepositorySettings()
+        if preferences.maximumRecentRepositories != 20 {
+            settings.historySize = min(max(preferences.maximumRecentRepositories, RecentRepositorySettings.historySizeRange.lowerBound),
+                                       RecentRepositorySettings.historySizeRange.upperBound)
+        }
+        return settings
+    }
+
+    func saveRecentRepositorySettings(_ settings: RecentRepositorySettings) {
+        defaults.set(try? JSONEncoder().encode(settings), forKey: Key.recentRepositorySettings)
+        NotificationCenter.default.post(name: .recentRepositoriesDidChange, object: self)
+    }
+
+
+    var recentRepositories: [RepositoryHistoryEntry] {
+        let stored: [RepositoryHistoryEntry]
+        if let data = defaults.data(forKey: Key.recentHistory) {
+            stored = (try? JSONDecoder().decode([RepositoryHistoryEntry].self, from: data)) ?? []
+        } else {
+            stored = (defaults.data(forKey: Key.legacyRecentRepositories)
+                .flatMap { try? JSONDecoder().decode([LegacyRecentRepository].self, from: $0) } ?? [])
+                .map { RepositoryHistoryEntry(path: $0.path) }
+        }
+        return RepositoryHistory.adjustHistorySize(stored, size: recentRepositorySettings.historySize)
+    }
+
+
+    var favouriteRepositories: [RepositoryHistoryEntry] {
+        defaults.data(forKey: Key.favouriteHistory)
+            .flatMap { try? JSONDecoder().decode([RepositoryHistoryEntry].self, from: $0) } ?? []
+    }
+
+
+    func saveRecentHistory(_ history: [RepositoryHistoryEntry]) {
+        let adjusted = RepositoryHistory.adjustHistorySize(history, size: recentRepositorySettings.historySize)
+        defaults.set(try? JSONEncoder().encode(adjusted), forKey: Key.recentHistory)
+        NotificationCenter.default.post(name: .recentRepositoriesDidChange, object: self)
+    }
+
+    func saveFavouriteHistory(_ history: [RepositoryHistoryEntry]) {
+        defaults.set(try? JSONEncoder().encode(history), forKey: Key.favouriteHistory)
+        NotificationCenter.default.post(name: .recentRepositoriesDidChange, object: self)
+    }
+
 
     func recordRecentRepository(_ url: URL) {
-        let path = url.standardizedFileURL.path
-        recentRepositories.removeAll { $0.path == path }
-        recentRepositories.insert(RecentRepository(path: path, lastOpened: Date()), at: 0)
-        trimRecentRepositories()
+
+        let path = RepositoryHistory.normalizedPath(url.path)
+        let history = recentRepositories
+        let updated = RepositoryHistory.addAsMostRecent(path, to: history)
+        guard updated != history || defaults.data(forKey: Key.recentHistory) == nil else { return }
+        saveRecentHistory(updated)
     }
+
 
     func removeRecentRepository(path: String) {
-        recentRepositories.removeAll { $0.path == path }
-        persistRecentRepositories()
+        let history = recentRepositories
+        let updated = RepositoryHistory.remove(path, from: history)
+        if updated != history { saveRecentHistory(updated) }
     }
+
+
+    func removeFavouriteRepository(path: String) {
+        let history = favouriteRepositories
+        let updated = RepositoryHistory.remove(path, from: history)
+        if updated != history { saveFavouriteHistory(updated) }
+    }
+
+
+    func assignCategory(_ repository: RepositoryHistoryEntry, category: String?) {
+        saveFavouriteHistory(RepositoryHistory.assignCategory(repository, category: category, favourites: favouriteRepositories))
+    }
+
+
+    func removeInvalidRepositories(isValid: (String) -> Bool = { RepositoryHistory.isValidGitWorkingDir($0) }) {
+        let recent = recentRepositories
+        let validRecent = RepositoryHistory.removeInvalid(recent, isValid: isValid)
+        if validRecent.count != recent.count { saveRecentHistory(validRecent) }
+        let favourites = favouriteRepositories
+        let validFavourites = RepositoryHistory.removeInvalid(favourites, isValid: isValid)
+        if validFavourites.count != favourites.count { saveFavouriteHistory(validFavourites) }
+    }
+
 
     func clearRecentRepositories() {
-        recentRepositories.removeAll()
-        persistRecentRepositories()
-    }
-
-    private func trimRecentRepositories() {
-        recentRepositories = Array(recentRepositories.prefix(max(1, preferences.maximumRecentRepositories)))
-        persistRecentRepositories()
-    }
-
-    private func persistRecentRepositories() {
-        defaults.set(try? JSONEncoder().encode(recentRepositories), forKey: Key.recentRepositories)
+        saveRecentHistory([])
     }
 
     private func applyAppearance() {
@@ -1057,10 +1507,12 @@ final class AppSettingsStore {
 
 extension Notification.Name {
     static let appPreferencesDidChange = Notification.Name("GitExtensionsMac.appPreferencesDidChange")
+    static let recentRepositoriesDidChange = Notification.Name("GitExtensionsMac.recentRepositoriesDidChange")
     static let pullPreferencesDidChange = Notification.Name("GitExtensionsMac.pullPreferencesDidChange")
     static let pushPreferencesDidChange = Notification.Name("GitExtensionsMac.pushPreferencesDidChange")
     static let commitPreferencesDidChange = Notification.Name("GitExtensionsMac.commitPreferencesDidChange")
     static let fileStatusListPreferencesDidChange = Notification.Name("GitExtensionsMac.fileStatusListPreferencesDidChange")
+    static let blamePreferencesDidChange = Notification.Name("GitExtensionsMac.blamePreferencesDidChange")
     static let fileViewerPreferencesDidChange = Notification.Name("GitExtensionsMac.fileViewerPreferencesDidChange")
     static let fileViewerSettingsApplied = Notification.Name("GitExtensionsMac.fileViewerSettingsApplied")
 }

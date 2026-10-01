@@ -310,7 +310,9 @@ private final class HostingProcessViewController: NSViewController, NSWindowDele
         task = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
-                succeeded = try await operation { [weak self] event in Task { @MainActor in self?.append(event.text, error: event.stream == .standardError) } }
+                succeeded = try await OutputHistoryRecording.perform {
+                    try await operation { [weak self] event in Task { @MainActor in self?.append(event.text, error: event.stream == .standardError) } }
+                }
                 status.stringValue = succeeded ? "Completed successfully" : "Failed"
             } catch is CancellationError { status.stringValue = "Aborted"; append("\nAborted\n", error: true) }
             catch { status.stringValue = "Failed"; append("\n\(error.localizedDescription)\n", error: true) }

@@ -284,6 +284,9 @@ package struct RevisionReference: Identifiable, Hashable, Sendable {
         case remoteBranch
         case tag
         case stash
+
+        case bisectGood
+        case bisectBad
     }
 
     package let id: String
@@ -292,18 +295,22 @@ package struct RevisionReference: Identifiable, Hashable, Sendable {
     package let trackingRemote: String?
     package let mergeWith: String?
 
+    package let isAnnotated: Bool
+
     package init(
         id: String,
         name: String,
         kind: Kind,
         trackingRemote: String? = nil,
-        mergeWith: String? = nil
+        mergeWith: String? = nil,
+        isAnnotated: Bool = false
     ) {
         self.id = id
         self.name = name
         self.kind = kind
         self.trackingRemote = trackingRemote
         self.mergeWith = mergeWith
+        self.isAnnotated = isAnnotated
     }
 
     package var remoteName: String? {
@@ -350,6 +357,8 @@ package struct Commit: Identifiable, Hashable, Sendable {
     package let references: [RevisionReference]
     package let kind: Kind
 
+    package var notes: String = ""
+
     package init(
         id: RevisionID,
         shortID: String,
@@ -378,6 +387,12 @@ package struct Commit: Identifiable, Hashable, Sendable {
         self.parentIDs = parentIDs
         self.references = references
         self.kind = kind
+    }
+
+    package func withNotes(_ notes: String) -> Commit {
+        var commit = self
+        commit.notes = notes
+        return commit
     }
 
     package var isMerge: Bool { parentIDs.count > 1 }
@@ -435,35 +450,32 @@ package struct AuthorAvatarPresentation: Equatable {
         self.paletteIndex = paletteIndex
     }
 
-    package static func make(name: String?, email: String?) -> AuthorAvatarPresentation {
+    package static func make(name: String?, email: String?, paletteCount: Int = 6) -> AuthorAvatarPresentation {
         let cleanName = name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let cleanEmail = email?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let selected = cleanName.isEmpty ? cleanEmail.split(separator: "@", maxSplits: 1).first.map(String.init) ?? "" : cleanName
-        let pieces = selected
-            .split(whereSeparator: { $0.isWhitespace || $0 == "." || $0 == "-" || $0 == "_" })
-            .map(String.init)
-            .filter { !$0.isEmpty }
-        let initials: String
-        if pieces.count > 1 {
-            initials = String(pieces[0].prefix(1) + pieces[pieces.count - 1].prefix(1)).uppercased()
-        } else if let value = pieces.first {
+        let pieces = selected.split(whereSeparator: { cleanName.isEmpty ? ".-_".contains($0) : $0.isWhitespace }).map(String.init)
+        func initials(_ parts: [String]) -> String {
+            guard !parts.isEmpty else { return "?" }
+            let valid = parts.filter { $0.first?.isLetter == true || $0.first?.isNumber == true }
+            guard !valid.isEmpty else { return String(parts[0].prefix(1)) + (parts.count > 1 ? String(parts[1].prefix(1)) : "") }
+            if valid.count > 1 { return String(valid[0].prefix(1) + valid[valid.count - 1].prefix(1)).uppercased() }
+            let value = valid[0]
+            if value.count == 1 { return value.uppercased() }
+            let second = value.dropFirst().first!
+            if second.isUppercase { return String(value.prefix(1)).uppercased() + String(second) }
+            let split = value.split(whereSeparator: { ".-_".contains($0) }).map(String.init)
+            if split.count > 1 { return initials(split) }
             let uppercase = value.filter(\.isUppercase)
-            if uppercase.count > 1 {
-                initials = String(uppercase.prefix(1) + uppercase.suffix(1))
-            } else if value.count == 1 {
-                initials = value.uppercased()
-            } else {
-                initials = String(value.prefix(1)).uppercased() + String(value.dropFirst().prefix(1))
-            }
-        } else {
-            initials = "?"
+            if uppercase.count > 1 { return String(uppercase.prefix(1) + uppercase.suffix(1)) }
+            return String(value.prefix(1)).uppercased() + String(second)
         }
         var hash = Int32(23)
-        for scalar in cleanEmail.unicodeScalars {
-            hash = hash &* 31 &+ Int32(bitPattern: scalar.value)
+        for scalar in cleanEmail.utf16 {
+            hash = hash &* 31 &+ Int32(scalar)
         }
         let magnitude = hash == .min ? Int(Int32.max) : abs(Int(hash))
-        return AuthorAvatarPresentation(initials: initials, paletteIndex: magnitude % 6)
+        return AuthorAvatarPresentation(initials: initials(pieces), paletteIndex: magnitude % max(1, paletteCount))
     }
 }
 
@@ -498,13 +510,43 @@ package enum FileChangeType: String, Hashable, Sendable {
     }
 }
 
+
+package enum FileStagedStatus: String, Hashable, Sendable {
+    case unset, none, workTree, index, unknown
+}
+
+
+package enum DiffBranchStatus: Hashable, Sendable {
+    case unknown, onlyA, onlyB, same, unequal
+}
+
 package struct ChangedFile: Identifiable, Hashable, Sendable {
-    package let id: String
+    package var id: String
     package let path: String
     package let oldPath: String?
-    package let changeType: FileChangeType
+    package var changeType: FileChangeType
     package let additions: Int
     package let deletions: Int
+
+    package var staged: FileStagedStatus = .none
+    package var isTracked = true
+    package var isSubmodule = false
+    package var submoduleCommitChanged = false
+    package var submoduleIsDirty = false
+    package var renameCopyPercentage: String?
+    package var diffStatus: DiffBranchStatus = .unknown
+    package var isConflict = false
+    package var isTypeChanged = false
+
+    package var isUnchanged = false
+    package var isSkipWorktree = false
+    package var isAssumeUnchanged = false
+
+    package var isStatusOnly = false
+    package var isRangeDiff = false
+    package var rangeDiffFirst: ObjectID?
+    package var rangeDiffSecond: ObjectID?
+    package var grepString: String?
 
     package init(id: String, path: String, oldPath: String?, changeType: FileChangeType, additions: Int, deletions: Int) {
         self.id = id

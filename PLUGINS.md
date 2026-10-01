@@ -72,10 +72,9 @@ templates. The built-in GitHub plugin uses them for assigned-issue templates.
 Supported lifecycle names are `PostBrowseInitialize`, `PostRegisterPlugin`,
 `PostRepositoryChanged`, `PreCommit`, `PostCommit`, `PreCheckoutBranch`,
 `PostCheckoutBranch`, `PreCheckoutRevision`, `PostCheckoutRevision`, `PostSettings`,
-and `PostUpdateSubmodules`. A Pre handler returning false vetoes the action.
-Post action events carry completion state. The standalone upstream Edit Git
-Ignore form is not implemented, so its `PostEditGitIgnore` event has no producer.
-Opening an external file editor is not treated as completion of that form.
+`PostUpdateSubmodules` and `PostEditGitIgnore` (after the Edit .gitignore /
+.git/info/exclude and Add file(s) to .gitignore dialogs close). A Pre handler
+returning false vetoes the action. Post action events carry completion state.
 
 Scripts can invoke plugins using `plugin:Name`, `{plugin.Name}`, `{plugin:Name}`
 or `{plugin=Name}`. Names are matched case-insensitively. Child-repository scripts

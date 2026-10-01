@@ -7,11 +7,44 @@ struct RevisionGraphLayout: Hashable, Sendable {
     static let maximumVisibleLanes = 40
     static let colorCount = 7
 
+
+    enum DrawStyle: Hashable, Sendable {
+        case normal
+        case drawNonRelativesGray
+        case highlightSelected
+    }
+
+
     struct Configuration: Hashable, Sendable {
-        let mergeCommonParentLanes: Bool
-        let straightenDiagonals: Bool
+        var mergeCommonParentLanes: Bool
+        var straightenDiagonals: Bool
+
+        var renderWithDiagonals = true
+
+        var straightenSegmentsLimit = 80
+        var drawStyle: DrawStyle = .drawNonRelativesGray
+
+        var onlyFirstParent = false
+
+        var highlightedRevision: RevisionID?
+
+        var colorCount = RevisionGraphLayout.colorCount
 
         var reduceGraphCrossings: Bool { !mergeCommonParentLanes }
+
+        var skipsSecondarySharedSegments: Bool { drawStyle == .normal }
+
+        init(mergeCommonParentLanes: Bool, straightenDiagonals: Bool, renderWithDiagonals: Bool = true,
+             drawStyle: DrawStyle = .drawNonRelativesGray, onlyFirstParent: Bool = false,
+             highlightedRevision: RevisionID? = nil, colorCount: Int = RevisionGraphLayout.colorCount) {
+            self.mergeCommonParentLanes = mergeCommonParentLanes
+            self.straightenDiagonals = straightenDiagonals
+            self.renderWithDiagonals = renderWithDiagonals
+            self.drawStyle = drawStyle
+            self.onlyFirstParent = onlyFirstParent
+            self.highlightedRevision = highlightedRevision
+            self.colorCount = max(1, colorCount)
+        }
 
         static let gitExtensionsDefault = Configuration(
             mergeCommonParentLanes: true,
@@ -49,8 +82,10 @@ struct RevisionGraphLayout: Hashable, Sendable {
 
     struct Row: Hashable, Sendable {
         let commitID: RevisionID
+
         let nodeLane: Int
-        let nodeColorIndex: Int
+
+        let nodeColorIndex: Int?
         let laneCount: Int
         let hasReferences: Bool
         let isHEAD: Bool
@@ -61,20 +96,94 @@ struct RevisionGraphLayout: Hashable, Sendable {
 
     let rows: [Row]
     let maximumLaneCount: Int
+    var configuration = Configuration.gitExtensionsDefault
+
+    var laneNodes: [[LaneNode]] = []
+
+    var parentIDs: [RevisionID: [RevisionID]] = [:]
+
+
+    struct LaneNode: Hashable, Sendable {
+        let lane: Int
+
+        let revisionID: RevisionID
+        let isAtNode: Bool
+
+        let singleChildID: RevisionID?
+    }
+
+
+    func node(atRow row: Int, lane: Int) -> LaneNode? {
+        guard laneNodes.indices.contains(row), lane >= 0 else { return nil }
+        return laneNodes[row].first { $0.lane == lane }
+    }
 
     static func build(
         commits: [Commit],
         completeHistory: [Commit]? = nil,
         configuration: Configuration = .gitExtensionsDefault
     ) -> RevisionGraphLayout {
-        guard !commits.isEmpty else { return RevisionGraphLayout(rows: [], maximumLaneCount: 1) }
+        guard !commits.isEmpty else { return RevisionGraphLayout(rows: [], maximumLaneCount: 1, configuration: configuration) }
 
-        let graph = GraphBuilder(
+        let graph = try! GraphBuilder(
             commits: commits,
             completeHistory: completeHistory ?? commits,
             configuration: configuration
         )
-        return graph.build()
+        return try! graph.build()
+    }
+}
+
+
+
+actor RevisionGraphCache {
+    struct Snapshot: Sendable {
+        let orderedIDs: [RevisionID]
+        let relatives: Set<RevisionID>
+        let layout: RevisionGraphLayout
+        let preparedRowCount: Int
+    }
+
+    private var input: [Commit] = []
+    private var history: [Commit] = []
+    private var configuration: RevisionGraphLayout.Configuration?
+    private var ordering: GraphBuilder.ScoreOrdering?
+    private var builder: GraphBuilder?
+
+    func prepare(commits: [Commit], completeHistory: [Commit]? = nil,
+                 configuration: RevisionGraphLayout.Configuration = .gitExtensionsDefault,
+                 through row: Int, completed: Bool) throws -> Snapshot {
+        do {
+            try Task.checkCancellation()
+            let extending = self.configuration == configuration && commits.count >= input.count
+                && commits.prefix(input.count).elementsEqual(input)
+            if !extending {
+                ordering = GraphBuilder.ScoreOrdering(onlyFirstParent: configuration.onlyFirstParent, cancellable: true)
+                builder = nil
+                input = []
+            }
+            let history = completeHistory ?? commits
+            if commits.count != input.count || builder == nil || self.history != history {
+                try ordering!.append(Array(commits.dropFirst(input.count)))
+                let next = try GraphBuilder(commits: commits, completeHistory: completeHistory ?? commits,
+                    configuration: configuration, ordered: ordering!.ordered(), cancellable: true)
+                if let builder { next.reusePreparedRows(from: builder) }
+                builder = next
+                input = commits
+                self.history = history
+                self.configuration = configuration
+            }
+            let graph = builder!
+            let layout = try graph.build(through: row, completed: completed)
+            try Task.checkCancellation()
+            return Snapshot(orderedIDs: graph.commits.map(\.id), relatives: graph.relativeIDs,
+                            layout: layout, preparedRowCount: graph.preparedRowCount)
+        } catch {
+
+
+            input = []; history = []; self.configuration = nil; ordering = nil; builder = nil
+            throw error
+        }
     }
 }
 
@@ -246,9 +355,9 @@ private final class GraphBuilder {
 
     private static let orderSegmentsLookAhead = 50
     private static let straightenLanesLookAhead = 20
-    private static let straightenGraphSegmentsLimit = 80
 
-    private let commits: [Commit]
+    let commits: [Commit]
+    private let insertedArtificial: Set<RevisionID>
     private let configuration: Layout.Configuration
     private let commitByID: [RevisionID: Commit]
     private let visibleIDs: Set<RevisionID>
@@ -256,35 +365,53 @@ private final class GraphBuilder {
     private let rowIndexByID: [RevisionID: Int]
     private let childCountByID: [RevisionID: Int]
     private let segmentsByChildID: [RevisionID: [Segment]]
-    private let relativeIDs: Set<RevisionID>
+    let relativeIDs: Set<RevisionID>
+    private let cancellable: Bool
 
     private var colorBySegment: [Segment: SegmentColor] = [:]
     private var rows: [RowState] = []
+    private var secondarySharedSince: [Segment: Int] = [:]
+    private var renderedRows: [Layout.Row] = []
+    private var renderedLaneNodes: [[Layout.LaneNode]] = []
+    private var maximumLaneCount = 1
+    private var finalized = false
+    var preparedRowCount: Int { rows.count }
 
-    init(commits: [Commit], completeHistory: [Commit], configuration: Layout.Configuration) {
-        self.commits = commits
+    init(commits input: [Commit], completeHistory: [Commit], configuration: Layout.Configuration,
+         ordered suppliedOrder: (commits: [Commit], inserted: Set<RevisionID>)? = nil,
+         cancellable: Bool = false) throws {
+        self.cancellable = cancellable
+        let ordered = suppliedOrder ?? Self.orderedByScore(input, onlyFirstParent: configuration.onlyFirstParent)
+        commits = ordered.commits
+        insertedArtificial = ordered.inserted
         self.configuration = configuration
-        commitByID = Dictionary(uniqueKeysWithValues: completeHistory.map { ($0.id, $0) })
+        commitByID = Dictionary(completeHistory.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         visibleIDs = Set(commits.map(\.id))
-        rowIndexByID = Dictionary(uniqueKeysWithValues: commits.enumerated().map { ($0.element.id, $0.offset) })
-
-        var relatives: Set<RevisionID> = []
-        var pending = completeHistory.filter(\.isHEAD).map(\.id)
-        while let id = pending.popLast() {
-            guard relatives.insert(id).inserted else { continue }
-            pending.append(contentsOf: commitByID[id]?.graphParentIDs ?? [])
-        }
-        relativeIDs = relatives
+        rowIndexByID = Dictionary(commits.enumerated().map { ($0.element.id, $0.offset) }, uniquingKeysWith: { first, _ in first })
 
         var parents: [RevisionID: [RevisionID]] = [:]
         for commit in commits {
-            parents[commit.id] = Self.visibleParents(
+            if cancellable { try Task.checkCancellation() }
+            parents[commit.id] = insertedArtificial.contains(commit.id) && commit.kind == .index ? [] : try Self.graphParents(
                 of: commit,
                 visibleIDs: visibleIDs,
-                commitByID: commitByID
+                commitByID: commitByID,
+                onlyFirstParent: configuration.onlyFirstParent, cancellable: cancellable
             )
         }
         visibleParentsByID = parents
+
+
+        var relatives: Set<RevisionID> = []
+        let listed = Set(ordered.commits.map(\.id))
+        var pending = configuration.highlightedRevision.map { listed.contains($0) ? [$0] : [] }
+            ?? ordered.commits.filter(\.isHEAD).map(\.id)
+        while let id = pending.popLast() {
+            if cancellable { try Task.checkCancellation() }
+            guard relatives.insert(id).inserted else { continue }
+            pending.append(contentsOf: parents[id] ?? [])
+        }
+        relativeIDs = relatives
 
         var children: [RevisionID: Int] = [:]
         for parentIDs in parents.values {
@@ -301,53 +428,250 @@ private final class GraphBuilder {
         segmentsByChildID = segments
     }
 
-    func build() -> Layout {
-        buildOrderedRows()
-        straightenLanes()
-        if configuration.straightenDiagonals { straightenDiagonals() }
 
-        var result: [Layout.Row] = []
-        var maximumLaneCount = 1
-        for index in rows.indices {
-            let state = rows[index]
-            let commit = commits[index]
-            let previous = index > 0 ? rows[index - 1] : nil
-            let next = index + 1 < rows.count ? rows[index + 1] : nil
-            let edges = makeEdges(for: state, at: index, previous: previous, next: next)
-            let nodeEdge = edges
-                .filter { edge in
-                    if case .continuing = edge.role { return false }
-                    return true
-                }
-                .sorted { lhs, rhs in
-                    lhs.isRelative == rhs.isRelative ? false : !lhs.isRelative && rhs.isRelative
-                }
-                .last
-            let nodeColor = nodeEdge?.colorIndex
-                ?? Self.chooseColor(seed: Self.objectIDHash(state.revisionID), avoiding: [])
-            let laneCount = min(Layout.maximumVisibleLanes, max(1, state.laneCount))
-            maximumLaneCount = max(maximumLaneCount, laneCount)
-            result.append(
-                Layout.Row(
-                    commitID: commit.id,
-                    nodeLane: min(state.revisionLane, Layout.maximumVisibleLanes - 1),
-                    nodeColorIndex: nodeColor,
-                    laneCount: laneCount,
-                    hasReferences: !commit.references.isEmpty,
-                    isHEAD: commit.isHEAD,
-                    isRelative: relativeIDs.contains(commit.id),
-                    commitKind: commit.kind,
-                    edges: edges
-                )
-            )
-        }
-        return Layout(rows: result, maximumLaneCount: maximumLaneCount)
+
+
+    static func orderedByScore(_ commits: [Commit], onlyFirstParent: Bool) -> (commits: [Commit], inserted: Set<RevisionID>) {
+        let ordering = ScoreOrdering(onlyFirstParent: onlyFirstParent)
+        try! ordering.append(commits)
+        return ordering.ordered()
     }
 
-    private func buildOrderedRows() {
-        var secondarySharedSince: [Segment: Int] = [:]
 
-        for index in commits.indices {
+
+    final class ScoreOrdering {
+        final class Node {
+            var score: Int
+            var parents: [RevisionID] = []
+            init(score: Int) { self.score = score }
+        }
+
+        private var maxScore = 0
+        private var nodes: [RevisionID: Node] = [:]
+        private var incomplete: [RevisionID: Node] = [:]
+        private var added: [Commit] = []
+        private var artificial: [Commit] = []
+        private var trailingArtificial = false
+        private let onlyFirstParent: Bool
+        private let cancellable: Bool
+
+        init(onlyFirstParent: Bool, cancellable: Bool = false) {
+            self.onlyFirstParent = onlyFirstParent
+            self.cancellable = cancellable
+        }
+
+
+        private func ensureScoreIsAbove(_ node: Node, _ minimal: Int) throws -> Int {
+            guard minimal > node.score else { return node.score }
+            node.score = minimal
+            guard !node.parents.isEmpty else { return node.score }
+            var maxScore = node.score
+            var stack: [Node] = [node]
+            while let revision = stack.popLast() {
+                if cancellable { try Task.checkCancellation() }
+                var previous: Node?
+                for id in revision.parents {
+                    guard let parent = nodes[id] ?? incomplete[id], parent.score <= revision.score else { continue }
+                    parent.score = revision.score + 1
+                    maxScore = max(maxScore, parent.score)
+                    if let current = previous {
+                        if current.parents.count >= parent.parents.count {
+                            stack.append(current)
+                            previous = parent
+                        } else {
+                            stack.append(parent)
+                        }
+                    } else {
+                        previous = parent
+                    }
+                }
+                if let previous { stack.append(previous) }
+            }
+            return maxScore
+        }
+
+        func append(_ commits: [Commit]) throws {
+            let hasReal = added.contains { !$0.isArtificial }
+            let firstRealIndex = commits.firstIndex { !$0.isArtificial }
+            let trails = (hasReal && commits.contains(where: \.isArtificial))
+                || (firstRealIndex.map { commits[$0...].contains(where: \.isArtificial) } ?? false)
+            if trails && !trailingArtificial && !artificial.isEmpty {
+
+
+                let previous = added.filter { !$0.isArtificial }
+                nodes = [:]; incomplete = [:]; added = []; maxScore = 0
+                trailingArtificial = true
+                try append(previous)
+            }
+            trailingArtificial = trailingArtificial || trails
+            for commit in commits {
+                if cancellable { try Task.checkCancellation() }
+                if commit.isArtificial && !artificial.contains(where: { $0.id == commit.id }) { artificial.append(commit) }
+                if nodes[commit.id] != nil || (trailingArtificial && commit.isArtificial) { continue }
+                let node: Node
+                if let existing = incomplete.removeValue(forKey: commit.id) {
+                    maxScore += 1
+                    existing.score = maxScore
+                    node = existing
+                } else {
+                    maxScore += 1
+                    node = Node(score: maxScore)
+                }
+                let parentIDs = onlyFirstParent ? Array(commit.graphParentIDs.prefix(1)) : commit.graphParentIDs
+                for parentID in parentIDs {
+                    maxScore += 1
+                    if let known = incomplete[parentID] {
+                        known.score = maxScore
+                    } else if let known = nodes[parentID] {
+                        maxScore = try ensureScoreIsAbove(known, maxScore)
+                    } else {
+                        incomplete[parentID] = Node(score: maxScore)
+                    }
+                    node.parents.append(parentID)
+                }
+                nodes[commit.id] = node
+                added.append(commit)
+            }
+        }
+
+        func ordered() -> (commits: [Commit], inserted: Set<RevisionID>) {
+            var ordered = added.enumerated()
+                .sorted { lhs, rhs in
+                    let a = nodes[lhs.element.id]!.score, b = nodes[rhs.element.id]!.score
+                    return a == b ? lhs.offset < rhs.offset : a < b
+                }
+                .map(\.element)
+            guard trailingArtificial else { return (ordered, []) }
+
+            let anchor = artificial.first { $0.kind == .index }?.parentIDs.first.map(RevisionID.object)
+            let position = anchor.flatMap { id in ordered.firstIndex { $0.id == id } } ?? 0
+            ordered.insert(contentsOf: artificial, at: position)
+            return (ordered, Set(artificial.map(\.id)))
+        }
+    }
+
+
+
+    func reusePreparedRows(from previous: GraphBuilder) {
+        guard configuration == previous.configuration, commits.count >= previous.rows.count else { return }
+        for index in previous.rows.indices {
+            let id = previous.commits[index].id
+            guard commits[index].id == id,
+                  visibleParentsByID[id] == previous.visibleParentsByID[id],
+                  orderedStartSegments(segmentsByChildID[id] ?? [], at: index)
+                    == previous.orderedStartSegments(previous.segmentsByChildID[id] ?? [], at: index) else { return }
+        }
+        rows = previous.rows
+        colorBySegment = previous.colorBySegment
+        secondarySharedSince = previous.secondarySharedSince
+        let lookAhead = 2 * (Self.straightenLanesLookAhead + (configuration.straightenDiagonals ? Self.straightenLanesLookAhead / 2 : 0))
+        let retainedCount = commits.count == previous.commits.count ? previous.renderedRows.count
+            : min(previous.renderedRows.count, max(0, previous.rows.count - lookAhead))
+        if relativeIDs == previous.relativeIDs && commits.prefix(retainedCount).elementsEqual(previous.commits.prefix(retainedCount)) {
+            renderedRows = Array(previous.renderedRows.prefix(retainedCount))
+            renderedLaneNodes = Array(previous.renderedLaneNodes.prefix(retainedCount))
+            maximumLaneCount = renderedRows.map(\.laneCount).max() ?? 1
+        }
+    }
+
+    private func checkCancellation() throws {
+        if cancellable { try Task.checkCancellation() }
+    }
+
+    func build(through requestedRow: Int = .max, completed: Bool = true) throws -> Layout {
+        try checkCancellation()
+        let diagonalLookAhead = configuration.straightenDiagonals ? Self.straightenLanesLookAhead / 2 : 0
+        let lookAhead = 2 * (Self.straightenLanesLookAhead + diagonalLookAhead)
+        let requested = requestedRow == .max ? commits.count - 1 : max(0, requestedRow) + lookAhead
+
+        let available = commits.count - 1 - (!completed && configuration.reduceGraphCrossings ? Self.orderSegmentsLookAhead : 0)
+        let last = min(requested, available)
+        let start = rows.count
+        let atEnd = completed && last == commits.count - 1
+        if start <= last {
+            try buildOrderedRows(through: last)
+            try straightenLanes(start: max(1, start - Self.straightenLanesLookAhead),
+                                last: atEnd ? last - 1 : last - Self.straightenLanesLookAhead)
+            if configuration.straightenDiagonals {
+                try straightenDiagonals(start: max(1, start - Self.straightenLanesLookAhead - diagonalLookAhead),
+                    last: atEnd ? last - 1 : last - Self.straightenLanesLookAhead - diagonalLookAhead)
+            }
+        } else if completed && rows.count == commits.count && !finalized {
+
+            try straightenLanes(start: max(1, rows.count - Self.straightenLanesLookAhead), last: rows.count - 2)
+            if configuration.straightenDiagonals {
+                try straightenDiagonals(start: max(1, rows.count - Self.straightenLanesLookAhead - diagonalLookAhead), last: rows.count - 2)
+            }
+        }
+        finalized = completed && rows.count == commits.count
+
+        let stableCount = completed && rows.count == commits.count ? rows.count : max(0, rows.count - lookAhead)
+        for index in renderedRows.count..<stableCount {
+            try checkCancellation()
+            let row = renderRow(at: index)
+            maximumLaneCount = max(maximumLaneCount, row.laneCount)
+            renderedRows.append(row)
+            renderedLaneNodes.append(laneNodesForRow(rows[index]))
+        }
+
+
+
+        let displayCount = max(stableCount, min(rows.count, requestedRow == .max ? rows.count : max(0, requestedRow) + 1))
+        var displayed = renderedRows
+        var laneNodes = renderedLaneNodes
+        var displayMaximumLaneCount = maximumLaneCount
+        for index in stableCount..<displayCount {
+            try checkCancellation()
+            let row = renderRow(at: index)
+            displayed.append(row)
+            laneNodes.append(laneNodesForRow(rows[index]))
+            displayMaximumLaneCount = max(displayMaximumLaneCount, row.laneCount)
+        }
+        var layout = Layout(rows: displayed, maximumLaneCount: displayMaximumLaneCount, configuration: configuration)
+        layout.laneNodes = laneNodes
+        layout.parentIDs = visibleParentsByID
+        return layout
+    }
+
+    private func renderRow(at index: Int) -> Layout.Row {
+        let state = rows[index]
+        let commit = commits[index]
+        let previous = index > 0 ? rows[index - 1] : nil
+        let next = index + 1 < rows.count ? rows[index + 1] : nil
+        return Layout.Row(commitID: commit.id, nodeLane: state.revisionLane, nodeColorIndex: nodeColor(for: state),
+            laneCount: min(Layout.maximumVisibleLanes, max(1, state.laneCount)),
+            hasReferences: commit.references.contains { $0.kind != .stash || $0.name == "stash@{0}" },
+            isHEAD: commit.isHEAD, isRelative: relativeIDs.contains(commit.id), commitKind: commit.kind,
+            edges: makeEdges(for: state, at: index, previous: previous, next: next))
+    }
+
+
+
+    private func nodeColor(for row: RowState) -> Int? {
+        let candidates = row.segments.reversed().filter { segment in
+            guard segment.parentID == row.revisionID || segment.childID == row.revisionID,
+                  let lane = row.lane(for: segment) else { return false }
+            return !(configuration.skipsSecondarySharedSegments && lane.sharing == .entire)
+        }
+        let drawOrder = candidates.filter { !relativeIDs.contains($0.childID) } + candidates.filter { relativeIDs.contains($0.childID) }
+        return drawOrder.last.map { colorBySegment[$0].map(\.index) ?? Self.chooseColor(seed: Self.objectIDHash($0.childID), avoiding: [], count: configuration.colorCount) }
+    }
+
+
+    private func laneNodesForRow(_ row: RowState) -> [Layout.LaneNode] {
+        var result = [Layout.LaneNode(lane: max(0, row.revisionLane), revisionID: row.revisionID, isAtNode: true, singleChildID: nil)]
+        var seen: Set<Int> = [max(0, row.revisionLane)]
+        for segment in row.segments {
+            guard let lane = row.lane(for: segment)?.index, seen.insert(lane).inserted else { continue }
+            result.append(.init(lane: lane, revisionID: segment.parentID, isAtNode: false, singleChildID: segment.childID))
+        }
+        return result
+    }
+
+    private func buildOrderedRows(through last: Int) throws {
+        guard rows.count <= last else { return }
+        for index in rows.count...last {
+            try checkCancellation()
             let commit = commits[index]
             let authoredSegments = segmentsByChildID[commit.id] ?? []
             let startSegments = configuration.reduceGraphCrossings
@@ -456,17 +780,17 @@ private final class GraphBuilder {
         }.map(\.element)
     }
 
-    private func straightenLanes() {
+    private func straightenLanes(start: Int, last lastStraightenIndex: Int) throws {
         guard rows.count > 2 else { return }
-        var currentIndex = 1
-        var goBackLimit = 1
-        let lastStraightenIndex = rows.count - 2
+        var currentIndex = start
+        var goBackLimit = start
 
         while currentIndex <= lastStraightenIndex {
+            try checkCancellation()
             goBackLimit = max(goBackLimit, currentIndex - Self.straightenLanesLookAhead)
             let current = rows[currentIndex]
-            guard current.segments.count <= Self.straightenGraphSegmentsLimit else {
-                currentIndex += 2
+            guard current.segments.count <= configuration.straightenSegmentsLimit else {
+                currentIndex += 1
                 continue
             }
 
@@ -510,19 +834,19 @@ private final class GraphBuilder {
         }
     }
 
-    private func straightenDiagonals() {
+    private func straightenDiagonals(start: Int, last lastStraightenIndex: Int) throws {
         let lookAhead = Self.straightenLanesLookAhead / 2
         guard lookAhead > 0, rows.count > 2 else { return }
 
-        var currentIndex = 1
-        var goBackLimit = 1
-        let lastStraightenIndex = rows.count - 2
+        var currentIndex = start
+        var goBackLimit = start
 
         while currentIndex <= lastStraightenIndex {
+            try checkCancellation()
             goBackLimit = max(goBackLimit, currentIndex - lookAhead)
             let lastLookAheadIndex = min(currentIndex + lookAhead, rows.count - 1)
             let current = rows[currentIndex]
-            guard current.segments.count <= Self.straightenGraphSegmentsLimit else {
+            guard current.segments.count <= configuration.straightenSegmentsLimit else {
                 currentIndex += 1
                 continue
             }
@@ -676,50 +1000,48 @@ private final class GraphBuilder {
         }
     }
 
+
     private func segmentLanes(for segment: Segment, at rowIndex: Int) -> SegmentLanes? {
-        guard rows.indices.contains(rowIndex),
-              let current = rows[rowIndex].lane(for: segment),
-              current.index < Layout.maximumVisibleLanes
-        else {
+        guard rows.indices.contains(rowIndex), let current = rows[rowIndex].lane(for: segment) else {
             return nil
+        }
+        let maxLanes = Layout.maximumVisibleLanes
+
+        if configuration.skipsSecondarySharedSegments && current.sharing == .entire {
+            return SegmentLanes(topLane: nil, centerLane: current.index, bottomLane: nil, primaryBottomLane: nil,
+                                isRevisionLane: false, drawsFromStart: false, drawsToEnd: false)
         }
 
         let row = rows[rowIndex]
         var topLane: Int?
         var bottomLane: Int?
-        var isRevisionLane = false
+        var isRevisionLane = true
 
         if segment.parentID == row.revisionID {
             topLane = rowIndex > 0 ? rows[rowIndex - 1].lane(for: segment)?.index : nil
-            isRevisionLane = true
         } else if segment.childID == row.revisionID {
             bottomLane = rowIndex + 1 < rows.count ? rows[rowIndex + 1].lane(for: segment)?.index : nil
-            isRevisionLane = true
         } else {
             topLane = rowIndex > 0 ? rows[rowIndex - 1].lane(for: segment)?.index : nil
             bottomLane = rowIndex + 1 < rows.count ? rows[rowIndex + 1].lane(for: segment)?.index : nil
+            isRevisionLane = false
         }
 
         let primaryBottomLane = bottomLane
-        if current.sharing == .differentStart {
+        if current.sharing == .differentStart
+            && (configuration.skipsSecondarySharedSegments || !configuration.mergeCommonParentLanes) {
             bottomLane = nil
         }
 
-        func visible(_ lane: Int?) -> Int? {
-            guard let lane, lane < Layout.maximumVisibleLanes else { return nil }
-            return lane
-        }
-        topLane = visible(topLane)
-        bottomLane = visible(bottomLane)
-
+        let center = current.index
         return SegmentLanes(
             topLane: topLane,
-            centerLane: current.index,
+            centerLane: center,
             bottomLane: bottomLane,
-            primaryBottomLane: visible(primaryBottomLane),
+            primaryBottomLane: primaryBottomLane,
             isRevisionLane: isRevisionLane,
-            drawsFromStart: topLane != nil,
-            drawsToEnd: bottomLane != nil
+            drawsFromStart: topLane.map { $0 <= maxLanes || center <= maxLanes } ?? false,
+            drawsToEnd: bottomLane.map { $0 <= maxLanes || center <= maxLanes } ?? false
         )
     }
 
@@ -735,8 +1057,9 @@ private final class GraphBuilder {
         let startIsDiagonal = abs(startShift) == 1
         let endIsDiagonal = abs(endShift) == 1
         let isBow = startIsDiagonal && endIsDiagonal && -startShift.signum() == endShift.signum()
-        let bowOffset = CGFloat(Layout.laneWidth) / 6
-        let junctionBowOffset: CGFloat = 2
+        let laneLineWidth: CGFloat = 2
+        let bowOffset = CGFloat(Layout.laneWidth / 6)
+        let junctionBowOffset: CGFloat = configuration.mergeCommonParentLanes ? laneLineWidth : bowOffset
         var horizontalOffset = isBow ? -CGFloat(startShift.signum()) * junctionBowOffset : 0
 
         var centerToStartPerpendicularly = drawsFromStart
@@ -755,12 +1078,12 @@ private final class GraphBuilder {
                     centerToEndPerpendicularly = true
                     drawsCenter = false
                     horizontalOffset = -CGFloat(startShift.signum())
-                        * ((abs(endShift) != 1 || sameDirection) ? junctionBowOffset / 3 : bowOffset)
+                        * ((abs(endShift) != 1 || sameDirection) ? CGFloat(Int(laneLineWidth) / 3) : bowOffset)
                 }
             } else if abs(endShift) == 1 {
                 centerToStartPerpendicularly = false
                 if !sameDirection {
-                    horizontalOffset = -CGFloat(startShift.signum()) * junctionBowOffset * 2 / 3
+                    horizontalOffset = -CGFloat(startShift.signum()) * CGFloat(Int(laneLineWidth) * 2 / 3)
                 }
             } else {
                 centerToStartPerpendicularly = false
@@ -799,7 +1122,7 @@ private final class GraphBuilder {
                 role = .continuing
             }
 
-            guard current.topLane != nil || current.bottomLane != nil else { continue }
+            guard current.drawsFromStart || current.drawsToEnd else { continue }
             let previousDiagonal = index > 0
                 ? segmentLanes(for: segment, at: index - 1).map(diagonal(for:))
                 : nil
@@ -812,7 +1135,7 @@ private final class GraphBuilder {
                     centerLane: current.centerLane,
                     bottomLane: current.bottomLane,
                     colorIndex: colorBySegment[segment].map(\.index)
-                        ?? Self.chooseColor(seed: Self.objectIDHash(segment.childID), avoiding: []),
+                        ?? Self.chooseColor(seed: Self.objectIDHash(segment.childID), avoiding: [], count: configuration.colorCount),
                     isRelative: relativeIDs.contains(segment.childID),
                     role: role,
                     diagonal: diagonal(for: current),
@@ -892,34 +1215,41 @@ private final class GraphBuilder {
             derivedFrom
         ].compactMap { $0 })
         return SegmentColor(
-            index: Self.chooseColor(seed: seed, avoiding: forbidden),
+            index: Self.chooseColor(seed: seed, avoiding: forbidden, count: configuration.colorCount),
             startScore: rowIndexByID[startID] ?? Int.max
         )
     }
 
-    private static func visibleParents(
+
+
+    private static func graphParents(
         of commit: Commit,
         visibleIDs: Set<RevisionID>,
-        commitByID: [RevisionID: Commit]
-    ) -> [RevisionID] {
+        commitByID: [RevisionID: Commit],
+        onlyFirstParent: Bool, cancellable: Bool
+    ) throws -> [RevisionID] {
         var result: [RevisionID] = []
         var emitted: Set<RevisionID> = []
 
-        func appendVisibleAncestors(_ id: RevisionID, visited: inout Set<RevisionID>) {
-            guard visited.insert(id).inserted else { return }
-            if visibleIDs.contains(id) {
-                if emitted.insert(id).inserted { result.append(id) }
-                return
-            }
-            guard let hiddenCommit = commitByID[id] else { return }
-            for parentID in hiddenCommit.graphParentIDs {
-                appendVisibleAncestors(parentID, visited: &visited)
-            }
-        }
-
-        for parentID in commit.graphParentIDs {
+        let parents = onlyFirstParent ? Array(commit.graphParentIDs.prefix(1)) : commit.graphParentIDs
+        for parentID in parents {
             var visited: Set<RevisionID> = []
-            appendVisibleAncestors(parentID, visited: &visited)
+            var pending = [parentID]
+            while let id = pending.popLast() {
+                if cancellable { try Task.checkCancellation() }
+                guard visited.insert(id).inserted else { continue }
+                if visibleIDs.contains(id) {
+                    if emitted.insert(id).inserted { result.append(id) }
+                    continue
+                }
+                guard let hiddenCommit = commitByID[id] else {
+
+                    if !commit.isArtificial, emitted.insert(id).inserted { result.append(id) }
+                    continue
+                }
+                let parents = onlyFirstParent ? Array(hiddenCommit.graphParentIDs.prefix(1)) : hiddenCommit.graphParentIDs
+                pending.append(contentsOf: parents.reversed())
+            }
         }
         return result
     }
@@ -944,12 +1274,13 @@ private final class GraphBuilder {
         return Int32(bitPattern: byte0 | (byte1 << 8) | (byte2 << 16) | (byte3 << 24))
     }
 
-    private static func chooseColor(seed: Int32, avoiding forbidden: Set<Int>) -> Int {
+
+    private static func chooseColor(seed: Int32, avoiding forbidden: Set<Int>, count: Int) -> Int {
         var value = seed
-        for _ in 0..<Layout.colorCount {
+        for _ in 0..<(count + forbidden.count + 1) {
             let color = value == .min
                 ? 0
-                : Int(Swift.abs(value) % Int32(Layout.colorCount))
+                : Int(Swift.abs(value) % Int32(count))
             if !forbidden.contains(color) { return color }
             value &+= 1
         }

@@ -601,6 +601,8 @@ package protocol RepositoryStashDataSource: RepositoryMutationStateDataSource {
 
 package protocol RepositoryConflictDataSource: RepositoryMutationStateDataSource {
     func abortMerge() async throws -> RepositoryMutationResult
+
+    func continueMerge() async throws -> RepositoryMutationResult
     func loadConflicts() async throws -> [RepositoryConflict]
     func loadConflictContent(
         path: String,
@@ -1240,6 +1242,25 @@ extension GitRepositoryModule: RepositoryBrowserMutationDataSource, RepositorySt
             outcome: .completed,
             message: "Merge aborted."
         )
+    }
+
+    package func continueMerge() async throws -> RepositoryMutationResult {
+        let repository = try mutationRepository()
+        guard FileManager.default.fileExists(atPath: repository.gitDirectoryURL.appendingPathComponent("MERGE_HEAD").path) else {
+            throw RepositoryMutationError.mergeNotInProgress
+        }
+        let result = try await git.run(
+            GitCommand(arguments: ["merge", "--continue"], accessesRemote: false, changesRepositoryState: true),
+            in: repository.rootURL, standardInput: nil, environment: ["GIT_EDITOR": "true"])
+        let after = try await mutationState(in: repository)
+        guard result.succeeded else {
+            if !after.conflictedPaths.isEmpty {
+                return RepositoryMutationResult(selectedCommitID: after.headID.map(RevisionID.object),
+                                                outcome: .conflicts(after.conflictedPaths), message: "Merge has unresolved conflicts.")
+            }
+            throw commandError(from: result)
+        }
+        return RepositoryMutationResult(selectedCommitID: after.headID.map(RevisionID.object), outcome: .completed, message: "Merge completed.")
     }
 
     package func loadConflicts() async throws -> [RepositoryConflict] {

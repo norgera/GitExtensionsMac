@@ -11,6 +11,7 @@ package struct GitLogRecord: Sendable {
     package let committerName: String
     package let committerEmail: String
     package let body: String
+    package var notes: String = ""
 }
 
 package struct GitRefRecord: Sendable {
@@ -104,14 +105,14 @@ package enum GitOutputParser {
     }
 
     package static func parseLogRecord(_ fields: [String], recordIndex: Int) throws -> GitLogRecord {
-        guard fields.count == 9,
+        guard fields.count == 9 || fields.count == 10,
               let objectID = try? ObjectID.parse(fields[0]),
               let authorSeconds = TimeInterval(fields[2]),
               let commitSeconds = TimeInterval(fields[3])
         else {
             throw GitError.malformedOutput(command: "log", detail: "invalid object ID or timestamp near record \(recordIndex)")
         }
-        return GitLogRecord(
+        var record = GitLogRecord(
             objectID: objectID,
             parentIDs: try fields[1].split(separator: " ").map { try ObjectID.parse(String($0)) },
             authorDate: Date(timeIntervalSince1970: authorSeconds),
@@ -122,6 +123,8 @@ package enum GitOutputParser {
             committerEmail: fields[7],
             body: fields[8].trimmingCharacters(in: .newlines)
         )
+        if fields.count == 10 { record.notes = fields[9].trimmingCharacters(in: .newlines) }
+        return record
     }
 
     package static func parseRefs(_ data: Data) throws -> [GitRefRecord] {

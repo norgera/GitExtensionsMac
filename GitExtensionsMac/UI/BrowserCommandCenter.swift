@@ -14,6 +14,7 @@ enum BrowserCommand: Equatable, Sendable {
     case cloneRepository
     case initializeRepository
     case settings
+    case repositorySettings
     case scripts
     case plugins
     case viewHostedPullRequests
@@ -63,6 +64,52 @@ enum BrowserCommand: Equatable, Sendable {
     case solveMergeConflicts
     case cherryPick
     case rebase
+
+    case undoLastCommit
+    case openFileExplorer
+    case openTerminal
+    case deleteIndexLock
+    case compressGitDatabase
+
+    case editGitIgnore
+    case editGitInfoExclude
+    case editGitAttributes
+    case editMailMap
+    case editGitConfig
+
+    case sparseWorkingCopy
+
+    case recoverLostObjects
+    case toggleLeftPanel
+    case outputHistory
+    case toggleSplitViewLayout
+    case commitInfoPosition(Int)
+    case toolbarVisibility(String)
+    case toolbarItemVisibility(String)
+    case stash
+    case stashPop
+    case stashStaged
+    case quickPull
+    case quickFetch
+    case quickPush
+    case quickPullOrFetch
+    case focusFilter
+    case focusNextTab(Bool)
+    case goToSuperproject
+
+
+    case revisionGrid(String)
+
+
+
+    case addNotes
+
+    case fileListCommand(String)
+    case refreshDashboard
+    case recentRepositoriesSettings
+
+    case gitGui
+    case gitK
 
     case showStatus(String)
     case unavailable(String)
@@ -125,7 +172,79 @@ final class BrowserCommandAvailability: ObservableObject {
     @Published var canManageWorktrees = false
     @Published var canManageSubmodules = false
 
+    @Published var toolbars: [BrowserToolbarState] = []
+
+    @Published var layout = BrowserLayoutPreferences()
+
+    @Published var hasRepository = false
+
+    @Published var isDashboard = false
+    @Published var isBareRepository = false
+
+    @Published var selectionEligibility = BrowserCommandEligibility()
+
+    @Published var gridMenuState: RevisionGridMenuModel.State?
+
     private init() {}
+}
+
+extension BrowserCommand {
+
+    static func browseHotkey(_ identifier: String) -> BrowserCommand? {
+        switch identifier {
+        case "stash": .stash
+        case "stashPop": .stashPop
+        case "stashStaged": .stashStaged
+        case "quickPull": .quickPull
+        case "quickFetch": .quickFetch
+        case "quickPullOrFetch": .quickPullOrFetch
+        case "quickPush": .quickPush
+        case "toggleLeftPanel": .toggleLeftPanel
+        case "gitBash": .openTerminal
+        case "focusFilter": .focusFilter
+        case "focusNextTab": .focusNextTab(true)
+        case "focusPrevTab": .focusNextTab(false)
+        case "goToSuperproject": .goToSuperproject
+        case "addNotes": .addNotes
+        case "openWithDifftool", "openWithDifftoolFirstToLocal", "openWithDifftoolSelectedToLocal",
+             "openAsTempFile", "openAsTempFileWith", "findFileInSelectedCommit", "editFile": .fileListCommand(identifier)
+        default: nil
+        }
+    }
+}
+
+
+struct BrowserToolbarState: Equatable, Sendable, Identifiable {
+    struct Item: Equatable, Sendable, Identifiable {
+        let id: String
+        let title: String
+        var isVisible: Bool
+    }
+    let id: String
+    var isVisible: Bool
+    var items: [Item]
+}
+
+
+struct BrowserCommandEligibility: Equatable, Sendable {
+
+    var singleNormalCommitNotBare = false
+
+    var rebase = false
+
+    var singleNormalCommit = false
+
+    var notBare = false
+
+    static func make(selected: [Commit], isBare: Bool) -> Self {
+        let single = selected.count == 1 && !selected[0].isArtificial
+        var eligibility = Self()
+        eligibility.singleNormalCommit = single
+        eligibility.singleNormalCommitNotBare = single && !isBare
+        eligibility.rebase = (1...2).contains(selected.count) && selected.allSatisfy { !$0.isArtificial } && !isBare
+        eligibility.notBare = !isBare
+        return eligibility
+    }
 }
 
 final class PlaceholderMenuTarget: NSObject {
