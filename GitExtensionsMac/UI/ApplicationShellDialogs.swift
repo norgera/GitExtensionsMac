@@ -1297,7 +1297,8 @@ final class SettingsViewController: NSViewController, NSOutlineViewDataSource, N
                 toggle("Remember the Show entire file preference", value: viewerRememberDraft.entireFile) { self.viewerRememberDraft.entireFile = $0 },
                 toggle("Remember the Show nonprinting characters preference", value: viewerRememberDraft.nonPrinting) { self.viewerRememberDraft.nonPrinting = $0 },
                 toggle("Remember the Number of context lines preference", value: viewerRememberDraft.contextLines) { self.viewerRememberDraft.contextLines = $0 },
-                toggle("Remember syntax highlighting", value: viewerRememberDraft.syntaxHighlighting) { self.viewerRememberDraft.syntaxHighlighting = $0 }
+                toggle("Remember syntax highlighting", value: viewerRememberDraft.syntaxHighlighting) { self.viewerRememberDraft.syntaxHighlighting = $0 },
+                toggle("Remember the 'Diff appearance' preference", value: viewerRememberDraft.diffAppearance) { self.viewerRememberDraft.diffAppearance = $0 }
             ]))
             let saveDefaults = CallbackButton(title: "Save current view settings as default", target: nil, action: #selector(CallbackButton.invoke))
             saveDefaults.target = saveDefaults
@@ -1314,6 +1315,10 @@ final class SettingsViewController: NSViewController, NSOutlineViewDataSource, N
             content.addArrangedSubview(toggle("Treat all files as text", value: viewerDraft.treatsAllFilesAsText) { self.viewerDraft.treatsAllFilesAsText = $0 })
             content.addArrangedSubview(toggle("Show non-printing characters", value: viewerDraft.showsNonPrintingCharacters) { self.viewerDraft.showsNonPrintingCharacters = $0 })
             content.addArrangedSubview(toggle("Syntax highlighting", value: viewerDraft.showsSyntaxHighlighting) { self.viewerDraft.showsSyntaxHighlighting = $0 })
+            let reverseColors = toggle("Reverse background color", value: viewerDraft.reverseGitColoring) { self.viewerDraft.reverseGitColoring = $0 }
+            reverseColors.isEnabled = viewerDraft.useGitColoring
+            content.addArrangedSubview(toggle("Use Git coloring", value: viewerDraft.useGitColoring) { self.viewerDraft.useGitColoring = $0; reverseColors.isEnabled = $0 })
+            content.addArrangedSubview(reverseColors)
             content.addArrangedSubview(toggle("Enable automatic continuous scroll (without Option key)", value: draft.automaticContinuousScroll) { self.draft.automaticContinuousScroll = $0 })
             content.addArrangedSubview(toggle("Open Submodule Diff in separate window", value: draft.openSubmoduleDiffInSeparateWindow) { self.draft.openSubmoduleDiffInSeparateWindow = $0 })
             let encodings = store.viewerEncodings(including: viewerDraft.textEncoding)

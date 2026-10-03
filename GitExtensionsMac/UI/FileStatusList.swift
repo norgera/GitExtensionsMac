@@ -1601,28 +1601,38 @@ enum FileSearchWindow {
     }
 
     @MainActor
-    static func present(owner: NSWindow, candidates: @escaping (String) -> [ChangedFile], selected: @escaping (ChangedFile) -> Void) {
-        let controller = FileSearchController(candidates: candidates, selected: selected)
-        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 320, height: 60), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+    static func present(owner: NSWindow, standalone: Bool = false, candidates: @escaping (String) -> [ChangedFile], selected: @escaping (ChangedFile) -> Void, onClose: (() -> Void)? = nil) {
+        let controller = FileSearchController(candidates: candidates, selected: selected, onClose: onClose)
+        let panel = (standalone ? NSWindow.self : NSPanel.self).init(contentRect: NSRect(x: 0, y: 0, width: 320, height: 60), styleMask: [.titled, .closable], backing: .buffered, defer: false)
         panel.title = "Find file"
         panel.contentViewController = controller
         controller.panel = panel
-        owner.beginSheet(panel)
+        guard standalone else { owner.beginSheet(panel); return }
+        panel.isReleasedWhenClosed = false
+        controller.standalonePanel = panel
+        panel.center()
+        NSApp.activate(ignoringOtherApps: true)
+        panel.makeKeyAndOrderFront(nil)
+        owner.orderOut(nil)
     }
 
-    private final class FileSearchController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate {
+    private final class FileSearchController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate, NSWindowDelegate {
         let candidates: (String) -> [ChangedFile]
         let selected: (ChangedFile) -> Void
-        weak var panel: NSPanel?
+        let onClose: (() -> Void)?
+        var didClose = false
+        weak var panel: NSWindow?
+        var standalonePanel: NSWindow?
         private let field = NSTextField()
         private let table = NSTableView()
         private let scroll = NSScrollView()
         private var results: [ChangedFile] = []
         private var tableHeight: NSLayoutConstraint?
 
-        init(candidates: @escaping (String) -> [ChangedFile], selected: @escaping (ChangedFile) -> Void) {
+        init(candidates: @escaping (String) -> [ChangedFile], selected: @escaping (ChangedFile) -> Void, onClose: (() -> Void)?) {
             self.candidates = candidates
             self.selected = selected
+            self.onClose = onClose
             super.init(nibName: nil, bundle: nil)
         }
         required init?(coder: NSCoder) { nil }
@@ -1665,6 +1675,7 @@ enum FileSearchWindow {
 
         override func viewDidAppear() {
             super.viewDidAppear()
+            panel?.delegate = self
             view.window?.makeFirstResponder(field)
         }
 
@@ -1702,10 +1713,14 @@ enum FileSearchWindow {
         }
 
         private func close(_ file: ChangedFile?) {
-            guard let panel else { return }
-            panel.sheetParent?.endSheet(panel)
+            guard let panel, !didClose else { return }
+            didClose = true
+            if let parent = panel.sheetParent { parent.endSheet(panel) } else { panel.orderOut(nil) }
+            standalonePanel = nil
             if let file { selected(file) }
+            onClose?()
         }
+        func windowShouldClose(_ sender: NSWindow) -> Bool { close(nil); return true }
     }
 }
 

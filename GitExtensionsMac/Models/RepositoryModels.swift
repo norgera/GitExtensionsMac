@@ -558,6 +558,32 @@ package struct ChangedFile: Identifiable, Hashable, Sendable {
     }
 }
 
+package enum DiffDisplayAppearance: String, CaseIterable, Hashable, Sendable, Codable {
+    case patch
+    case gitWordDiff
+    case difftastic
+}
+
+package enum DiffTextColor: Hashable, Sendable {
+    case text(dim: Bool)
+    case palette(Int, dim: Bool)
+    case rgb(Int, Int, Int)
+}
+
+package struct DiffTextStyle: Hashable, Sendable {
+    package var location: Int
+    package var length: Int
+    package var foreground: DiffTextColor?
+    package var background: DiffTextColor?
+
+    package init(location: Int, length: Int, foreground: DiffTextColor?, background: DiffTextColor?) {
+        self.location = location
+        self.length = length
+        self.foreground = foreground
+        self.background = background
+    }
+}
+
 package struct DiffLine: Identifiable, Hashable, Sendable {
     package enum Kind: Hashable, Sendable {
         case header
@@ -572,25 +598,34 @@ package struct DiffLine: Identifiable, Hashable, Sendable {
     package let newLineNumber: Int?
     package let kind: Kind
     package let text: String
+    package let styles: [DiffTextStyle]
+    package let isMixedChange: Bool
 
-    package init(id: String, oldLineNumber: Int?, newLineNumber: Int?, kind: Kind, text: String) {
+    package init(id: String, oldLineNumber: Int?, newLineNumber: Int?, kind: Kind, text: String,
+                 styles: [DiffTextStyle] = [], isMixedChange: Bool = false) {
         self.id = id
         self.oldLineNumber = oldLineNumber
         self.newLineNumber = newLineNumber
         self.kind = kind
         self.text = text
+        self.styles = styles
+        self.isMixedChange = isMixedChange
     }
+
+    package var isChange: Bool { kind == .addition || kind == .deletion || isMixedChange }
 }
 
 package struct FileDiff: Identifiable, Hashable, Sendable {
     package let id: String
     package let fileID: String
     package let lines: [DiffLine]
+    package let appearance: DiffDisplayAppearance
 
-    package init(id: String, fileID: String, lines: [DiffLine]) {
+    package init(id: String, fileID: String, lines: [DiffLine], appearance: DiffDisplayAppearance = .patch) {
         self.id = id
         self.fileID = fileID
         self.lines = lines
+        self.appearance = appearance
     }
 }
 
@@ -607,19 +642,34 @@ package struct FileDiffOptions: Hashable, Sendable {
     package var contextLines: Int
     package var showsEntireFile: Bool
     package var treatsAllFilesAsText: Bool
+    package var appearance: DiffDisplayAppearance
+    package var difftasticWidth: Int
+    package var difftasticSyntaxHighlighting: Bool
+    package var useGitColoring: Bool
+    package var reverseGitColoring: Bool
 
     package init(
         whitespace: DiffWhitespaceMode = .none,
         contextLines: Int = 3,
         showsEntireFile: Bool = false,
         treatsAllFilesAsText: Bool = false,
-        usesHistogram: Bool = false
+        usesHistogram: Bool = false,
+        appearance: DiffDisplayAppearance = .patch,
+        difftasticWidth: Int = 88,
+        difftasticSyntaxHighlighting: Bool = true,
+        useGitColoring: Bool = false,
+        reverseGitColoring: Bool = true
     ) {
         self.whitespace = whitespace
         self.contextLines = max(0, contextLines)
         self.showsEntireFile = showsEntireFile
         self.treatsAllFilesAsText = treatsAllFilesAsText
         self.usesHistogram = usesHistogram
+        self.appearance = appearance
+        self.difftasticWidth = difftasticWidth
+        self.difftasticSyntaxHighlighting = difftasticSyntaxHighlighting
+        self.useGitColoring = useGitColoring
+        self.reverseGitColoring = reverseGitColoring
     }
 
     package var gitArguments: [String] {

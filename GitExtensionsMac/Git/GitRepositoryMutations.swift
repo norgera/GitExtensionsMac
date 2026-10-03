@@ -574,6 +574,7 @@ package protocol RepositoryStagingDataSource: RepositoryMutationStateDataSource 
     func unstageAll() async throws -> RepositoryMutationResult
     func applyHunk(_ selection: RepositoryHunkSelection) async throws -> RepositoryMutationResult
     func applyLines(_ selection: RepositoryLineSelection) async throws -> RepositoryMutationResult
+    func resetLines(_ selection: RepositoryLineSelection) async throws -> RepositoryMutationResult
     func resetChanges(_ request: RepositoryResetChangesRequest) async throws -> RepositoryMutationResult
 }
 
@@ -819,6 +820,36 @@ extension GitRepositoryModule: RepositoryBrowserMutationDataSource, RepositorySt
         return try await refreshedMutationResult(
             message: "\(verb) \(selection.lineIDs.count) selected line(s) in \(selection.file.path).",
             selectedCommitID: selectedID
+        )
+    }
+
+    package func resetLines(_ selection: RepositoryLineSelection) async throws -> RepositoryMutationResult {
+        let repository = try mutationRepository()
+        let patch: Data?
+        var arguments = ["apply", "--whitespace=nowarn"]
+        if selection.direction == .stage {
+            patch = GitResetLinePatchBuilder.patch(from: selection.diff, selecting: selection.lineIDs)
+        } else {
+            patch = GitSelectedLinePatchBuilder.patch(from: selection.diff, selecting: selection.lineIDs, direction: .unstage,
+                                                      isNewFile: selection.file.changeType == .added,
+                                                      isRenamedFile: selection.file.changeType == .renamed)
+            arguments += ["--reverse", "--index"]
+        }
+        guard let patch else { throw RepositoryMutationError.lineSelectionUnavailable }
+        let result = try await git.run(
+            GitCommand(arguments: arguments, accessesRemote: false, changesRepositoryState: true),
+            in: repository.rootURL,
+            standardInput: patch,
+            environment: [:]
+        )
+        guard result.succeeded else {
+            let output = (result.standardOutputString + result.standardErrorString).trimmingCharacters(in: .whitespacesAndNewlines)
+            throw GitError.commandFailed(arguments: result.arguments, status: result.exitStatus,
+                                         stderr: output + "\n\n" + String(decoding: patch, as: UTF8.self))
+        }
+        return try await refreshedMutationResult(
+            message: "Reset \(selection.lineIDs.count) selected line(s) in \(selection.file.path).",
+            selectedCommitID: selection.direction == .stage ? .workingDirectory : .index
         )
     }
 

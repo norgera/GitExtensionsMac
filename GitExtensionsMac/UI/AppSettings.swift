@@ -656,11 +656,14 @@ struct FileViewerPreferences: Codable, Equatable, Sendable {
     var showsNonPrintingCharacters = false
     var showsSyntaxHighlighting = true
     var textEncoding: RepositoryTextEncoding = .automatic
+    var diffAppearance: DiffDisplayAppearance = .patch
+    var useGitColoring = true
+    var reverseGitColoring = true
 
     init() {}
     private enum CodingKeys: String, CodingKey {
         case usesHistogram, whitespace, contextLines, showsEntireFile, treatsAllFilesAsText
-        case showsNonPrintingCharacters, showsSyntaxHighlighting, textEncoding
+        case showsNonPrintingCharacters, showsSyntaxHighlighting, textEncoding, diffAppearance, useGitColoring, reverseGitColoring
     }
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -672,6 +675,9 @@ struct FileViewerPreferences: Codable, Equatable, Sendable {
         showsNonPrintingCharacters = try values.decodeIfPresent(Bool.self, forKey: .showsNonPrintingCharacters) ?? false
         showsSyntaxHighlighting = try values.decodeIfPresent(Bool.self, forKey: .showsSyntaxHighlighting) ?? true
         textEncoding = try values.decodeIfPresent(RepositoryTextEncoding.self, forKey: .textEncoding) ?? .automatic
+        diffAppearance = (try? values.decodeIfPresent(DiffDisplayAppearance.self, forKey: .diffAppearance)) ?? .patch
+        useGitColoring = try values.decodeIfPresent(Bool.self, forKey: .useGitColoring) ?? true
+        reverseGitColoring = try values.decodeIfPresent(Bool.self, forKey: .reverseGitColoring) ?? true
     }
 
     var diffOptions: FileDiffOptions {
@@ -680,7 +686,11 @@ struct FileViewerPreferences: Codable, Equatable, Sendable {
             contextLines: contextLines,
             showsEntireFile: showsEntireFile,
             treatsAllFilesAsText: treatsAllFilesAsText,
-            usesHistogram: usesHistogram
+            usesHistogram: usesHistogram,
+            appearance: diffAppearance,
+            difftasticSyntaxHighlighting: diffAppearance == .difftastic ? showsSyntaxHighlighting : true,
+            useGitColoring: useGitColoring,
+            reverseGitColoring: reverseGitColoring
         )
     }
 }
@@ -691,6 +701,18 @@ struct FileViewerRememberPreferences: Codable, Equatable, Sendable {
     var nonPrinting = false
     var contextLines = false
     var syntaxHighlighting = true
+    var diffAppearance = false
+
+    init() {}
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        whitespace = try values.decodeIfPresent(Bool.self, forKey: .whitespace) ?? true
+        entireFile = try values.decodeIfPresent(Bool.self, forKey: .entireFile) ?? false
+        nonPrinting = try values.decodeIfPresent(Bool.self, forKey: .nonPrinting) ?? false
+        contextLines = try values.decodeIfPresent(Bool.self, forKey: .contextLines) ?? false
+        syntaxHighlighting = try values.decodeIfPresent(Bool.self, forKey: .syntaxHighlighting) ?? true
+        diffAppearance = try values.decodeIfPresent(Bool.self, forKey: .diffAppearance) ?? false
+    }
 }
 
 enum CommitMessageValidationIssue: Equatable, Sendable {
@@ -1205,6 +1227,8 @@ final class AppSettingsStore {
         fileViewerDefaults.textEncoding = preferences.textEncoding
         fileViewerDefaults.usesHistogram = preferences.usesHistogram
         fileViewerDefaults.treatsAllFilesAsText = preferences.treatsAllFilesAsText
+        fileViewerDefaults.useGitColoring = preferences.useGitColoring
+        fileViewerDefaults.reverseGitColoring = preferences.reverseGitColoring
         if fileViewerRemember.contextLines {
             fileViewerDefaults.contextLines = preferences.contextLines
         }
@@ -1220,6 +1244,7 @@ final class AppSettingsStore {
         if !fileViewerRemember.entireFile { result.showsEntireFile = fileViewerDefaults.showsEntireFile }
         if !fileViewerRemember.nonPrinting { result.showsNonPrintingCharacters = fileViewerDefaults.showsNonPrintingCharacters }
         if !fileViewerRemember.syntaxHighlighting { result.showsSyntaxHighlighting = fileViewerDefaults.showsSyntaxHighlighting }
+        if !fileViewerRemember.diffAppearance { result.diffAppearance = fileViewerDefaults.diffAppearance }
         if !fileViewerRemember.contextLines { result.contextLines = 3 }
         fileViewerPreferences = result
         return result

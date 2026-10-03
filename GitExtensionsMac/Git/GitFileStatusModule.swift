@@ -142,17 +142,27 @@ extension GitRepositoryModule: RepositoryFileStatusDataSource {
         let output: GitCommandResult
         if group.kind == .combined, case .object(let merge) = group.second {
             output = try await run(FileStatusCommands.combinedDiff(merge, path: file.path, options: options))
-        } else if !file.isTracked {
-            output = try await run(GitCommand(arguments: ["diff", "--no-ext-diff", "--no-index", "--patch", "--no-color"] + options.gitArguments
-                                              + ["--", "/dev/null", file.path], accessesRemote: false, changesRepositoryState: false))
-        } else if group.first == nil, case .object(let id) = group.second {
-            output = try await run(GitCommand(arguments: ["diff-tree", "--root", "--no-commit-id", "-r", "--patch", "--no-color",
-                                                          "--find-renames", "--find-copies"] + options.gitArguments + [id.string, "--"] + paths,
-                                              accessesRemote: false, changesRepositoryState: false))
         } else {
-            output = try await run(GitCommand(arguments: ["diff", "--no-ext-diff", "--patch", "--no-color", "--find-renames", "--find-copies"]
-                                              + options.gitArguments + FileStatusCommands.revisionArguments(first: group.first, second: group.second)
-                                              + ["--"] + paths, accessesRemote: false, changesRepositoryState: false))
+            let root = try fileStatusRoot()
+            let arguments: [String]
+            let difftastic: () async throws -> (revisions: [String], paths: [String], noIndex: Bool)
+            if !file.isTracked {
+                arguments = ["diff", "--no-ext-diff", "--no-index", "--patch", "--no-color"] + options.gitArguments + ["--", "/dev/null", file.path]
+                difftastic = { ([], ["/dev/null", file.path], true) }
+            } else if group.first == nil, case .object(let id) = group.second {
+                arguments = ["diff-tree", "--root", "--no-commit-id", "-r", "--patch", "--no-color",
+                             "--find-renames", "--find-copies"] + options.gitArguments + [id.string, "--"] + paths
+                difftastic = { [self] in ([try await emptyTreeID(in: root), id.string], paths, false) }
+            } else {
+                let revisions = FileStatusCommands.revisionArguments(first: group.first, second: group.second)
+                arguments = ["diff", "--no-ext-diff", "--patch", "--no-color", "--find-renames", "--find-copies"]
+                    + options.gitArguments + revisions + ["--"] + paths
+                difftastic = { (revisions, paths, false) }
+            }
+            if let diff = try await appearanceDiff(file: file, options: options, patchArguments: arguments, difftastic: difftastic, directory: root) {
+                return .diff(diff)
+            }
+            output = try await run(GitCommand(arguments: arguments, accessesRemote: false, changesRepositoryState: false))
         }
         guard output.succeeded || output.exitStatus == 1 else {
             throw GitError.commandFailed(arguments: output.arguments, status: output.exitStatus, stderr: output.standardErrorString)
@@ -291,6 +301,37 @@ extension GitRepositoryModule: RepositoryFileStatusDataSource {
         return FileStatusApplyResult(succeeded: result.succeeded, output: output, patch: String(decoding: patch, as: UTF8.self))
     }
 
+
+    package func applyLinePatch(_ kind: FileStatusLinePatchKind, file: ChangedFile, diff: FileDiff, lineIDs: Set<String>) async throws -> FileStatusApplyResult {
+        let isNew = file.changeType == .added
+        let isRenamed = file.changeType == .renamed
+        let patch: Data?
+        let arguments: [String]
+        switch kind {
+        case .stage:
+            patch = GitSelectedLinePatchBuilder.patch(from: diff, selecting: lineIDs, direction: .stage, isNewFile: isNew, isRenamedFile: isRenamed)
+            arguments = ["apply", "--cached", "--index", "--whitespace=nowarn"]
+        case .unstage:
+            patch = GitSelectedLinePatchBuilder.patch(from: diff, selecting: lineIDs, direction: .unstage, isNewFile: isNew, isRenamedFile: isRenamed)
+            arguments = ["apply", "--cached", "--index", "--whitespace=nowarn", "--reverse"]
+        case .resetWorkTree:
+            patch = GitResetLinePatchBuilder.patch(from: diff, selecting: lineIDs)
+            arguments = ["apply", "--whitespace=nowarn"]
+        case .resetIndex:
+            patch = GitSelectedLinePatchBuilder.patch(from: diff, selecting: lineIDs, direction: .unstage, isNewFile: isNew, isRenamedFile: isRenamed)
+            arguments = ["apply", "--whitespace=nowarn", "--reverse", "--index"]
+        case .applyToWorkTree:
+            patch = GitSelectedLinePatchBuilder.patch(from: diff, selecting: lineIDs, direction: .stage, isNewFile: isNew, isRenamedFile: false)
+            arguments = ["apply", "--3way", "--index", "--whitespace=nowarn"]
+        case .revertToWorkTree:
+            patch = GitResetLinePatchBuilder.patch(from: diff, selecting: lineIDs)
+            arguments = ["apply", "--3way", "--index", "--whitespace=nowarn"]
+        }
+        guard let patch, !patch.isEmpty else { return FileStatusApplyResult(succeeded: true, output: "", patch: "") }
+        let result = try await run(GitCommand(arguments: arguments, accessesRemote: false, changesRepositoryState: true), input: patch)
+        let output = (result.standardOutputString + result.standardErrorString).trimmingCharacters(in: .whitespacesAndNewlines)
+        return FileStatusApplyResult(succeeded: result.succeeded, output: output, patch: String(decoding: patch, as: UTF8.self))
+    }
 
     package func submoduleCommit(path: String, at revision: RevisionID?) async throws -> ObjectID? {
         guard let revision, revision != .workingDirectory else { return nil }

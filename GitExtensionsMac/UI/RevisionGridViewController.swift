@@ -71,6 +71,7 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
     private var graphScrollPending = false
     private var graphGeneration = 0
     private var pendingSelectionID: RevisionID?
+    private var pendingFirstVisibleID: RevisionID?
     private var lastViewportSize = NSSize.zero
     private var graphWidthRefreshScheduled = false
     private var graphConfiguration = RevisionGraphLayout.Configuration.gitExtensionsDefault
@@ -410,6 +411,15 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
         onSelection?(commits[index])
     }
 
+    func scrollRevisionToTop(_ id: RevisionID) {
+        pendingFirstVisibleID = id
+        guard !graphReloadPending, let row = commits.firstIndex(where: { $0.id == id }),
+              let scroll = tableView.enclosingScrollView else { return }
+        pendingFirstVisibleID = nil
+        scroll.contentView.scroll(to: NSPoint(x: scroll.contentView.bounds.minX, y: tableView.rect(ofRow: row).minY))
+        scroll.reflectScrolledClipView(scroll.contentView)
+    }
+
     func selectCommits(ids: [RevisionID]) {
         pendingOpeningSelection = ids
         guard !graphReloadPending else { return }
@@ -506,6 +516,7 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
             self.tableView.reloadData()
             self.updateGraphColumnWidthForVisibleRows(fallbackLaneCount: graph.maximumLaneCount)
             self.prepareVisibleGraphRows()
+            defer { if let id = self.pendingFirstVisibleID { self.scrollRevisionToTop(id) } }
             guard !orderedCommits.isEmpty else { return }
             if preservingViewport, !selectedIDs.isEmpty, self.pendingOpeningSelection.isEmpty,
                self.pendingSelectionID == nil {

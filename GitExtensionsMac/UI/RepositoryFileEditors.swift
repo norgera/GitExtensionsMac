@@ -86,7 +86,76 @@ final class EditableFileTextView: NSView, NSTextViewDelegate {
 }
 
 
-final class EditorTextView: NSTextView {
+class FileViewerTextView: NSTextView {
+    private var occurrenceTerm = ""
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if let id = ApplicationHotkeys.shared.matching(event, category: "File viewer"),
+           let shortcut = FileViewerShortcut(rawValue: String(id.dropFirst("viewer.".count))) {
+            switch shortcut {
+            case .find: findAction(.showFindInterface)
+            case .replace:
+                guard isEditable else { return false }
+                findAction(.showReplaceInterface)
+            case .findNext: findAction(.nextMatch)
+            case .findPrevious: findAction(.previousMatch)
+            case .nextOccurrence: moveOccurrence(forward: true)
+            case .previousOccurrence: moveOccurrence(forward: false)
+            default: return super.performKeyEquivalent(with: event)
+            }
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        super.mouseUp(with: event)
+        rememberOccurrence()
+    }
+
+    private func rememberOccurrence() {
+        let range = selectedRange()
+        if range.length > 0, NSMaxRange(range) <= (string as NSString).length {
+            occurrenceTerm = (string as NSString).substring(with: range)
+        }
+        let entire = NSRange(location: 0, length: (string as NSString).length)
+        layoutManager?.removeTemporaryAttribute(.backgroundColor, forCharacterRange: entire)
+        for match in FileViewerOccurrences.ranges(of: occurrenceTerm, in: string) {
+            layoutManager?.addTemporaryAttribute(.backgroundColor, value: ApplicationColors.color("HighlightAllOccurences", fallback: NSColor.systemYellow.withAlphaComponent(0.35)), forCharacterRange: match)
+        }
+    }
+
+    func moveOccurrence(forward: Bool) {
+        rememberOccurrence()
+        let caret = selectedRange().location
+        let matches = FileViewerOccurrences.ranges(of: occurrenceTerm, in: string)
+        let target = forward ? matches.first { $0.location > caret } : matches.last { $0.location < caret }
+        guard let target else { return }
+        setSelectedRange(NSRange(location: target.location, length: 0))
+        scrollRangeToVisible(target)
+    }
+
+    private func findAction(_ action: NSTextFinder.Action) {
+        usesFindBar = true
+        isIncrementalSearchingEnabled = true
+        let item = NSMenuItem(); item.tag = action.rawValue
+        performTextFinderAction(item)
+    }
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let menu = super.menu(for: event) ?? NSMenu()
+        menu.addItem(.separator())
+        for (title, action) in [("Find…", NSTextFinder.Action.showFindInterface), ("Replace…", .showReplaceInterface)] {
+            if action == .showReplaceInterface && !isEditable { continue }
+            let item = NSMenuItem(title: title, action: #selector(performTextFinderAction(_:)), keyEquivalent: "")
+            item.target = self; item.tag = action.rawValue
+            menu.addItem(item)
+        }
+        return menu
+    }
+}
+
+final class EditorTextView: FileViewerTextView {
     var onEscape: (() -> Bool)?
     override func cancelOperation(_ sender: Any?) {
         if onEscape?() == true { return }
@@ -495,6 +564,7 @@ private extension Array where Element == String {
 
 @MainActor
 final class FileEditorWindowController: NSWindowController, NSWindowDelegate {
+    private(set) var acceptedClose = true
     static let warningText = "Here be dragons!\nChanging this file by hand can be harmful and might break something.\nIf you are not sure just close this window."
 
     let fileURL: URL
@@ -625,7 +695,7 @@ final class FileEditorWindowController: NSWindowController, NSWindowDelegate {
                     guard await RepositoryFileEditorDialogs.okCancel("Cannot save file:\n\(error.localizedDescription)", caption: "Error", window: sender) else { return }
                 }
             case .no:
-                break
+                acceptedClose = false
             case .cancel:
                 return
             }

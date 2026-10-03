@@ -133,12 +133,14 @@ enum WorkflowManagementDialogs {
 
     static func startRebase(
         source: any RepositoryRebaseDataSource,
-        target: Commit,
+        target: Commit?,
         interactive: Bool,
         initialActions: [ObjectID: RepositoryRebaseTodoAction],
         advancedFrom: String?,
         showAdvancedOptions: Bool,
         window: NSWindow,
+        initialOnto: String? = nil,
+        startImmediately: Bool? = nil,
         scriptHooks: ApplicationScriptHooks? = nil
     ) async -> Bool {
         let controller = RebaseManagerViewController(
@@ -147,7 +149,9 @@ enum WorkflowManagementDialogs {
             interactive: interactive,
             initialActions: initialActions,
             advancedFrom: advancedFrom,
-            showAdvancedOptions: showAdvancedOptions
+            showAdvancedOptions: showAdvancedOptions,
+            initialOnto: initialOnto,
+            startImmediately: startImmediately
         )
         controller.scriptHooks = scriptHooks
         let panel = NSPanel(contentViewController: controller)
@@ -171,6 +175,8 @@ private final class RebaseManagerViewController: NSViewController, NSTableViewDa
     var onClose: ((Bool) -> Void)?
     private let source: any RepositoryRebaseDataSource
     private let target: Commit?
+    private let initialOnto: String?
+    private let startsImmediately: Bool
     private let initiallyInteractive: Bool
     private let initialActions: [ObjectID: RepositoryRebaseTodoAction]
     private let advancedFrom: String?
@@ -225,9 +231,13 @@ private final class RebaseManagerViewController: NSViewController, NSTableViewDa
         interactive: Bool = false,
         initialActions: [ObjectID: RepositoryRebaseTodoAction] = [:],
         advancedFrom: String? = nil,
-        showAdvancedOptions: Bool = false
+        showAdvancedOptions: Bool = false,
+        initialOnto: String? = nil,
+        startImmediately: Bool? = nil
     ) {
         self.source = source; self.target = target; initiallyInteractive = interactive
+        self.initialOnto = initialOnto
+        self.startsImmediately = startImmediately ?? !showAdvancedOptions
         self.initialActions = initialActions; self.advancedFrom = advancedFrom
         showsAdvancedOptions = showAdvancedOptions
         super.init(nibName: nil, bundle: nil)
@@ -300,7 +310,7 @@ private final class RebaseManagerViewController: NSViewController, NSTableViewDa
     }
 
     private func configureIdleOptions() {
-        targetField.stringValue = target?.objectID?.string ?? ""
+        targetField.stringValue = initialOnto ?? target?.objectID?.string ?? ""
         targetField.completes = true; targetField.numberOfVisibleItems = 12
         targetField.widthAnchor.constraint(equalToConstant: 270).isActive = true
         interactiveOption.state = initiallyInteractive ? .on : .off
@@ -466,9 +476,9 @@ private final class RebaseManagerViewController: NSViewController, NSTableViewDa
             table.scrollRowToVisible(index)
         }
         optionChanged()
-        if !active, target == nil {
+        if !active, target == nil, startsImmediately {
             finish(repositoryChanged)
-        } else if !active, !showsAdvancedOptions, !didAutoStart {
+        } else if !active, startsImmediately, !showsAdvancedOptions, !didAutoStart {
             didAutoStart = true
             DispatchQueue.main.async { [weak self] in self?.startRebase() }
         }

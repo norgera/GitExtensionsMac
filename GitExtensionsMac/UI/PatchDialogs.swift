@@ -171,7 +171,17 @@ private final class PatchViewController: NSViewController, NSTableViewDataSource
         close.keyEquivalent = "\u{1b}"
         stack.addArrangedSubview(close)
         view = root
-        if let initialFile { path.stringValue = initialFile.path; loadPreview() }
+        if let initialFile {
+            path.stringValue = initialFile.path
+            if mode == .apply {
+                var directory: ObjCBool = false
+                if FileManager.default.fileExists(atPath: initialFile.path, isDirectory: &directory), directory.boolValue {
+                    directoryMode.state = .on
+                    path.placeholderString = "Patch directory"
+                }
+            }
+            loadPreview()
+        }
         updateButtons()
         if mode == .apply { Task { await reloadState() } }
     }

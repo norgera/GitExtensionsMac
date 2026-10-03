@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import GitCommands
+import Darwin
 
 
 enum ApplicationShellLinks {
@@ -13,7 +14,7 @@ package final class GitExtensionsApplicationDelegate: NSObject, NSApplicationDel
     override package init() {
         super.init()
 
-        UserDefaults.standard.register(defaults: ["ApplePersistenceIgnoreState": true])
+        UserDefaults.standard.register(defaults: ["ApplePersistenceIgnoreState": true, "NSTreatUnknownArgumentsAsOpen": "NO"])
     }
 
     package func applicationShouldSaveApplicationState(_ app: NSApplication, coder: NSCoder) -> Bool { false }
@@ -25,6 +26,9 @@ package final class GitExtensionsApplicationDelegate: NSObject, NSApplicationDel
     }
 
     package func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+    package func applicationWillTerminate(_ notification: Notification) {
+        if CommandLineSession.active { Darwin.exit(CommandLineSession.exitStatus) }
+    }
 }
 
 package struct GitExtensionsAppScene: Scene {
@@ -42,14 +46,19 @@ package struct GitExtensionsAppScene: Scene {
             launch = .mock
             return
         }
-
-        let explicitPath: String? = arguments.firstIndex(of: "--repository").flatMap { index in
-            let valueIndex = arguments.index(after: index)
-            return valueIndex < arguments.endIndex ? arguments[valueIndex] : nil
+        do {
+            if let request = try CommandLineRequest.parse(arguments) {
+                CommandLineSession.active = true
+                launch = .commandLine(request)
+                return
+            }
+        } catch {
+            CommandLineSession.active = true
+            launch = .commandLineError(error)
+            return
         }
-        if let explicitPath {
-            launch = .repository(URL(fileURLWithPath: explicitPath, isDirectory: true), selection: RepositoryOpeningSelection.parse(arguments), fileHistory: FileHistoryBrowseRequest.parse(arguments))
-        } else if AppSettingsStore.shared.preferences.reopenLastRepository,
+
+        if AppSettingsStore.shared.preferences.reopenLastRepository,
                   let path = AppSettingsStore.shared.lastRepositoryPath,
                   RepositoryHistory.isValidGitWorkingDir(path) {
             launch = .repository(URL(fileURLWithPath: path, isDirectory: true))
@@ -206,6 +215,7 @@ private struct GitExtensionsMenuCommands: Commands {
             Button("Repository settings…") { perform(.repositorySettings) }.disabled(!repository)
             Divider()
             Button("Close (go to Dashboard)") { perform(.closeToDashboard) }
+                .keyboardShortcut(hotkeys.shortcut("closeToDashboard"))
                 .disabled(!repository)
         }
 

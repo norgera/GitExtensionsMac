@@ -156,6 +156,27 @@ private final class StashViewController: RetainingSplitViewController, NSWindowD
         diffItem.holdingPriority = .defaultLow
         addSplitViewItem(diffItem)
         diffController.selectionScope = .revision
+        diffController.supportsDiffAppearance = true
+        diffController.difftasticAvailability = { [source] in await (source as? any RepositoryBrowsingDataSource)?.isDifftasticEnabled() ?? false }
+        diffController.linePatchingSupported = { [weak self] in
+            guard let self, !isBusy, let file = filesController.currentlySelectedFiles().first else { return false }
+            return !file.isSubmodule && source is any RepositoryFileStatusDataSource
+        }
+        diffController.onLinePatch = { [weak self] kind, file, diff, ids in
+            guard let self else { return }
+            mutate(statusText: "Applying selected lines…") { source in
+                guard let files = source as? any RepositoryFileStatusDataSource else { throw RepositoryDataSourceError.unavailable }
+                let result = try await files.applyLinePatch(kind, file: file, diff: diff, lineIDs: ids)
+                if !result.succeeded {
+                    let state = try await (source as? any RepositoryStashWorkflowDataSource)?.loadMutationState()
+                    if let paths = state?.conflictedPaths, !paths.isEmpty {
+                        return RepositoryMutationResult(selectedCommitID: .workingDirectory, outcome: .conflicts(paths), message: result.output)
+                    }
+                    throw GitError.commandFailed(arguments: [], status: 1, stderr: result.output + "\n\n" + result.patch)
+                }
+                return RepositoryMutationResult(selectedCommitID: .workingDirectory, outcome: .completed, message: "Selected lines applied.")
+            } completion: { [weak self] _ in self?.reloadSelector() }
+        }
         diffController.supportedFileCommands = openWithDifftool == nil ? [] : ["file.difftool"]
         diffController.onFileCommand = { [weak self] identifier, displayFile in
             guard identifier == "file.difftool",
@@ -427,6 +448,7 @@ private final class StashViewController: RetainingSplitViewController, NSWindowD
     }
 
     private func showDiff(for displayFile: ChangedFile) {
+        diffController.selectionScope = selection == .workingDirectory ? .workingTree : .revision
         diffTask?.cancel()
         guard let context = displayFiles[displayFile.id] else {
             diffController.apply(file: displayFile, diff: nil)

@@ -55,6 +55,21 @@ private enum RevisionGraphLayoutTests {
 
     @MainActor
     static func run() async {
+        if CommandLine.arguments.contains("--cli-only") {
+            do { try await CommandLineTests.run() }
+            catch { fatalError("CommandLineTests failed: \(error)") }
+            return
+        }
+        if CommandLine.arguments.contains("--built-in-plugins-only") {
+            do { try await BuiltInPluginTests.run() }
+            catch { fatalError("BuiltInPluginTests failed: \(error)") }
+            return
+        }
+        if CommandLine.arguments.contains("--build-adapters-only") {
+            do { try await BuildServerAdapterTests.run() }
+            catch { fatalError("BuildServerAdapterTests failed: \(error)") }
+            return
+        }
         if let index = CommandLine.arguments.firstIndex(of: "--graph-repository"),
            CommandLine.arguments.indices.contains(index + 1) {
             do {
@@ -166,6 +181,7 @@ private enum RevisionGraphLayoutTests {
         if CommandLine.arguments.contains("--file-viewer-only") {
             FileViewerTests.run()
             do {
+                try await FileViewerParityTests.run()
                 try await GitRepositoryModuleTests.runFileViewer()
             } catch {
                 fatalError("FileViewerRepositoryTests failed: \(error.localizedDescription)")
@@ -362,6 +378,7 @@ private enum RevisionGraphLayoutTests {
         RepositoryChangedNotifierTests.run()
         FileViewerTests.run()
         do {
+            try await FileViewerParityTests.run()
             try await GitRepositoryModuleTests.run()
             try await GitRepositoryMutationTests.runCheckout()
             try await GitRepositoryMutationTests.runStaging()
@@ -394,6 +411,9 @@ private enum RevisionGraphLayoutTests {
             try await ApplicationScriptsTests.run()
             try await ApplicationPluginsTests.run()
             try await RepositoryHostingTests.run()
+            try await BuildServerAdapterTests.run()
+            try await BuiltInPluginTests.run()
+            try await CommandLineTests.run()
             try await RevisionGridTests.run()
             try await BrowserTests.run()
             try await AppShellTests.run()

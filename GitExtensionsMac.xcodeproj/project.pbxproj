@@ -7,6 +7,11 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+        FA5000000000000000000001 = {isa = PBXBuildFile; fileRef = FA5000000000000000000002; };
+        FA6000000000000000000001 = {isa = PBXBuildFile; fileRef = FA6000000000000000000002; };
+        FA5000000000000000000003 = {isa = PBXBuildFile; fileRef = FA5000000000000000000004; };
+        FA5000000000000000000005 = {isa = PBXBuildFile; fileRef = FA5000000000000000000006; };
+        FA5000000000000000000007 = {isa = PBXBuildFile; fileRef = FA5000000000000000000008; };
 		FC4000000000000000000005 /* RepositoryHostingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC4000000000000000000006; };
 		FD322C66F57B501CA9C3A88B /* RevisionGridTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FDAB5E5676D3600B848F361C; };
 		FDDDE995903DB16FA78FE409 /* BrowserTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD2295D27EB8A7B41C325B25; };
@@ -30,6 +35,9 @@
 		FDE77CE6F48DD5B505EE8411 /* Dashboard.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD6D41F1BAAD6E669C29B676; };
 		FD5228214CD6B4B4447E1C5B /* RevisionFilterToolbar.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD1732E6F418ED5AA916E229; };
 		FC4000000000000000000001 /* RepositoryHosting.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC4000000000000000000002; };
+		FC4200000000000000000001 = {isa = PBXBuildFile; fileRef = FC4200000000000000000002; };
+		FC4200000000000000000003 = {isa = PBXBuildFile; fileRef = FC4200000000000000000004; };
+		FC4200000000000000000005 = {isa = PBXBuildFile; fileRef = FC4200000000000000000006; };
 		FD74DC702A103F772DD2F21D /* RevisionGridFilter.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD2757EF6C4BC54BC3D51700; };
 		FDFF5A9F4212FDB176C0174B /* GitBrowserMaintenance.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD4B2563AA9E36E8402576AA; };
 		FD0CCAD5D9F2C6139E350886 /* GitLostObjects.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD978C3019F26176AC2DA7C8; };
@@ -48,6 +56,10 @@
 		FD90BDC33E842A09DA062AA9 /* GitFileStatusModule.swift in Sources */ = {isa = PBXBuildFile; fileRef = FDD9DCDFCB0899C5F0AED629; };
 		FDBE37BFFF198874A55C588C /* GitFileStatus.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD7EFF2C8103D77061A36281; };
 		FD763DFA76355023BE8E9327 /* RepositoryHistory.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD5AD3192FED2FC6473313E9; };
+        FA4000000000000000000001 = {isa = PBXBuildFile; fileRef = FA4000000000000000000002; };
+        FA4000000000000000000003 = {isa = PBXBuildFile; fileRef = FA4000000000000000000004; };
+        FA4000000000000000000005 = {isa = PBXBuildFile; fileRef = FA4000000000000000000006; };
+        FA4000000000000000000007 = {isa = PBXBuildFile; fileRef = FA4000000000000000000008; };
         FC3000000000000000000005 /* GitPluginExecution.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC3000000000000000000006; };
         FC3000000000000000000003 /* ApplicationPluginsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC3000000000000000000004; };
         FC3000000000000000000001 /* ApplicationPlugins.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC3000000000000000000002; };
@@ -389,6 +401,11 @@ F80000000000000000000001 /* GitWorktrees.swift in Sources */ = {isa = PBXBuildFi
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+        FA5000000000000000000002 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandLineRepository.swift; sourceTree = "<group>"; };
+        FA6000000000000000000002 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitDiffAppearance.swift; sourceTree = "<group>"; };
+        FA5000000000000000000004 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandLineInterface.swift; sourceTree = "<group>"; };
+        FA5000000000000000000006 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandLineDialogs.swift; sourceTree = "<group>"; };
+        FA5000000000000000000008 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandLineTests.swift; sourceTree = "<group>"; };
 		FC4000000000000000000006 /* RepositoryHostingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RepositoryHostingTests.swift; sourceTree = "<group>"; };
 		FDAB5E5676D3600B848F361C /* RevisionGridTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RevisionGridTests.swift; sourceTree = "<group>"; };
 		FD2295D27EB8A7B41C325B25 /* BrowserTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserTests.swift; sourceTree = "<group>"; };
@@ -412,6 +429,9 @@ F80000000000000000000001 /* GitWorktrees.swift in Sources */ = {isa = PBXBuildFi
 		FD6D41F1BAAD6E669C29B676 /* Dashboard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Dashboard.swift; sourceTree = "<group>"; };
 		FD1732E6F418ED5AA916E229 /* RevisionFilterToolbar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RevisionFilterToolbar.swift; sourceTree = "<group>"; };
 		FC4000000000000000000002 /* RepositoryHosting.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RepositoryHosting.swift; sourceTree = "<group>"; };
+		FC4200000000000000000002 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BuildServerAdapters.swift; sourceTree = "<group>"; };
+		FC4200000000000000000004 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BuildServerCredentialsDialog.swift; sourceTree = "<group>"; };
+		FC4200000000000000000006 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BuildServerAdapterTests.swift; sourceTree = "<group>"; };
 		FD2757EF6C4BC54BC3D51700 /* RevisionGridFilter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RevisionGridFilter.swift; sourceTree = "<group>"; };
 		FD4B2563AA9E36E8402576AA /* GitBrowserMaintenance.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitBrowserMaintenance.swift; sourceTree = "<group>"; };
 		FD978C3019F26176AC2DA7C8 /* GitLostObjects.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitLostObjects.swift; sourceTree = "<group>"; };
@@ -430,6 +450,10 @@ F80000000000000000000001 /* GitWorktrees.swift in Sources */ = {isa = PBXBuildFi
 		FDD9DCDFCB0899C5F0AED629 /* GitFileStatusModule.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitFileStatusModule.swift; sourceTree = "<group>"; };
 		FD7EFF2C8103D77061A36281 /* GitFileStatus.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitFileStatus.swift; sourceTree = "<group>"; };
 		FD5AD3192FED2FC6473313E9 /* RepositoryHistory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RepositoryHistory.swift; sourceTree = "<group>"; };
+        FA4000000000000000000002 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BuiltInPluginCommands.swift; sourceTree = "<group>"; };
+        FA4000000000000000000004 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BuiltInPlugins.swift; sourceTree = "<group>"; };
+        FA4000000000000000000006 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BuiltInPluginDialogs.swift; sourceTree = "<group>"; };
+        FA4000000000000000000008 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BuiltInPluginTests.swift; sourceTree = "<group>"; };
         FC3000000000000000000006 /* GitPluginExecution.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitPluginExecution.swift; sourceTree = "<group>"; };
         FC3000000000000000000004 /* ApplicationPluginsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ApplicationPluginsTests.swift; sourceTree = "<group>"; };
         FC3000000000000000000002 /* ApplicationPlugins.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ApplicationPlugins.swift; sourceTree = "<group>"; };
@@ -799,7 +823,10 @@ F80000000000000000000001 /* GitWorktrees.swift in Sources */ = {isa = PBXBuildFi
 				FD9100000000000000000004 /* AvatarProviderTests.swift */,
 				FC2000000000000000000006 /* ApplicationScriptsTests.swift */,
                 FC3000000000000000000004 /* ApplicationPluginsTests.swift */,
+                FA4000000000000000000008,
+                FA5000000000000000000008,
 				FC4000000000000000000006 /* RepositoryHostingTests.swift */,
+				FC4200000000000000000006,
 				FDAB5E5676D3600B848F361C /* RevisionGridTests.swift */,
 				FD2295D27EB8A7B41C325B25 /* BrowserTests.swift */,
 				FDAD62EB29B2AF7AD9686A33 /* FileStatusUITests.swift */,
@@ -848,9 +875,14 @@ F80000000000000000000001 /* GitWorktrees.swift in Sources */ = {isa = PBXBuildFi
 				FD9000000000000000000002 /* OutputHistory.swift */,
 				FD9100000000000000000002 /* AvatarProviders.swift */,
 				FC2000000000000000000004 /* ApplicationScripts.swift */,
+                FA4000000000000000000004,
+                FA5000000000000000000004,
+                FA5000000000000000000006,
+                FA4000000000000000000006,
                 FC3000000000000000000002 /* ApplicationPlugins.swift */,
 				FC4000000000000000000004 /* RepositoryHostingDialog.swift */,
 				FC4100000000000000000002 /* BuildServerIntegration.swift */,
+				FC4200000000000000000004,
 				FDB25B24015B5FEAD593AC27 /* RevisionGridMenuCommands.swift */,
 				FDDC948713116764C7D5F3A7 /* RevisionGridPresentation.swift */,
 				FD8D98B95366A2FDB9DB1A29 /* BrowserPresentation.swift */,
@@ -1094,8 +1126,12 @@ F80000000000000000000001 /* GitWorktrees.swift in Sources */ = {isa = PBXBuildFi
 				FD0000000000000000000002 /* GitSettings.swift */,
 				FC1000000000000000000002 /* CommandLog.swift */,
 				FC2000000000000000000002 /* ScriptExecution.swift */,
+                FA4000000000000000000002,
+                FA5000000000000000000002,
+                FA6000000000000000000002,
                 FC3000000000000000000006 /* GitPluginExecution.swift */,
 				FC4000000000000000000002 /* RepositoryHosting.swift */,
+				FC4200000000000000000002,
 				FD2757EF6C4BC54BC3D51700 /* RevisionGridFilter.swift */,
 				FD4B2563AA9E36E8402576AA /* GitBrowserMaintenance.swift */,
 				FD978C3019F26176AC2DA7C8 /* GitLostObjects.swift */,
@@ -1513,8 +1549,12 @@ F80000000000000000000001 /* GitWorktrees.swift in Sources */ = {isa = PBXBuildFi
 				FD0000000000000000000001 /* GitSettings.swift in Sources */,
 				FC1000000000000000000001 /* CommandLog.swift in Sources */,
 				FC2000000000000000000001 /* ScriptExecution.swift in Sources */,
+                FA4000000000000000000001,
+                FA5000000000000000000001,
+                FA6000000000000000000001,
                 FC3000000000000000000005 /* GitPluginExecution.swift in Sources */,
 				FC4000000000000000000001 /* RepositoryHosting.swift in Sources */,
+				FC4200000000000000000001,
 				FD74DC702A103F772DD2F21D /* RevisionGridFilter.swift in Sources */,
 				FDFF5A9F4212FDB176C0174B /* GitBrowserMaintenance.swift in Sources */,
 				FD0CCAD5D9F2C6139E350886 /* GitLostObjects.swift in Sources */,
@@ -1566,7 +1606,10 @@ F80000000000000000000001 /* GitWorktrees.swift in Sources */ = {isa = PBXBuildFi
 				FD9100000000000000000003 /* AvatarProviderTests.swift in Sources */,
 				FC2000000000000000000005 /* ApplicationScriptsTests.swift in Sources */,
                 FC3000000000000000000003 /* ApplicationPluginsTests.swift in Sources */,
+                FA4000000000000000000007,
+                FA5000000000000000000007,
 				FC4000000000000000000005 /* RepositoryHostingTests.swift in Sources */,
+				FC4200000000000000000005,
 				FD322C66F57B501CA9C3A88B /* RevisionGridTests.swift in Sources */,
 				FDDDE995903DB16FA78FE409 /* BrowserTests.swift in Sources */,
 				FDD7FF0D3A514FC0C8763DD9 /* FileStatusUITests.swift in Sources */,
@@ -1610,9 +1653,14 @@ F80000000000000000000001 /* GitWorktrees.swift in Sources */ = {isa = PBXBuildFi
 				FD9000000000000000000001 /* OutputHistory.swift in Sources */,
 				FD9100000000000000000001 /* AvatarProviders.swift in Sources */,
 				FC2000000000000000000003 /* ApplicationScripts.swift in Sources */,
+                FA4000000000000000000003,
+                FA5000000000000000000003,
+                FA5000000000000000000005,
+                FA4000000000000000000005,
                 FC3000000000000000000001 /* ApplicationPlugins.swift in Sources */,
 				FC4000000000000000000003 /* RepositoryHostingDialog.swift in Sources */,
 				FC4100000000000000000001 /* BuildServerIntegration.swift in Sources */,
+				FC4200000000000000000003,
 				FDBE901CA2E857031C4067FC /* RevisionGridMenuCommands.swift in Sources */,
 				FD020AACC52C7EE4CED2EE65 /* RevisionGridPresentation.swift in Sources */,
 				FDD938C18757D1E8C4A0F28B /* BrowserPresentation.swift in Sources */,

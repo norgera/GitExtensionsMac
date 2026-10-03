@@ -45,6 +45,7 @@ final class BlameViewController: NSViewController, NSTableViewDataSource, NSTabl
     private var preferencesObserver: NSObjectProtocol?
     private var generation = 0
     private var searchQuery = ""
+    private var occurrences = FileViewerOccurrences()
     private var syntaxEnabled = AppSettingsStore.shared.preferencesForNewFileViewer().showsSyntaxHighlighting
     var onSelectedCommit: ((BlameCommit) -> Void)?
 
@@ -228,6 +229,8 @@ final class BlameViewController: NSViewController, NSTableViewDataSource, NSTabl
         gutterTexts = []
         ageBuckets = []
         highlightedCommit = nil
+        occurrences.row = -1
+        occurrences.column = -1
         lastBlameLine = nil
         actualParents = [:]
         hostedRemotes = []
@@ -384,6 +387,7 @@ final class BlameViewController: NSViewController, NSTableViewDataSource, NSTabl
                                                             enabled: syntaxEnabled,
                                                             filePath: fileName ?? "")
             let attributed = NSMutableAttributedString(attributedString: text)
+            FileViewerOccurrences.highlight(occurrences.term, in: attributed)
             attributed.addAttribute(.font, value: font, range: NSRange(location: 0, length: attributed.length))
             field.attributedStringValue = attributed
             field.lineBreakMode = .byClipping
@@ -465,6 +469,8 @@ final class BlameViewController: NSViewController, NSTableViewDataSource, NSTabl
             case .find: findText()
             case .findNext: findNext(forward: true)
             case .findPrevious: findNext(forward: false)
+            case .nextOccurrence, .previousOccurrence:
+                if occurrences.next(in: fileLines.map(\.text), forward: shortcut == .nextOccurrence) { goToLine(occurrences.row + 1) }
             case .goToLine: goToFileLine()
             case .syntax: toggleSyntax()
             default: return false
@@ -492,12 +498,22 @@ final class BlameViewController: NSViewController, NSTableViewDataSource, NSTabl
     }
 
     @objc private func findText() {
-        if let row = FileViewerNavigationDialogs.find(lines: fileLines, after: table.selectedRow, query: &searchQuery) { goToLine(row + 1) }
+        if let row = FileViewerNavigationDialogs.find(lines: fileLines, after: table.selectedRow, query: &searchQuery) {
+            highlightOccurrences(row: row); goToLine(row + 1)
+        }
     }
 
     func findNext(forward: Bool, query: String? = nil) {
         if let query { searchQuery = query }
-        if let row = FileViewerNavigationDialogs.matchingRow(lines: fileLines, query: searchQuery, after: table.selectedRow, forward: forward) { goToLine(row + 1) }
+        if let row = FileViewerNavigationDialogs.matchingRow(lines: fileLines, query: searchQuery, after: table.selectedRow, forward: forward) {
+            highlightOccurrences(row: row); goToLine(row + 1)
+        }
+    }
+
+    private func highlightOccurrences(row: Int) {
+        occurrences.term = searchQuery; occurrences.row = row
+        occurrences.column = FileViewerOccurrences.ranges(of: searchQuery, in: fileLines[row].text).first?.location ?? -1
+        reloadLines()
     }
 
     @objc private func goToFileLine() {

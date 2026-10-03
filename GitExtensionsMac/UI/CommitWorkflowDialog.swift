@@ -11,6 +11,7 @@ private enum CommitKeyboardShortcut: String {
     case filter
     case refresh
     case createBranch
+    case openWithDifftool
     case nextFile
     case previousFile
     case addSelectionToMessage
@@ -66,6 +67,7 @@ enum CommitWorkflowDialog {
         head: Commit?,
         draft: CommitDialogDraft?,
         owner: NSWindow,
+        initialMessage: String? = nil,
         onManageRemotes: ((String?, String?) -> Void)? = nil,
         onDifftool: ((Commit, ChangedFile) -> Void)? = nil,
         onBlame: ((ChangedFile, NSWindow) -> Void)? = nil,
@@ -87,6 +89,7 @@ enum CommitWorkflowDialog {
             onRepositoryChanged: onRepositoryChanged
         )
         controller.scriptHooks = scriptHooks
+        controller.commandLineMessage = initialMessage
         controller.onEditIgnoredFiles = onEditIgnoredFiles
         controller.onBlame = onBlame
         controller.onFileHistory = onFileHistory
@@ -122,6 +125,7 @@ enum CommitWorkflowDialog {
 @MainActor
 private final class CommitWorkflowViewController: NSViewController, NSOutlineViewDataSource, NSOutlineViewDelegate, NSTextViewDelegate, NSSearchFieldDelegate, NSWindowDelegate, NSMenuDelegate {
     var scriptHooks: ApplicationScriptHooks?
+    var commandLineMessage: String?
     private struct TemplateMenuValue {
         let template: CommitMessageTemplate
     }
@@ -268,6 +272,8 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
         commitDiffView.onApplyLines = { [weak self] lineIDs, direction in
             self?.applySelectedLines(lineIDs: lineIDs, direction: direction)
         }
+        commitDiffView.onResetLines = { [weak self] ids, direction in self?.resetSelectedLines(lineIDs: ids, direction: direction) }
+        commitDiffView.difftasticAvailability = { [source] in await (source as? any RepositoryBrowsingDataSource)?.isDifftasticEnabled() ?? false }
         commitDiffView.onAddSelectedText = { [weak self] text in
             self?.addSelectedDiffTextToMessage(text)
         }
@@ -801,7 +807,7 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
         let selectedMode = initial?.mode ?? initialMode
         selectedCommitMode = selectedMode
         amend.state = selectedMode == .normal ? .off : .on
-        messageView.string = activeSpecialKind?.message ?? initial?.message ?? (selectedMode == .normal ? "" : headMessage())
+        messageView.string = activeSpecialKind?.message ?? commandLineMessage ?? initial?.message ?? (selectedMode == .normal ? "" : headMessage())
         let preferences = settings.preferences
         let commitPreferences = settings.commitPreferences
         stageAll.state = initial?.stageAllBeforeCommit == true ? .on : .off
@@ -1456,7 +1462,7 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
                 commitState = loadedCommitState
                 if preserveMessage {
                     messageView.string = preservedMessage
-                } else if draft == nil, activeSpecialKind == nil, !loadedCommitState.message.isEmpty {
+                } else if draft == nil, commandLineMessage == nil, activeSpecialKind == nil, !loadedCommitState.message.isEmpty {
                     messageView.string = loadedCommitState.message
                     usingTemplate = loadedCommitState.loadedTemplate != nil
                 }
@@ -1611,6 +1617,22 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
             } catch {
                 commitDiffView.allowPatching()
                 await showOperationError(error, title: direction == .stage ? "Stage lines failed" : "Unstage lines failed")
+            }
+        }
+    }
+
+    private func resetSelectedLines(lineIDs: Set<String>, direction: RepositoryHunkDirection) {
+        guard let selection = commitDiffView.currentLineSelection(lineIDs: lineIDs, direction: direction) else { return }
+        actionTask?.cancel()
+        actionTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { actionTask = nil; updateButtonStates() }
+            do {
+                _ = try await source.resetLines(selection)
+                reloadChanges(preserveMessage: true, preferredPath: selection.file.path)
+            } catch {
+                commitDiffView.allowPatching()
+                await showOperationError(error, title: "Reset lines failed")
             }
         }
     }
@@ -2176,6 +2198,12 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
             refreshChanges()
         case .createBranch:
             createBranch()
+        case .openWithDifftool:
+            let staged = commitDiffView.direction == .unstage
+            guard let onDifftool, let context = repositoryContext,
+                  let commit = RevisionCommitBuilder.artificialRevisions(headID: context.headID)
+                    .first(where: { $0.kind == (staged ? .index : .workingDirectory) }) else { return false }
+            selectedFiles(in: staged ? stagedTable : unstagedTable).forEach { onDifftool(commit, $0) }
         case .nextFile:
             moveFileSelection(backwards: false)
         case .previousFile:
@@ -2406,7 +2434,7 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
 
     func windowDidBecomeKey(_ notification: Notification) {
         guard didBecomeKeyOnce else { didBecomeKeyOnce = true; return }
-        if settings.commitPreferences.refreshOnFocus, actionTask == nil {
+        if settings.commitPreferences.refreshOnFocus, actionTask == nil, !commitDiffView.isResetConfirmationOpen {
             reloadChanges(preserveMessage: true)
         }
     }
@@ -2443,7 +2471,8 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
 }
 
 @MainActor
-private final class CommitDiffView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSMenuItemValidation {
+private final class CommitDiffView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSMenuItemValidation, NSMenuDelegate {
+    private(set) var isResetConfirmationOpen = false
     var scriptLineNumber: Int {
         let row = tableView.selectedRow >= 0 ? tableView.selectedRow : caretRow
         guard presentations.indices.contains(row) else { return 1 }
@@ -2457,13 +2486,17 @@ private final class CommitDiffView: NSView, NSTableViewDataSource, NSTableViewDe
     private var gutterMetrics = DiffGutterMetrics.empty
     private var caretRow = -1
     private var searchQuery = ""
+    private var occurrences = FileViewerOccurrences()
+    private var difftasticEnabled: Bool?
+    var difftasticAvailability: (() async -> Bool)?
     private var preferences = AppSettingsStore.shared.preferencesForNewFileViewer()
     private var file: ChangedFile?
     private var diff: FileDiff?
-    private var direction: RepositoryHunkDirection = .stage
+    private(set) var direction: RepositoryHunkDirection = .stage
     private var patchingAllowed = true
     var onApplyHunk: ((String, RepositoryHunkDirection) -> Void)?
     var onApplyLines: ((Set<String>, RepositoryHunkDirection) -> Void)?
+    var onResetLines: ((Set<String>, RepositoryHunkDirection) -> Void)?
     var onAddSelectedText: ((String) -> Void)?
     var onOptionsChanged: (() -> Void)?
     var onDifftool: ((ChangedFile, RepositoryHunkDirection) -> Void)?
@@ -2472,7 +2505,11 @@ private final class CommitDiffView: NSView, NSTableViewDataSource, NSTableViewDe
     var historyAllowed: () -> Bool = { false }
     var blameAllowed: () -> Bool = { false }
     var focusView: NSView { tableView }
-    var diffOptions: FileDiffOptions { preferences.diffOptions }
+    var diffOptions: FileDiffOptions {
+        var options = preferences.diffOptions
+        options.difftasticWidth = GitDiffAppearance.difftasticWidth(viewerWidth: tableView.enclosingScrollView?.contentSize.width ?? 600)
+        return options
+    }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -2487,6 +2524,20 @@ private final class CommitDiffView: NSView, NSTableViewDataSource, NSTableViewDe
         tableView.onShortcut = { [weak self] shortcut in
             guard let self, !presentations.isEmpty else { return false }
             switch shortcut {
+            case .replace: return false
+            case .wordDiff: setAppearance(.gitWordDiff)
+            case .difftastic:
+                Task { @MainActor in
+                    guard await self.difftasticAvailability?() == true else { return }
+                    self.setAppearance(.difftastic)
+                }
+            case .nextOccurrence, .previousOccurrence:
+                if occurrences.next(in: presentations.map(\.line.text), forward: shortcut == .nextOccurrence) {
+                    caretRow = occurrences.row
+                    tableView.selectRowIndexes(IndexSet(integer: caretRow), byExtendingSelection: false)
+                    tableView.scrollRowToVisible(caretRow)
+                }
+            case .resetLines: resetLines()
             case .stageLines:
                 guard patchingAllowed, direction == .stage else { return false }
                 applyLines()
@@ -2507,6 +2558,10 @@ private final class CommitDiffView: NSView, NSTableViewDataSource, NSTableViewDe
                 }
                 if let destination {
                     caretRow = destination
+                    occurrences.term = searchQuery
+                    occurrences.row = destination
+                    occurrences.column = FileViewerOccurrences.ranges(of: searchQuery, in: presentations[destination].line.text).first?.location ?? -1
+                    reloadRenderedLines()
                     tableView.selectRowIndexes(IndexSet(integer: destination), byExtendingSelection: false)
                     tableView.scrollRowToVisible(destination)
                 }
@@ -2526,7 +2581,9 @@ private final class CommitDiffView: NSView, NSTableViewDataSource, NSTableViewDe
         tableView.usesAlternatingRowBackgroundColors = false
         tableView.dataSource = self
         tableView.delegate = self
+        tableView.target = self; tableView.doubleAction = #selector(selectDiffWord)
         let menu = NSMenu(title: "Diff actions")
+        menu.delegate = self
         let lines = NSMenuItem(title: "Stage selected line(s)", action: #selector(applyLines), keyEquivalent: "")
         lines.target = self
         let hunk = NSMenuItem(title: "Stage selected hunk", action: #selector(applyHunk), keyEquivalent: "")
@@ -2576,8 +2633,9 @@ private final class CommitDiffView: NSView, NSTableViewDataSource, NSTableViewDe
         self.file = file
         self.diff = diff
         self.direction = direction
-        patchingAllowed = true
-        presentations = DiffLinePresentation.build(from: diff?.lines ?? [])
+        patchingAllowed = diff?.appearance ?? .patch == .patch
+        presentations = DiffLinePresentation.build(from: diff?.lines ?? [], appearance: diff?.appearance ?? .patch)
+        occurrences.row = -1; occurrences.column = -1
         gutterMetrics = DiffGutterMetrics(lines: diff?.lines ?? [], font: AppSettingsStore.shared.diffGutterFont)
         caretRow = -1
         hoverToolbar.toolTip = "\(file.path) — \(file.changeType.description), +\(file.additions) −\(file.deletions)"
@@ -2591,6 +2649,7 @@ private final class CommitDiffView: NSView, NSTableViewDataSource, NSTableViewDe
     }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if [#selector(applyLines), #selector(applyHunk), #selector(resetLines)].contains(menuItem.action) { return patchingAllowed && !tableView.selectedRowIndexes.isEmpty }
         if menuItem.action == #selector(showFileHistory) { return historyAllowed() && file?.isTracked == true }
         if menuItem.action == #selector(showBlame) {
             return onBlame != nil && blameAllowed() && file?.isTracked == true && file?.isSubmodule != true
@@ -2613,7 +2672,70 @@ private final class CommitDiffView: NSView, NSTableViewDataSource, NSTableViewDe
         return RepositoryLineSelection(file: file, diff: diff, lineIDs: lineIDs, direction: direction)
     }
 
-    func allowPatching() { patchingAllowed = true }
+    func allowPatching() { patchingAllowed = diff?.appearance ?? .patch == .patch }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        for item in menu.items where item.identifier?.rawValue == "viewer.appearance" || item.action == #selector(resetLines) { menu.removeItem(item) }
+        let reset = NSMenuItem(title: "Reset selected line(s)", action: #selector(resetLines), keyEquivalent: "")
+        reset.target = self; menu.insertItem(reset, at: min(2, menu.items.count))
+        let root = NSMenuItem(title: "Diff appearance", action: nil, keyEquivalent: "")
+        root.identifier = .init("viewer.appearance")
+        let submenu = NSMenu(); submenu.autoenablesItems = false
+        for (title, appearance) in [("Patch", DiffDisplayAppearance.patch), ("Git word diff", .gitWordDiff), ("Difftastic", .difftastic)] {
+            let item = NSMenuItem(title: title, action: #selector(appearanceSelected(_:)), keyEquivalent: "")
+            item.target = self; item.representedObject = appearance.rawValue
+            item.state = preferences.diffAppearance == appearance ? .on : .off
+            item.isEnabled = appearance != .difftastic || difftasticEnabled == true
+            if appearance == .difftastic, difftasticEnabled == nil {
+                Task { @MainActor [weak self, weak item] in
+                    let enabled = await self?.difftasticAvailability?() ?? false
+                    self?.difftasticEnabled = enabled; item?.isEnabled = enabled
+                }
+            }
+            submenu.addItem(item)
+        }
+        root.submenu = submenu; menu.addItem(root)
+    }
+
+    @objc private func appearanceSelected(_ item: NSMenuItem) {
+        guard let appearance = (item.representedObject as? String).flatMap(DiffDisplayAppearance.init(rawValue:)) else { return }
+        setAppearance(appearance)
+    }
+
+    private func setAppearance(_ appearance: DiffDisplayAppearance) {
+        preferences.diffAppearance = appearance == .patch || preferences.diffAppearance == appearance ? .patch : appearance
+        persistPreferences(reloadDiff: true)
+    }
+
+    @objc private func selectDiffWord() {
+        let row = tableView.clickedRow
+        guard presentations.indices.contains(row), let event = NSApp.currentEvent,
+              let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: false) as? DiffLineCellView else { return }
+        let column = cell.characterIndex(at: cell.convert(event.locationInWindow, from: nil))
+        guard let word = FileViewerOccurrences.word(in: presentations[row].line.text, at: column) else { return }
+        occurrences.term = word; occurrences.row = row; occurrences.column = column; caretRow = row
+        reloadRenderedLines()
+    }
+
+    @objc private func resetLines() {
+        guard patchingAllowed, let window else { return }
+        let ids = Set(tableView.selectedRowIndexes.compactMap { row -> String? in
+            guard presentations.indices.contains(row), [.addition, .deletion].contains(presentations[row].line.kind) else { return nil }
+            return presentations[row].line.id
+        })
+        guard !ids.isEmpty else { return }
+        let alert = NSAlert(); alert.alertStyle = .warning
+        alert.messageText = "Reset changes"; alert.informativeText = "Are you sure you want to reset the changes to the selected lines?"
+        alert.addButton(withTitle: "Yes"); alert.addButton(withTitle: "No")
+        let direction = direction
+        let file = file, diff = diff
+        isResetConfirmationOpen = true
+        alert.beginSheetModal(for: window) { [weak self] response in
+            defer { self?.isResetConfirmationOpen = false }
+            guard let self, response == .alertFirstButtonReturn, patchingAllowed, self.file == file, self.diff == diff, self.direction == direction else { return }
+            onResetLines?(ids, direction)
+        }
+    }
 
     @objc private func applyLines() {
         guard patchingAllowed else { return }
@@ -2669,7 +2791,9 @@ private final class CommitDiffView: NSView, NSTableViewDataSource, NSTableViewDe
             gutterMetrics: gutterMetrics,
             showsNonPrintingCharacters: preferences.showsNonPrintingCharacters,
             showsSyntaxHighlighting: preferences.showsSyntaxHighlighting,
-            filePath: file?.path
+            filePath: file?.path,
+            appearance: diff?.appearance ?? .patch,
+            highlightTerm: occurrences.term
         )
         return cell
     }
@@ -2684,7 +2808,7 @@ private final class CommitDiffView: NSView, NSTableViewDataSource, NSTableViewDe
             reloadRenderedLines()
         case "Show syntax highlighting":
             preferences.showsSyntaxHighlighting = state == .on
-            persistPreferences(reloadDiff: false)
+            persistPreferences(reloadDiff: preferences.diffAppearance == .difftastic)
             reloadRenderedLines()
         case "Increase the number of lines of context":
             preferences.contextLines += 1

@@ -1,4 +1,5 @@
 import AppKit
+import WebKit
 import GitCommands
 import GitExtensionsCore
 
@@ -39,6 +40,7 @@ struct BuildServerSettingsStore {
         return tokenAccount(.gitHubActions, key: "\(api)/\(owner ?? "")/\(repository ?? "")".lowercased())
     }
     static func azureTokenKey(projectURL: String) -> String { tokenAccount(.azureDevOps, key: projectURL.lowercased()) }
+    static func adapterTokenKey(_ type: BuildServerType, identity: String) -> String { tokenAccount(type, key: identity.lowercased()) }
     static func token(_ account: String) -> String? {
         let value = try? RepositoryHostCredentials.token(for: account, service: RepositoryHostCredentials.buildServerService)
         return value?.isEmpty == false ? value : nil
@@ -53,7 +55,10 @@ enum BuildServerAdapterResolver {
     }
     static func resolve(settings: [String: String], remotes: [RepositoryRemoteConfiguration], currentRemote: String?,
                         credential: @escaping (URL) async -> String?, transport: @escaping HostTransport = HostHTTP.send,
-                        token: (String) -> String? = BuildServerSettingsStore.token) async -> Resolution {
+                        token: (String) -> String? = BuildServerSettingsStore.token,
+                        buildCredentials: @escaping BuildServerCredentialProvider = { key, stored in
+                            await GitUICommands.requestBuildServerCredentials(key: key, useStored: stored)
+                        }, isCommitVisible: @escaping @Sendable (ObjectID) async -> Bool = { _ in true }) async -> Resolution {
         let enabled = BuildServerSettingsStore.bool(settings[BuildServerSettingKeys.enabled])
         let urls = BuildServerAutoDetector.orderedRemoteURLs(remotes)
         var typeName = settings[BuildServerSettingKeys.type] ?? ""
@@ -72,7 +77,15 @@ enum BuildServerAdapterResolver {
         for (key, value) in BuildServerAutoDetector.detect(urls, only: type)?.1 ?? [:]
             where adapterSettings[key]?.trimmingCharacters(in: .whitespaces).isEmpty ?? true { adapterSettings[key] = value }
         let adapter: (any BuildServerAdapter)?
+        let remoteURL = remotes.first { $0.name == currentRemote && !$0.isDisabled }?.fetchURL ?? remotes.first { !$0.isDisabled }?.fetchURL
         switch type {
+        case .appVeyor:
+            let account = adapterSettings["AppVeyorAccountName"] ?? ""
+            let projects = replaceBuildServerVariables(adapterSettings["AppVeyorProjectName"] ?? "", remoteURL: remoteURL)
+            let apiToken = token(BuildServerSettingsStore.adapterTokenKey(type, identity: account)) ?? adapterSettings["AppVeyorAccountToken"] ?? ""
+            adapter = projects.isEmpty && (account.isEmpty || apiToken.isEmpty) ? nil : AppVeyorBuildAdapter(account: account,
+                projects: projects, token: apiToken, loadTests: BuildServerSettingsStore.bool(adapterSettings["AppVeyorLoadTestsResults"]) ?? false,
+                transport: transport, isCommitVisible: isCommitVisible)
         case .gitHubActions:
             let api = adapterSettings[BuildServerSettingKeys.gitHubApiURL]
             let owner = adapterSettings[BuildServerSettingKeys.gitHubOwner], repository = adapterSettings[BuildServerSettingKeys.gitHubRepository]
@@ -82,12 +95,25 @@ enum BuildServerAdapterResolver {
             let configured = AzureDevOpsBuildAdapter.Settings(projectURL: adapterSettings[BuildServerSettingKeys.azureProjectURL] ?? "",
                 buildDefinitionFilter: adapterSettings[BuildServerSettingKeys.azureDefinitionFilter] ?? "",
                 repositoryName: adapterSettings[BuildServerSettingKeys.azureRepositoryName] ?? "")
-            let remoteURL = remotes.first { $0.name == currentRemote && !$0.isDisabled }?.fetchURL ?? remotes.first { !$0.isDisabled }?.fetchURL
             let projectURL = replaceBuildServerVariables(configured.projectURL, remoteURL: remoteURL)
             let pat = token(BuildServerSettingsStore.azureTokenKey(projectURL: configured.projectURL))
             var password: String?
             if pat == nil, let url = URL(string: projectURL) { password = await credential(url) }
             adapter = try? AzureDevOpsBuildAdapter(settings: configured, projectURL: projectURL, pat: pat, credentialPassword: password, transport: transport)
+        case .gitLab:
+            let instance = adapterSettings["InstanceUrl"] ?? ""
+            adapter = GitLabBuildAdapter(instanceURL: instance, projectID: Int(adapterSettings["ProjectId"] ?? "") ?? 0,
+                token: token(BuildServerSettingsStore.adapterTokenKey(type, identity: instance)) ?? adapterSettings["ApiToken"] ?? "",
+                pagesLimit: Int(adapterSettings["PagesLimit"] ?? ""), transport: transport)
+        case .jenkins:
+            adapter = JenkinsBuildAdapter(server: adapterSettings["BuildServerUrl"] ?? "",
+                projects: replaceBuildServerVariables(adapterSettings["ProjectName"] ?? "", remoteURL: remoteURL),
+                ignoreBranch: adapterSettings["IgnoreBuildBranch"] ?? "", credentialProvider: buildCredentials, transport: transport)
+        case .teamCity:
+            adapter = TeamCityBuildAdapter(server: adapterSettings["BuildServerUrl"] ?? "",
+                projects: replaceBuildServerVariables(adapterSettings["ProjectName"] ?? "", remoteURL: remoteURL),
+                buildFilter: adapterSettings["BuildIdFilter"] ?? "", logAsGuest: BuildServerSettingsStore.bool(adapterSettings["LogAsGuest"]) ?? false,
+                credentialProvider: buildCredentials, transport: transport)
         }
         return .init(adapter: adapter, explicitlyEnabled: enabled == true)
     }
@@ -190,12 +216,23 @@ final class BuildServerSettingsPageController: NSViewController, NSTextFieldDele
     private var tokenField: NSSecureTextField?
     private let regexError = NSTextField(labelWithString: "The 'Build definition name' regular expression is not valid and won't be saved!")
     private var tokenManagement: NSButton?
+    private var adapterButtons: [String: NSButton] = [:]
+    private var panelType: BuildServerType?
+    private var lookupTask: Task<Void, Never>?
+    private let transport: HostTransport
+    private let lookupStatus = NSTextField(labelWithString: "")
+    private var lookupLink: NSButton?
+    private var chooserLink: NSButton?
+    private var credentialsLink: NSButton?
+    private var clipboardLink: NSButton?
 
-    init(store: BuildServerSettingsStore, remoteURLs: [String], workingDirectoryName: String?) {
+    init(store: BuildServerSettingsStore, remoteURLs: [String], workingDirectoryName: String?, transport: @escaping HostTransport = HostHTTP.send) {
         self.store = store; self.remoteURLs = remoteURLs; self.workingDirectoryName = workingDirectoryName
+        self.transport = transport
         super.init(nibName: nil, bundle: nil)
     }
     required init?(coder: NSCoder) { nil }
+    deinit { lookupTask?.cancel() }
 
     override func loadView() {
         stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 8
@@ -265,11 +302,21 @@ final class BuildServerSettingsPageController: NSViewController, NSTextFieldDele
         adapterPanel.addArrangedSubview(button); return button
     }
     private func buildAdapterPanel(_ values: [String: String]) {
+        lookupTask?.cancel()
         adapterPanel.arrangedSubviews.forEach { adapterPanel.removeArrangedSubview($0); $0.removeFromSuperview() }
-        adapterFields = [:]; tokenField = nil; tokenManagement = nil
+        adapterFields = [:]; adapterButtons = [:]; tokenField = nil; tokenManagement = nil; lookupLink = nil; chooserLink = nil; credentialsLink = nil; clipboardLink = nil
+        panelType = selectedType
         guard let type = selectedType, workingDirectoryName != nil || store.locations == nil else { return }
         func value(_ key: String) -> String? { values[BuildServerSettingKeys.adapter(type.rawValue, key)] }
         switch type {
+        case .appVeyor:
+            _ = field("AppVeyorProjectName", "Project(s) Name(s)", value("AppVeyorProjectName") ?? workingDirectoryName ?? "")
+            adapterPanel.addArrangedSubview(NSTextField(wrappingLabelWithString: "Separate different projects with |. Projects may include an account name: account/project."))
+            let account = value("AppVeyorAccountName") ?? ""
+            _ = field("AppVeyorAccountName", "Account name", account)
+            addAdapterToken(type, identity: account, caption: "Api token")
+            adapterPanel.addArrangedSubview(NSTextField(wrappingLabelWithString: "Token used to query the AppVeyor REST API, available in your AppVeyor user account."))
+            addAdapterCheck("AppVeyorLoadTestsResults", "Display test results in build status summary for each build result (network intensive)", value("AppVeyorLoadTestsResults"))
         case .gitHubActions:
             let detected = BuildServerAutoDetector.detect(remoteURLs, only: .gitHubActions)?.1 ?? [:]
             let owner = value(BuildServerSettingKeys.gitHubOwner).flatMap { $0.isEmpty ? nil : $0 } ?? detected[BuildServerSettingKeys.gitHubOwner] ?? ""
@@ -284,6 +331,7 @@ final class BuildServerSettingsPageController: NSViewController, NSTextFieldDele
             _ = link("Create a GitHub personal access token", #selector(openGitHubTokenPage))
         case .azureDevOps:
             var project = value(BuildServerSettingKeys.azureProjectURL) ?? ""
+            regexError.stringValue = "The 'Build definition name' regular expression is not valid and won't be saved!"
             if project.trimmingCharacters(in: .whitespaces).isEmpty { project = AzureDevOpsProjectURL.project(fromRemotes: remoteURLs) ?? "" }
             _ = field(BuildServerSettingKeys.azureProjectURL, "Project Url", project)
             adapterPanel.addArrangedSubview(NSTextField(wrappingLabelWithString: "Examples:\n - https://dev.azure.com/yourorganization/projectname/\n - https://yourhost:8080/tfs/collectionname/projectname/\n - https://yourorganization.visualstudio.com/projectname/"))
@@ -297,13 +345,62 @@ final class BuildServerSettingsPageController: NSViewController, NSTextFieldDele
             tokenManagement = link("Go to token management page", #selector(openAzureTokenPage))
             _ = link("Extract data from a build result url copied in the clipboard", #selector(extractFromClipboard))
             updateAzureView()
+        case .gitLab:
+            let detected = remoteURLs.compactMap(CIConfiguration.gitLabRemote).first
+            let instance = value("InstanceUrl") ?? detected?.instance ?? ""
+            _ = field("InstanceUrl", "Instance URL", instance)
+            _ = field("ProjectId", "Project ID", value("ProjectId") ?? "")
+            addAdapterToken(type, identity: instance, caption: "Api Token")
+            lookupLink = link("Get Project ID from server", #selector(getGitLabProjectID))
+            tokenManagement = link("Go to token management page", #selector(openGitLabTokenPage))
+            lookupStatus.stringValue = ""; lookupStatus.textColor = .systemRed; adapterPanel.addArrangedSubview(lookupStatus)
+            updateExtraView()
+            if value("ProjectId") == nil, !instance.isEmpty { getGitLabProjectID() }
+        case .jenkins, .teamCity:
+            _ = field("BuildServerUrl", type == .jenkins ? "Jenkins server URL" : "TeamCity server URL", value("BuildServerUrl") ?? "")
+            _ = field("ProjectName", "Project name", value("ProjectName") ?? workingDirectoryName ?? "")
+            if type == .jenkins {
+                _ = field("IgnoreBuildBranch", "Ignore build for branch", value("IgnoreBuildBranch") ?? "")
+            } else {
+                adapterPanel.addArrangedSubview(NSTextField(labelWithString: "Several names split by | character"))
+                _ = field("BuildIdFilter", "Build Id Filter (Regexp)", value("BuildIdFilter") ?? "")
+                addAdapterCheck("LogAsGuest", "Log as guest to display the build report", value("LogAsGuest") ?? "false")
+                chooserLink = link("Choose project/build…", #selector(chooseTeamCityBuild))
+                clipboardLink = link("Extract the data from the build url copied in the clipboard", #selector(extractTeamCityClipboard))
+                regexError.stringValue = "The \"Build Id Filter\" regular expression is not valid and won't be saved!"
+                adapterPanel.addArrangedSubview(regexError)
+            }
+            credentialsLink = link("Credentials…", #selector(editBuildCredentials))
+            updateExtraView()
+        }
+    }
+    private func addAdapterToken(_ type: BuildServerType, identity: String, caption: String) {
+        tokenField = field("token", caption, "", secure: true) as? NSSecureTextField
+        tokenField?.placeholderString = BuildServerSettingsStore.token(BuildServerSettingsStore.adapterTokenKey(type, identity: identity)) == nil
+            ? "Not set" : "Stored in Keychain — enter a replacement"
+    }
+    private func addAdapterCheck(_ key: String, _ title: String, _ value: String?) {
+        let control = NSButton(checkboxWithTitle: title, target: self, action: #selector(controlsChanged))
+        control.allowsMixedState = true; setTristate(control, value); control.isEnabled = scope != .effective
+        adapterButtons[key] = control; adapterPanel.addArrangedSubview(control)
+    }
+    private func updateExtraView() {
+        credentialsLink?.isEnabled = CIConfiguration.serverURL(adapterFields["BuildServerUrl"]?.stringValue ?? "", jenkins: selectedType == .jenkins) != nil
+        clipboardLink?.isEnabled = scope != .effective
+        if selectedType == .teamCity {
+            regexError.isHidden = CIConfiguration.regexValid(adapterFields["BuildIdFilter"]?.stringValue ?? "")
+            chooserLink?.isEnabled = scope != .effective && CIConfiguration.serverURL(adapterFields["BuildServerUrl"]?.stringValue ?? "") != nil
+        }
+        if selectedType == .gitLab {
+            let valid = CIConfiguration.serverURL(adapterFields["InstanceUrl"]?.stringValue ?? "") != nil
+            lookupLink?.isEnabled = scope != .effective && valid; tokenManagement?.isEnabled = valid
         }
     }
     private func updateAzureView() {
         regexError.isHidden = AzureDevOpsProjectURL.isRegexValid(adapterFields[BuildServerSettingKeys.azureDefinitionFilter]?.stringValue ?? "")
         tokenManagement?.isEnabled = AzureDevOpsProjectURL.tokenManagementURL(project: adapterFields[BuildServerSettingKeys.azureProjectURL]?.stringValue ?? "") != nil
     }
-    func controlTextDidChange(_ notification: Notification) { captureAdapter(); if selectedType == .azureDevOps { updateAzureView() } }
+    func controlTextDidChange(_ notification: Notification) { captureAdapter(); if selectedType == .azureDevOps { updateAzureView() }; updateExtraView() }
 
     @objc private func scopeChanged() {
         view.window?.makeFirstResponder(nil)
@@ -322,7 +419,7 @@ final class BuildServerSettingsPageController: NSViewController, NSTextFieldDele
         captureAdapter()
     }
     private func captureAdapter() {
-        guard scope != .effective, let type = selectedType else { return }
+        guard scope != .effective, let type = selectedType, panelType == type else { return }
         let text = { (key: String) in self.adapterFields[key]?.stringValue.trimmingCharacters(in: .whitespaces) ?? "" }
         switch type {
         case .gitHubActions:
@@ -342,12 +439,93 @@ final class BuildServerSettingsPageController: NSViewController, NSTextFieldDele
             edits[scope, default: [:]][BuildServerSettingKeys.adapter(type.rawValue, BuildServerSettingKeys.azureProjectURL)] = .some(settings.projectURL)
             edits[scope, default: [:]][BuildServerSettingKeys.adapter(type.rawValue, BuildServerSettingKeys.azureDefinitionFilter)] = .some(settings.buildDefinitionFilter)
             if let token = tokenField?.stringValue, !token.isEmpty { tokenEdits[BuildServerSettingsStore.azureTokenKey(projectURL: settings.projectURL)] = token }
+        case .appVeyor, .gitLab, .jenkins, .teamCity:
+            let keys: [String]
+            switch type {
+            case .appVeyor: keys = ["AppVeyorProjectName", "AppVeyorAccountName"]
+            case .gitLab: keys = ["InstanceUrl", "ProjectId"]
+            case .jenkins: keys = ["BuildServerUrl", "ProjectName", "IgnoreBuildBranch"]
+            default: keys = ["BuildServerUrl", "ProjectName", "BuildIdFilter"]
+            }
+            if type == .teamCity && !CIConfiguration.regexValid(text("BuildIdFilter")) { return }
+            for key in keys {
+                if key == "ProjectId", Int(text(key)) == nil { continue }
+                edits[scope, default: [:]][BuildServerSettingKeys.adapter(type.rawValue, key)] = .some(text(key).isEmpty ? nil : text(key))
+            }
+            for (key, button) in adapterButtons { edits[scope, default: [:]][BuildServerSettingKeys.adapter(type.rawValue, key)] = .some(tristate(button)) }
+            if type == .gitLab { edits[scope, default: [:]][BuildServerSettingKeys.adapter(type.rawValue, "PagesLimit")] = .some("0") }
+            if type == .gitLab || type == .appVeyor, let token = tokenField?.stringValue, !token.isEmpty {
+                let identity = text(type == .gitLab ? "InstanceUrl" : "AppVeyorAccountName")
+                tokenEdits[BuildServerSettingsStore.adapterTokenKey(type, identity: identity)] = token
+                edits[scope, default: [:]][BuildServerSettingKeys.adapter(type.rawValue, type == .gitLab ? "ApiToken" : "AppVeyorAccountToken")] = .some(nil)
+            }
+        }
+    }
+
+    @objc private func editBuildCredentials() {
+        guard let server = CIConfiguration.serverURL(adapterFields["BuildServerUrl"]?.stringValue ?? "", jenkins: selectedType == .jenkins), let host = server.host else { return }
+        Task { _ = await GitUICommands.requestBuildServerCredentials(key: host, useStored: false) }
+    }
+    @objc private func openGitLabTokenPage() {
+        guard let base = CIConfiguration.serverURL(adapterFields["InstanceUrl"]?.stringValue ?? ""),
+              let url = URL(string: "-/profile/personal_access_tokens?name=GitExtensionsIntegration&scopes=api", relativeTo: base) else { return }
+        NSWorkspace.shared.open(url.absoluteURL)
+    }
+    @objc private func getGitLabProjectID() {
+        guard selectedType == .gitLab else { return }
+        guard let remote = remoteURLs.compactMap(CIConfiguration.gitLabRemote).first else {
+            lookupStatus.stringValue = "Failed to obtain project from server. Try a valid API token or check instance URL."; return
+        }
+        let instance = adapterFields["InstanceUrl"]?.stringValue ?? ""
+        let token = tokenField?.stringValue.isEmpty == false ? tokenField!.stringValue : BuildServerSettingsStore.token(BuildServerSettingsStore.adapterTokenKey(.gitLab, identity: instance)) ?? ""
+        lookupTask?.cancel()
+        lookupTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let id = try await GitLabBuildAdapter.projectID(instanceURL: instance, namespace: remote.namespace, repository: remote.repository, token: token, transport: transport)
+                try Task.checkCancellation()
+                guard selectedType == .gitLab, adapterFields["InstanceUrl"]?.stringValue == instance else { return }
+                if let id, id > 0 { adapterFields["ProjectId"]?.stringValue = String(id); lookupStatus.stringValue = ""; captureAdapter() }
+                else { lookupStatus.stringValue = "Failed to obtain project from server. Try a valid API token or check instance URL." }
+            } catch is CancellationError { } catch { lookupStatus.stringValue = "Failed to obtain project from server. Try a valid API token or check instance URL." }
+        }
+    }
+    private func teamCityClient() -> TeamCityBuildAdapter? {
+        TeamCityBuildAdapter(server: adapterFields["BuildServerUrl"]?.stringValue ?? "", projects: "",
+            credentialProvider: { key, stored in await GitUICommands.requestBuildServerCredentials(key: key, useStored: stored) }, transport: transport)
+    }
+    @objc private func chooseTeamCityBuild() {
+        guard scope != .effective, let adapter = teamCityClient() else { return }
+        let controller = TeamCityBuildChooserController(adapter: adapter, project: adapterFields["ProjectName"]?.stringValue ?? "", build: adapterFields["BuildIdFilter"]?.stringValue ?? "")
+        let window = NSWindow(contentViewController: controller); window.title = "Choose the TeamCity build…"
+        window.styleMask = [.titled, .resizable]; window.setContentSize(NSSize(width: 460, height: 400))
+        let owner = view.window
+        controller.onComplete = { [weak self] build in
+            if let build { self?.adapterFields["ProjectName"]?.stringValue = build.projectID; self?.adapterFields["BuildIdFilter"]?.stringValue = build.id; self?.captureAdapter(); self?.updateExtraView() }
+            if let owner { owner.endSheet(window) }; window.orderOut(nil); controller.onComplete = { _ in }
+        }
+        if let owner { owner.beginSheet(window) } else { window.center(); window.makeKeyAndOrderFront(nil) }
+    }
+    @objc private func extractTeamCityClipboard() {
+        guard scope != .effective, let parsed = CIConfiguration.teamCityBuildURL(NSPasteboard.general.string(forType: .string) ?? "") else {
+            HostingMessages.error("The clipboard doesn't contain a valid build url. Copy a URL containing the buildTypeId parameter.", "Build url not valid"); return
+        }
+        adapterFields["BuildServerUrl"]?.stringValue = parsed.server.absoluteString
+        guard let adapter = teamCityClient() else { return }
+        lookupTask?.cancel()
+        lookupTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let build = try await adapter.buildType(parsed.buildType); try Task.checkCancellation()
+                guard selectedType == .teamCity else { return }
+                adapterFields["ProjectName"]?.stringValue = build.projectID; adapterFields["BuildIdFilter"]?.stringValue = build.id; captureAdapter(); updateExtraView()
+            } catch is CancellationError { } catch { HostingMessages.error(error.localizedDescription, "Error when loading the projects and build list") }
         }
     }
     @discardableResult
     func save() throws -> Bool {
         capture()
-        var changed = false
+        var changed = !tokenEdits.isEmpty
         for scope in [DistributedSettingsScope.global, .distributed, .local] {
             if let changes = edits[scope], !changes.isEmpty { changed = try store.write(changes, scope: scope) || changed }
         }
@@ -391,9 +569,17 @@ final class BuildServerSettingsPageController: NSViewController, NSTextFieldDele
 }
 
 @MainActor
-final class BuildReportViewController: NSViewController {
+final class BuildReportViewController: NSViewController, WKNavigationDelegate {
     private let link = NSButton(title: "Open report", target: nil, action: nil)
-    var url: URL?
+    private var webView: WKWebView?
+    private var info: BuildInfo?
+    private(set) var url: URL?
+    func show(_ info: BuildInfo?) {
+        guard self.info != info else { return }
+        self.info = info; url = info?.url
+        if isViewLoaded { updateContent() }
+    }
+    var embedsReport: Bool { info?.showInBuildReportTab == true }
     override func loadView() {
         let root = NSView()
         link.isBordered = false; link.contentTintColor = .linkColor
@@ -403,6 +589,28 @@ final class BuildReportViewController: NSViewController {
         root.addSubview(link)
         NSLayoutConstraint.activate([link.centerXAnchor.constraint(equalTo: root.centerXAnchor), link.centerYAnchor.constraint(equalTo: root.centerYAnchor)])
         view = root
+        updateContent()
+    }
+    private func updateContent() {
+        webView?.stopLoading()
+        guard embedsReport, let url else { webView?.removeFromSuperview(); webView = nil; link.isHidden = false; return }
+        link.isHidden = true
+        if webView == nil {
+            let browser = WKWebView(); browser.navigationDelegate = self; browser.translatesAutoresizingMaskIntoConstraints = false
+            view.addSubview(browser)
+            NSLayoutConstraint.activate([browser.leadingAnchor.constraint(equalTo: view.leadingAnchor), browser.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+                                         browser.topAnchor.constraint(equalTo: view.topAnchor), browser.bottomAnchor.constraint(equalTo: view.bottomAnchor)])
+            webView = browser
+        }
+        webView?.load(URLRequest(url: url))
+    }
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        guard (error as NSError).code != NSURLErrorCancelled else { return }
+        webView.removeFromSuperview(); self.webView = nil; link.isHidden = false
+    }
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        guard (error as NSError).code != NSURLErrorCancelled else { return }
+        webView.removeFromSuperview(); self.webView = nil; link.isHidden = false
     }
     @objc private func open() { if let url { NSWorkspace.shared.open(url) } }
 }

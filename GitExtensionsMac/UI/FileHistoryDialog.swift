@@ -48,6 +48,7 @@ private final class FileHistoryTabs: NSTabViewController {
 
 @MainActor
 final class FileHistoryViewController: NSViewController, NSMenuDelegate {
+    var onLinePatch: ((FileStatusLinePatchKind, ChangedFile, FileDiff, Set<String>) -> Void)?
     let grid = RevisionGridViewController()
     let info = CommitDetailViewController()
     let commitDiff = RevisionDiffViewController(mode: .diff)
@@ -143,6 +144,7 @@ final class FileHistoryViewController: NSViewController, NSMenuDelegate {
             controller.onGoToRevision = { [weak self] id in self?.grid.selectCommit(id: id) }
         }
         commitDiff.fileStatusSource = source as? any RepositoryFileStatusDataSource
+        commitDiff.onLinePatch = { [weak self] kind, file, diff, ids in self?.onLinePatch?(kind, file, diff, ids) }
         commitDiff.onCommand = { [weak self] command in
             if let handler = self?.onFileStatusCommand { handler(command) }
             else { self?.action(command.identifier, [], command.focused ?? command.items.first) }
@@ -157,6 +159,14 @@ final class FileHistoryViewController: NSViewController, NSMenuDelegate {
             action("file.history", [], FileStatusListItem(group: group, file: file))
         }
         diff.onOptionsChanged = { [weak self] _ in self?.selectionChanged() }
+        diff.supportsDiffAppearance = true
+        diff.difftasticAvailability = { [source] in await (source as? any RepositoryFileStatusDataSource)?.isDifftasticEnabled() ?? false }
+        diff.linePatchingSupported = { [weak self] in
+            guard let self, onLinePatch != nil, !isBare, let item = shownItem, item.file.isSubmodule == false else { return false }
+            let exists = repositoryPath.map { FileManager.default.fileExists(atPath: URL(fileURLWithPath: $0).appendingPathComponent(item.file.path).path) } ?? false
+            return exists || item.file.changeType == .added
+        }
+        diff.onLinePatch = { [weak self] kind, file, diff, ids in self?.onLinePatch?(kind, file, diff, ids) }
         diff.supportedFileCommands = ["file.open.local", "file.showFinder", "file.difftool"]
         diff.onFileCommand = { [weak self] id, _ in
             if id == "file.blame" { self?.selectTab("blame") }
@@ -327,6 +337,7 @@ final class FileHistoryViewController: NSViewController, NSMenuDelegate {
                 let changed = ChangedFile(id: path, path: path, oldPath: oldPath, changeType: first == nil ? .added : .modified, additions: 0, deletions: 0)
                 let group = FileStatusGroup(first: first, second: commit.id, summary: path, files: [changed])
                 shownItem = FileStatusListItem(group: group, file: changed)
+                diff.selectionScope = commit.kind == .workingDirectory ? .workingTree : commit.kind == .index ? .index : .revision
                 view.window?.title = "File History - \(file)" + (path == file ? "" : " (\(path))") + (repositoryPath.map { " - \($0)" } ?? "")
                 switch selectedTab {
                 case "commit":
@@ -368,8 +379,9 @@ final class FileHistoryViewController: NSViewController, NSMenuDelegate {
         if !commit.isArtificial { commandTab.label = "Commit" + (folder || available ? "" : " - Git could not identify the file"); items.append(commandTab) }
         if available { items.append(diffTab) }
         if available && !commit.isArtificial { items.append(viewTab); if !submodule { items.append(blameTab) } }
-        let url = grid.selectedCommitCount == 1 ? grid.buildStatus(for: commit.id)?.url : nil
-        report.url = url
+        let info = grid.selectedCommitCount == 1 ? grid.buildStatus(for: commit.id) : nil
+        let url = info?.url
+        report.show(showBuildReport ? info : nil)
         if showBuildReport && url != nil { items.append(reportTab) }
         configuringTabs = true
         if tabs.tabViewItems != items { tabs.tabViewItems = items }
@@ -508,7 +520,8 @@ final class FileHistoryViewController: NSViewController, NSMenuDelegate {
             let locations = try? await DistributedSettings.loadLocations(from: settings)
             let values = (try? BuildServerSettingsStore(locations: locations).values(.effective)) ?? [:]
             let resolved = await BuildServerAdapterResolver.resolve(settings: values, remotes: configs, currentRemote: nil,
-                credential: { await hosting?.hostCredentialPassword(for: $0) })
+                credential: { await hosting?.hostCredentialPassword(for: $0) },
+                isCommitVisible: { [weak self] id in await MainActor.run { self?.revisions.contains { $0.id == .object(id) } ?? false } })
             guard let self, !Task.isCancelled else { return }
             showBuildReport = BuildServerSettingsStore.bool(values[BuildServerSettingKeys.showBuildResultPage]) ?? false
             grid.setBuildStatusColumn(enabled: resolved.adapter != nil || resolved.explicitlyEnabled)

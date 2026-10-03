@@ -7,6 +7,8 @@ enum RepositoryBrowserLaunch {
     case dashboard
     case mock
     case repository(URL, selection: [RevisionID] = [], fileHistory: FileHistoryBrowseRequest? = nil)
+    case commandLine(CommandLineRequest)
+    case commandLineError(Error)
 }
 
 
@@ -72,6 +74,7 @@ final class ApplicationHostViewController: NSViewController {
     private let checksSettingsAtStartup: Bool
     private var startupSettingsTask: Task<Void, Never>?
     private var didCheckStartupSettings = false
+    private var didDispatchCommandLine = false
 
     init(launch: RepositoryBrowserLaunch, checksSettingsAtStartup: Bool = false) {
         self.launch = launch
@@ -119,11 +122,27 @@ final class ApplicationHostViewController: NSViewController {
         case .repository(let url, let selection, let fileHistory):
             showDashboard()
             openRepository(url, selection: selection, fileHistory: fileHistory)
+        case .commandLine, .commandLineError:
+            showDashboard()
         }
     }
 
     override func viewDidAppear() {
         super.viewDidAppear()
+        if !didDispatchCommandLine {
+            switch launch {
+            case .commandLine(let request):
+                didDispatchCommandLine = true
+                openTask = Task { @MainActor [weak self] in await self?.runCommandLine(request) }
+            case .commandLineError(let error):
+                didDispatchCommandLine = true
+                openTask = Task { @MainActor in
+                    CommandLineSession.fail(error)
+                    NSApp.terminate(nil)
+                }
+            default: break
+            }
+        }
         if activeController is DashboardViewController {
             view.window?.title = "Git Extensions"
         }
@@ -139,12 +158,81 @@ final class ApplicationHostViewController: NSViewController {
                 }
             }
         }
-        if checksSettingsAtStartup, !didCheckStartupSettings, let window = view.window {
+        if checksSettingsAtStartup, !didDispatchCommandLine, !didCheckStartupSettings, let window = view.window {
             didCheckStartupSettings = true
             startupSettingsTask = Task { @MainActor in
                 await GitUICommands.checkStartupSettings(owner: window)
             }
         }
+    }
+
+    func runCommandLine(_ request: CommandLineRequest) async {
+        guard let owner = view.window else { return }
+        do {
+            var location = try request.repositoryLocation()
+            let historyCommand = [.filehistory, .blamehistory].contains(request.verb)
+            let git = GitProcess(executableURL: URL(fileURLWithPath: store.preferences.gitExecutablePath))
+            if historyCommand, let candidate = location, let file = request.arguments.first,
+               request.path(file).resolvingSymlinksInPath() == candidate.resolvingSymlinksInPath(),
+               let parent = try await CommandLineRepository.superproject(of: candidate, git: git) { location = parent }
+            if location == nil && request.opensDashboardWithoutRepository { return }
+            if request.needsRepository || [.fileeditor, .settings].contains(request.verb) && location != nil {
+                guard let location else { throw CLIError.notValidRepository }
+                let module = GitRepositoryModule(repositoryURL: location, git: git)
+                let state = try await module.loadRepositoryState()
+                var selection = request.selection
+                var first: RevisionID?
+                if let argument = request.commitArgument {
+                    guard let ids = await CommandLineRepository.commitSelection(argument, git: git, in: location) else {
+                        throw CLIError.silent("No commit found matching: \(argument)")
+                    }
+                    selection = [.object(ids.selected)]
+                    first = ids.first.map(RevisionID.object)
+                }
+                var history = request.fileHistory ?? request.pathFilter.map { FileHistoryBrowseRequest(path: $0) }
+                let browsesHistory = historyCommand && store.revisionGridPreferences.useBrowseForFileHistory
+                if browsesHistory {
+                    let id = request.arguments.count > 1 ? try ObjectID.parse(request.arguments[1]) : nil
+                    history = .init(path: request.relativeFile(request.arguments[0], root: location), filterRevision: request.has("filter-by-revision") ? id : nil)
+                    if let id { selection = [.object(id)] }
+                }
+                let loadsHistory = request.verb == .browse || request.verb == .openrepo || browsesHistory
+                let selected = selection
+                showBrowser(repositoryModule: module, selection: selected, fileHistory: history,
+                            revisionFilter: request.revisionFilter, firstRevision: first, loadsRevisionHistory: loadsHistory)
+                let deadline = ContinuousClock.now + .seconds(60)
+                while browser?.repositoryIdentity == nil {
+                    try Task.checkCancellation()
+                    guard ContinuousClock.now < deadline else { throw CLIError.invalid("Repository state failed to load.") }
+                    try await Task.sleep(for: .milliseconds(20))
+                }
+                guard let browser else { throw RepositoryDataSourceError.unavailable }
+                if loadsHistory { return }
+                browser.prepareCommandLineRevision(state.identity.headID == nil ? nil : try await module.loadBlameRevision(state.identity.headID))
+                let presentation = CommandLinePresentation(owner: owner, notifier: browser.uiCommands.repositoryChangedNotifier)
+                defer { presentation.finish() }
+                presentation.successfulRead = request.succeedsOnClose
+                presentation.hidesOwner = CommandLineSession.active
+                switch try await browser.uiCommands.runCommandLine(request) {
+                case .completed(let succeeded): presentation.finish(); CommandLineSession.exitStatus = succeeded ? 0 : -1
+                case .presentation: CommandLineSession.exitStatus = try await presentation.wait() ? 0 : -1
+                }
+            } else {
+                let presentation = CommandLinePresentation(owner: owner)
+                defer { presentation.finish() }
+                presentation.successfulRead = request.succeedsOnClose
+                presentation.hidesOwner = CommandLineSession.active
+                switch try await GitUICommands.runApplicationCommandLine(request, owner: owner, openRepository: { [weak presentation] url in
+                    presentation?.successfulRead = true
+                    GitUICommands.launchBrowse(url)
+                }) {
+                case .completed(let succeeded): presentation.finish(); CommandLineSession.exitStatus = succeeded ? 0 : -1
+                case .presentation: CommandLineSession.exitStatus = try await presentation.wait() ? 0 : -1
+                }
+            }
+        } catch is CancellationError { CommandLineSession.exitStatus = -1 }
+        catch { CommandLineSession.fail(error) }
+        if CommandLineSession.active { NSApp.terminate(nil) }
     }
 
 
@@ -220,8 +308,10 @@ final class ApplicationHostViewController: NSViewController {
         RepositoryHistoryUIService.shared.triggerBranchNameCacheUpdate()
     }
 
-    private func showBrowser(repositoryModule: any RepositoryBrowsingDataSource, selection: [RevisionID] = [], fileHistory: FileHistoryBrowseRequest? = nil) {
-        let controller = RepositoryBrowserViewController(repositoryModule: repositoryModule, openingSelection: selection, fileHistory: fileHistory)
+    private func showBrowser(repositoryModule: any RepositoryBrowsingDataSource, selection: [RevisionID] = [], fileHistory: FileHistoryBrowseRequest? = nil,
+                             revisionFilter: String = "", firstRevision: RevisionID? = nil, loadsRevisionHistory: Bool = true) {
+        let controller = RepositoryBrowserViewController(repositoryModule: repositoryModule, openingSelection: selection, fileHistory: fileHistory,
+                                                         revisionFilter: revisionFilter, firstRevision: firstRevision, loadsRevisionHistory: loadsRevisionHistory)
         controller.onApplicationCommand = { [weak self] command in
             guard let self else { return false }
 

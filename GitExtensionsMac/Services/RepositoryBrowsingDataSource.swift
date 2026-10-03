@@ -87,9 +87,12 @@ package protocol RepositoryBrowsingDataSource: Sendable {
         encoding: RepositoryTextEncoding
     ) async throws -> RepositoryFileContent
     func openWithDifftool(for commit: Commit, file: ChangedFile, customToolPath: String?) async throws
+    func isDifftasticEnabled() async -> Bool
 }
 
 package extension RepositoryBrowsingDataSource {
+    func isDifftasticEnabled() async -> Bool { false }
+
     func loadDiff(for commit: Commit, file: ChangedFile) async throws -> FileDiff? {
         try await loadDiff(for: commit, file: file, options: FileDiffOptions())
     }

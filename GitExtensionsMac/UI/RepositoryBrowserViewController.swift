@@ -197,12 +197,27 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         (selectedDetailController === fileTreeController ? fileTreeController : revisionDiffController).scriptFileContext
     }
     func selectScriptRevision(_ id: ObjectID) { revisionGridController.selectCommit(id: .object(id)) }
+    private var openingFirstRevision: RevisionID?
+    private let loadsRevisionHistory: Bool
 
-    init(repositoryModule: any RepositoryBrowsingDataSource, openingSelection: [RevisionID] = [], fileHistory: FileHistoryBrowseRequest? = nil) {
+    func prepareCommandLineRevision(_ commit: Commit?) {
+        guard !loadsRevisionHistory else { return }
+        revisions = commit.map { [$0] } ?? []
+    }
+
+    init(repositoryModule: any RepositoryBrowsingDataSource, openingSelection: [RevisionID] = [], fileHistory: FileHistoryBrowseRequest? = nil,
+         revisionFilter: String = "", firstRevision: RevisionID? = nil, loadsRevisionHistory: Bool = true) {
         self.repositoryModule = repositoryModule
         self.openingSelection = openingSelection
         self.fileHistory = fileHistory
+        self.openingFirstRevision = firstRevision
+        self.loadsRevisionHistory = loadsRevisionHistory
         super.init(nibName: nil, bundle: nil)
+        if !revisionFilter.isEmpty {
+            revisionGridController.updateFilter(refresh: false) {
+                _ = $0.apply(.init(text: revisionFilter, message: true, committer: false, author: false, diffContent: false))
+            }
+        }
         if let fileHistory {
             revisionGridController.updateFilter(refresh: false) {
                 $0.byPathFilter = true
@@ -486,8 +501,9 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
     }
 
     private func updateBuildReportTab() {
-        let url = revisionGridController.buildStatus(for: selectedCommitID)?.url
-        buildReportController.url = url
+        let info = revisionGridController.buildStatus(for: selectedCommitID)
+        let url = info?.url
+        buildReportController.show(showBuildResultPage ? info : nil)
         let show = showBuildResultPage && url != nil
         guard show != showsBuildReportTab else { return }
         showsBuildReportTab = show
@@ -506,7 +522,8 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             let locations = try? await DistributedSettings.loadLocations(from: settingsSource)
             let settings = (try? BuildServerSettingsStore(locations: locations).values(.effective)) ?? [:]
             let resolution = await BuildServerAdapterResolver.resolve(settings: settings, remotes: remotes, currentRemote: current,
-                credential: { url in await hosting?.hostCredentialPassword(for: url) })
+                credential: { url in await hosting?.hostCredentialPassword(for: url) },
+                isCommitVisible: { [weak self] id in await MainActor.run { self?.revisions.contains { $0.id == .object(id) } ?? false } })
             guard let self, !Task.isCancelled else { return }
             showBuildResultPage = BuildServerSettingsStore.bool(settings[BuildServerSettingKeys.showBuildResultPage]) ?? false
             revisionGridController.setBuildStatusColumn(enabled: resolution.adapter != nil || resolution.explicitlyEnabled)
@@ -1262,6 +1279,10 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
                 uiCommands.startFileHistory(file: path, revision: revisions.first { $0.id == revision })
             }
             controller.onRefreshArtificial = { [weak self] in self?.refreshArtificialRevisions() }
+            controller.onLinePatch = { [weak self] kind, file, diff, ids in
+                guard let self, let window = view.window else { return }
+                uiCommands.applyLinePatch(kind, file: file, diff: diff, lineIDs: ids, owner: window)
+            }
         }
         activationObserver = NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in self?.applicationActivated() }
@@ -1332,9 +1353,16 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             guard count > 0 else { return }
             detailTabs.selectTab(at: (detailTabs.selectedTabIndex + (forward ? 1 : count - 1)) % count)
         case .goToSuperproject:
-            if let superproject = superprojectURL { _ = onApplicationCommand?(.openRecentRepository(superproject)) }
+            if levelUpButton.isEnabled { levelUpToolbar() }
+        case .goToSubmodule:
+            if levelUpButton.isEnabled { showSubmodulesMenu(levelUpButton) }
         case .revisionGrid(let id):
             revisionGridController.performGridCommand(id)
+        case .revisionGridRestoringFileFocus(let id):
+            let responder = view.window?.firstResponder as? NSView
+            let restore = responder.map { $0.isDescendant(of: revisionDiffController.view) } == true
+            revisionGridController.performGridCommand(id)
+            if restore, let responder { view.window?.makeFirstResponder(responder) }
         case .toggleRevisionTags:
             defer { publishGridMenuState() }
             var preferences = AppSettingsStore.shared.tagPreferences
@@ -1490,6 +1518,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         }
         applyRepositoryState(state)
         loadDiffTools()
+        guard loadsRevisionHistory else { return }
         uiCommands.pluginsRepositoryLoaded()
         startRevisionRead(
             state.revisionReadRequest,
@@ -1621,6 +1650,10 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
                 if !openingSelection.isEmpty {
                     revisionGridController.selectCommits(ids: openingSelection)
                     openingSelection = []
+                }
+                if let openingFirstRevision {
+                    revisionGridController.scrollRevisionToTop(openingFirstRevision)
+                    self.openingFirstRevision = nil
                 }
                 launchBuildServerWatcher()
             } catch is CancellationError {
@@ -2954,6 +2987,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         head: Commit?,
         draft: CommitDialogDraft?,
         owner: NSWindow,
+        initialMessage: String? = nil,
         previousSelection: RevisionID?
     ) -> NSWindowController {
         CommitWorkflowDialog.present(
@@ -2964,6 +2998,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             head: head,
             draft: draft,
             owner: owner,
+            initialMessage: initialMessage,
             onManageRemotes: { [weak self] remote, localBranch in
                 self?.uiCommands.startRemoteManagement(
                     selectedRemote: remote,
@@ -3111,7 +3146,8 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         history: [Commit],
         mutationSource: any RepositoryCherryPickDataSource,
         window: NSWindow,
-        previousSelection: RevisionID?
+        previousSelection: RevisionID?,
+        onFinished: ((Bool) -> Void)? = nil
     ) {
         mutationTask?.cancel()
         mutationTask = Task { @MainActor [weak self] in
@@ -3121,6 +3157,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
                 addReference: AppSettingsStore.shared.cherryPickPreferences.addReference
             )
             var completedCount = 0
+            defer { onFinished?(completedCount > 0) }
             var preferredCommitID = previousSelection
 
             for proposedCommit in ordered {

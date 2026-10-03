@@ -57,15 +57,15 @@ final class CheckoutBranchWorkflowCoordinator {
         }
     }
 
-    func checkoutBranch(initialTarget: CheckoutDialogTarget?, confirmDirectCheckout: Bool = false) {
-        guard !context.repository.isBare, let owner else { return }
+    func checkoutBranch(initialTarget: CheckoutDialogTarget?, confirmDirectCheckout: Bool = false, onFinished: ((Bool) -> Void)? = nil) {
+        guard !context.repository.isBare, let owner else { onFinished?(false); return }
         let startingContext = context
         let previousSelection = startingContext.headID.map(RevisionID.object)
         replaceTask { [weak self, weak owner] in
-            guard let self, let owner else { return }
-            guard pluginEvent?("PreCheckoutBranch", nil) != false else { return }
+            guard let self, let owner else { onFinished?(false); return }
+            guard pluginEvent?("PreCheckoutBranch", nil) != false else { onFinished?(false); return }
             var actionDone = false
-            defer { _ = pluginEvent?("PostCheckoutBranch", actionDone) }
+            defer { _ = pluginEvent?("PostCheckoutBranch", actionDone); onFinished?(actionDone) }
             do {
                 onStatus("Checking repository state…")
                 let state = try await source.loadMutationState()
@@ -154,15 +154,15 @@ final class CheckoutBranchWorkflowCoordinator {
         }
     }
 
-    func checkoutRevision(_ commit: Commit) {
-        guard !context.repository.isBare, !commit.isArtificial, let owner else { return }
+    func checkoutRevision(_ commit: Commit, onFinished: ((Bool) -> Void)? = nil) {
+        guard !context.repository.isBare, !commit.isArtificial, let owner else { onFinished?(false); return }
         let startingContext = context
         let previousSelection = startingContext.headID.map(RevisionID.object)
         replaceTask { [weak self, weak owner] in
-            guard let self, let owner else { return }
-            guard pluginEvent?("PreCheckoutRevision", nil) != false else { return }
+            guard let self, let owner else { onFinished?(false); return }
+            guard pluginEvent?("PreCheckoutRevision", nil) != false else { onFinished?(false); return }
             var actionDone = false
-            defer { _ = pluginEvent?("PostCheckoutRevision", actionDone) }
+            defer { _ = pluginEvent?("PostCheckoutRevision", actionDone); onFinished?(actionDone) }
             guard let request = await CheckoutBranchDialogs.checkoutRevision(
                 commit: commit,
                 revisions: revisions,

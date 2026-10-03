@@ -39,6 +39,8 @@ final class GitUICommands {
 
     private(set) var fileEditorWindows: [String: NSWindowController] = [:]
     private static var standalonePatchWindows: [UUID: PatchWindowController] = [:]
+    private var commandLineWindows: [NSWindowController] = []
+    private static var applicationCommandLineWindows: [NSWindowController] = []
 
     init(
         repositoryModule: any RepositoryBrowsingDataSource,
@@ -80,6 +82,215 @@ final class GitUICommands {
         if NSApp.mainWindow == nil || NSApp.mainWindow === browser?.view.window {
             BrowserCommandAvailability.shared.plugins = []
         }
+    }
+
+    static func runApplicationCommandLine(_ request: CommandLineRequest, owner: NSWindow,
+                                         openRepository: @escaping (URL) -> Void) async throws -> CommandLineDispatch {
+        let executable = URL(fileURLWithPath: AppSettingsStore.shared.preferences.gitExecutablePath)
+        switch request.verb {
+        case .help:
+            FileHandle.standardOutput.write(Data((CommandLineSession.usage + "\n").utf8))
+            let controller = CommandLineHelpWindow()
+            applicationCommandLineWindows.append(controller)
+            controller.showWindow(nil); controller.window?.makeKeyAndOrderFront(nil)
+        case .about: AboutWindowController.show()
+        case .clone:
+            startCloneRepository(source: GitRepositoryCreator(git: GitProcess(executableURL: executable)), owner: owner,
+                                 initialSource: request.arguments.first, initialDestination: request.currentDirectory) { result in
+                AppSettingsStore.shared.recordRecentRepository(result.repositoryURL)
+                openRepository(result.repositoryURL)
+            }
+        case .initialize:
+            startInitializeRepository(source: GitRepositoryCreator(git: GitProcess(executableURL: executable)), owner: owner,
+                                      initialDirectory: request.arguments.first.map(request.path) ?? request.currentDirectory) { result in openRepository(result.repositoryURL) }
+        case .viewpatch:
+            startPatchViewer(owner: owner, file: request.arguments.count == 1 ? request.arguments.first.map(request.path) : nil)
+        case .settings:
+            return .completed(await ApplicationShellDialogs.presentSettings(from: owner))
+        case .fileeditor:
+            guard let name = request.arguments.first else { throw CLIError.invalid("No file selected.") }
+            return .completed(try await withCheckedThrowingContinuation { continuation in
+                var controller: FileEditorWindowController!
+                controller = FileEditorWindowController(fileURL: request.path(name), source: StandaloneFileEditingDataSource(), showWarning: false, onClose: {
+                    continuation.resume(returning: controller.acceptedClose)
+                    applicationCommandLineWindows.removeAll { $0 === controller }
+                    controller = nil
+                })
+                Task { @MainActor in
+                    do {
+                        try await controller.load()
+                        applicationCommandLineWindows.append(controller)
+                        controller.showWindow(nil); controller.window?.makeKeyAndOrderFront(nil)
+                    } catch { continuation.resume(throwing: error); controller = nil }
+                }
+            })
+        case .uninstall:
+            try await CommandLineRepository.removeOwnEditor(applicationPath: Bundle.main.bundlePath,
+                git: GitProcess(executableURL: executable), directory: request.currentDirectory)
+            return .completed(true)
+        default: throw CLIError.invalid("\(request.verb.rawValue) requires a repository.")
+        }
+        return .presentation
+    }
+
+    func runCommandLine(_ request: CommandLineRequest) async throws -> CommandLineDispatch {
+        guard let browser, let owner = browser.view.window, let identity = browser.repositoryIdentity else {
+            throw CLIError.invalid("No repository is open.")
+        }
+        if identity.currentRepository.isBare,
+           [.add, .addfiles, .branch, .commit, .checkout, .checkoutbranch, .checkoutrevision, .cherry, .cleanup,
+            .merge, .rebase, .revert, .reset, .stash, .synchronize].contains(request.verb) {
+            throw RepositoryMutationError.bareRepository
+        }
+        let root = URL(fileURLWithPath: identity.currentRepository.path, isDirectory: true)
+        try await initializePlugins()
+        func revision(_ expression: String? = nil) async throws -> Commit {
+            guard let source = repositoryModule as? any RepositoryRevisionComparingDataSource else { throw RepositoryDataSourceError.unavailable }
+            return try await source.comparisonTarget(expression ?? "HEAD")
+        }
+        switch request.verb {
+        case .add, .addfiles:
+            guard let source = repositoryModule as? any RepositoryAddingFilesDataSource else { throw RepositoryDataSourceError.unavailable }
+            let controller = CommandLineAddFilesWindow(source: source, paths: request.arguments) { [weak self] in self?.notifyRepositoryChanged() }
+            commandLineWindows.append(controller)
+            controller.showWindow(nil); controller.window?.makeKeyAndOrderFront(nil)
+        case .apply, .applypatch:
+            startPatch(.apply, file: request.arguments.count == 1 ? request.arguments.first.map(request.path) : nil)
+        case .blame:
+            startBlame(file: request.relativeFile(request.arguments[0], root: root), initialLine: request.arguments.count > 1 ? Int(request.arguments[1]) : nil)
+        case .blamehistory, .filehistory:
+            let commit = request.arguments.count > 1 ? try await revision(request.arguments[1]) : nil
+            if AppSettingsStore.shared.revisionGridPreferences.useBrowseForFileHistory {
+                Self.launchBrowse(root, selection: commit.map { [$0.id] } ?? [], fileHistory: .init(path: request.relativeFile(request.arguments[0], root: root), filterRevision: request.has("filter-by-revision") ? commit?.objectID : nil))
+                return .completed(true)
+            }
+            startFileHistory(file: request.relativeFile(request.arguments[0], root: root), revision: commit,
+                filterByRevision: request.has("filter-by-revision"), showBlame: request.verb == .blamehistory)
+        case .branch:
+            guard let coordinator = makeCheckoutWorkflowCoordinator() else { throw RepositoryDataSourceError.unavailable }
+            return .completed(await withCheckedContinuation { continuation in
+                coordinator.createBranch(sourceRevision: nil, onFinished: { continuation.resume(returning: $0) })
+            })
+        case .checkout, .checkoutbranch:
+            guard let coordinator = makeCheckoutWorkflowCoordinator() else { throw RepositoryDataSourceError.unavailable }
+            return .completed(await withCheckedContinuation { continuation in
+                coordinator.checkoutBranch(initialTarget: nil, onFinished: { continuation.resume(returning: $0) })
+            })
+        case .checkoutrevision:
+            guard let coordinator = makeCheckoutWorkflowCoordinator() else { throw RepositoryDataSourceError.unavailable }
+            let target = try await revision()
+            return .completed(await withCheckedContinuation { continuation in
+                coordinator.checkoutRevision(target, onFinished: { continuation.resume(returning: $0) })
+            })
+        case .cherry:
+            let target = try await revision()
+            return .completed(await withCheckedContinuation { continuation in
+                startCherryPick([target], onFinished: { continuation.resume(returning: $0) })
+            })
+        case .cleanup: startCleanRepository()
+        case .commit:
+            if request.has("quiet"), let source = repositoryModule as? any RepositoryCommitWorkflowDataSource,
+               !(try await source.loadMutationState()).isDirty { return .completed(true) }
+            startCommit(initialMessage: request.value("message"))
+        case .difftool:
+            guard let source = repositoryModule as? any RepositoryFileStatusDataSource else { throw RepositoryDataSourceError.unavailable }
+            let tool = AppSettingsStore.shared.preferences.externalDiffToolPath
+            try await source.openDifftool(first: nil, second: nil, path: request.relativeFile(request.arguments[0], root: root), oldPath: nil,
+                                         isTracked: true, customTool: nil, externalCommand: tool.isEmpty ? nil : tool)
+            return .completed(true)
+        case .fileeditor:
+            return .completed(await withCheckedContinuation { continuation in
+                startFileEditor(request.path(request.arguments[0]), onFinished: { continuation.resume(returning: $0) })
+            })
+        case .formatpatch: startPatch(.format, selected: identity.headID.map { id in browser.revisions.filter { $0.id == .object(id) } } ?? [])
+        case .gitignore: startEditGitIgnore(localExclude: false)
+        case .merge: startMergeBranches(initialTarget: request.value("branch"))
+        case .mergeconflicts, .mergetool:
+            if request.has("quiet"), let source = repositoryModule as? any RepositoryConflictResolutionDataSource {
+                let state = try await source.loadMutationState()
+                if state.conflictedPaths.isEmpty { return .completed(true) }
+            }
+            startConflictResolution()
+        case .pull:
+            var preferences = AppSettingsStore.shared.pullPreferences
+            if request.has("merge") { preferences.formAction = .merge; preferences.defaultAction = .merge }
+            if request.has("rebase") { preferences.formAction = .rebase; preferences.defaultAction = .rebase }
+            if request.has("fetch") { preferences.formAction = .fetch; preferences.defaultAction = .fetch }
+            if request.has("autostash") { preferences.autoStash = true }
+            AppSettingsStore.shared.savePullPreferences(preferences)
+            return .completed(await withCheckedContinuation { continuation in
+                startPull(action: .openDialog, immediately: request.has("quiet"), initialRemoteBranch: request.value("remotebranch"), onCompletion: { continuation.resume(returning: $0) })
+            })
+        case .push:
+            return .completed(await withCheckedContinuation { continuation in
+                startPush(immediately: request.has("quiet"), onCompletion: { continuation.resume(returning: $0) })
+            })
+        case .rebase:
+            guard let source = repositoryModule as? any RepositoryRebaseDataSource else { throw RepositoryDataSourceError.unavailable }
+            if await WorkflowManagementDialogs.startRebase(source: source, target: nil, interactive: false,
+                initialActions: [:], advancedFrom: nil, showAdvancedOptions: false, window: owner,
+                initialOnto: request.value("branch"), startImmediately: false, scriptHooks: scriptHooks) { notifyRepositoryChanged() }
+            return .completed(true)
+        case .remotes: startRemoteManagement()
+        case .revert, .reset:
+            if request.arguments.isEmpty {
+                return .completed(await withCheckedContinuation { continuation in startResetChanges(onFinished: { continuation.resume(returning: $0) }) })
+            }
+            else {
+                guard let source = repositoryModule as? any RepositoryFileStatusDataSource else { throw RepositoryDataSourceError.unavailable }
+                guard let resetSource = repositoryModule as? any RepositoryAddingFilesDataSource else { throw RepositoryDataSourceError.unavailable }
+                let target = RevisionID.object(try await resetSource.commandLineResetTarget())
+                let artificial = RevisionCommitBuilder.artificialRevisions(headID: identity.headID)
+                let groups = try await source.calculateFileStatus(.init(revisions: artificial, headID: identity.headID, allowMultiDiff: false), describe: { $0.shortString })
+                var files = groups.flatMap(\.files)
+                let names = request.arguments.map { request.relativeFile($0, root: root).trimmingCharacters(in: CharacterSet(charactersIn: "/")) }
+                var seen = Set<String>()
+                files = files.filter { file in !file.isStatusOnly && names.contains { $0 == "." || file.path == $0 || file.path.hasPrefix($0 + "/") } && seen.insert(file.id).inserted }
+                let group = FileStatusGroup(first: target, second: .workingDirectory, summary: "HEAD", files: files)
+                guard !files.isEmpty else { return .completed(false) }
+                return .completed(await withCheckedContinuation { continuation in
+                    resetFileStatusItems(files.map { .init(group: group, file: $0) }, toFirst: true, source: source, owner: owner, onFinished: { continuation.resume(returning: $0) })
+                })
+            }
+        case .searchfile:
+            let entries = try await repositoryModule.loadRepositoryFiles(for: revision())
+            var chosen = false
+            let result = await withCheckedContinuation { continuation in
+                FileSearchWindow.present(owner: owner, standalone: true, candidates: { pattern in
+                    let predicate = FileSearchWindow.predicate(pattern, workingDirectory: root.path)
+                    return entries.filter { predicate($0.path) }.map {
+                        ChangedFile(id: $0.path, path: $0.path, oldPath: nil, changeType: .modified, additions: 0, deletions: 0)
+                    }
+                }, selected: { file in
+                    chosen = true
+                    FileHandle.standardOutput.write(Data((root.appendingPathComponent(file.path).path + "\n").utf8))
+                }, onClose: { continuation.resume(returning: chosen) })
+            }
+            return .completed(result)
+        case .settings:
+            return .completed(await ApplicationShellDialogs.presentSettings(from: owner, source: repositoryModule as? any RepositorySettingsDataSource,
+                repositoryChanged: { [weak self] in self?.notifyRepositoryChanged() }))
+        case .stash: startStashManagement()
+        case .synchronize:
+            var allSucceeded = true
+            for verb in [CommandLineRequest.Verb.commit, .pull, .push] {
+                var next = request; next.verb = verb
+                let presentation = CommandLinePresentation(owner: owner, notifier: repositoryChangedNotifier)
+                presentation.successfulRead = next.succeedsOnClose
+                switch try await runCommandLine(next) {
+                case .completed(let succeeded): presentation.finish(); allSucceeded = allSucceeded && succeeded
+                case .presentation:
+                    let succeeded = try await presentation.wait()
+                    allSucceeded = allSucceeded && succeeded
+                }
+            }
+            return .completed(allSucceeded)
+        case .tag:
+            return .completed(await withCheckedContinuation { continuation in startCreateTag(onFinished: { continuation.resume(returning: $0) }) })
+        case .viewdiff: _ = startCompareRevisions()
+        default: return try await Self.runApplicationCommandLine(request, owner: owner) { Self.launchBrowse($0) }
+        }
+        return .presentation
     }
 
     @discardableResult
@@ -346,6 +557,8 @@ final class GitUICommands {
                     return (result.exitStatus, result.standardOutput, result.standardError)
                 })
             childHost.update(context: context, owner: browser?.view.window)
+            childHost.builtInRepository = module as? any RepositoryBuiltInPluginDataSource
+            childHost.builtInSettings = module as? any RepositorySettingsDataSource
             repositoryChangedNotifier.lock()
             defer { child.unregister(from: childHost); repositoryChangedNotifier.unlock(requestNotify: false) }
             try child.register(with: childHost)
@@ -411,6 +624,8 @@ final class GitUICommands {
                     return (result.exitStatus, result.standardOutput, result.standardError)
                 })
             host.update(context: context, owner: browser?.view.window)
+            host.builtInRepository = repositoryModule as? any RepositoryBuiltInPluginDataSource
+            host.builtInSettings = repositoryModule as? any RepositorySettingsDataSource
             host.updateSelection(browser?.workflowRevisionSelection ?? [])
             pluginSession.register(entry.plugin, host: host)
         }
@@ -1073,14 +1288,16 @@ final class GitUICommands {
     }
 
 
-    func startFileEditor(_ url: URL, showWarning: Bool = false, lineNumber: Int? = nil, owner: NSWindow? = nil, onClosed: (() -> Void)? = nil) {
+    func startFileEditor(_ url: URL, showWarning: Bool = false, lineNumber: Int? = nil, owner: NSWindow? = nil, onClosed: (() -> Void)? = nil, onFinished: ((Bool) -> Void)? = nil) {
         let key = "file:" + url.standardizedFileURL.path
         if focusFileEditor(key) { return }
         guard let browser, let owner = owner ?? browser.view.window,
-              let source = repositoryModule as? any RepositoryFileEditingDataSource else { return }
+              let source = repositoryModule as? any RepositoryFileEditingDataSource else { onFinished?(false); return }
         let controller = FileEditorWindowController(fileURL: url, source: source, showWarning: showWarning, lineNumber: lineNumber) { [weak self] in
+            let accepted = (self?.fileEditorWindows[key] as? FileEditorWindowController)?.acceptedClose ?? false
             self?.fileEditorWindows[key] = nil
             onClosed?()
+            onFinished?(accepted)
         }
         fileEditorWindows[key] = controller
         Task { @MainActor [weak self] in
@@ -1088,6 +1305,7 @@ final class GitUICommands {
                 self?.fileEditorWindows[key] = nil
                 await RepositoryFileEditorDialogs.message("Cannot open file:\n\(error.localizedDescription)", caption: "Error", window: owner)
                 onClosed?()
+                onFinished?(false)
                 return
             }
             self?.showFileEditor(controller, owner: owner)
@@ -1403,6 +1621,10 @@ final class GitUICommands {
         diff.blameController.onShowChanges = { [weak self, weak owner] in self?.startBlameCommitDiff($0, owner: owner) }
         diff.filesController.canShowInFileTree = false; diff.filesController.canFilterInGrid = false
         diff.onCommand = { [weak self, weak owner] in self?.performFileStatusCommand($0, owner: owner) }
+        diff.onLinePatch = { [weak self, weak owner] kind, file, patch, ids in
+            guard let owner else { return }
+            self?.applyLinePatch(kind, file: file, diff: patch, lineIDs: ids, owner: owner)
+        }
         diff.onFileCommand = { [weak self, weak owner] id, item in
             self?.performFileStatusCommand(.init(identifier: id, items: [item], folder: nil, tool: nil, focused: item, remembered: nil), owner: owner)
         }
@@ -1498,6 +1720,10 @@ final class GitUICommands {
         historyWindow = controller.window
         controller.controller.onShowChanges = { [weak self, weak controller] id in self?.startBlameCommitDiff(id, owner: controller?.window) }
         controller.controller.onFileStatusCommand = { [weak self, weak controller] command in self?.performFileStatusCommand(command, owner: controller?.window) }
+        controller.controller.onLinePatch = { [weak self, weak controller] kind, file, diff, ids in
+            guard let owner = controller?.window else { return }
+            self?.applyLinePatch(kind, file: file, diff: diff, lineIDs: ids, owner: owner)
+        }
         let id = UUID()
         let subscription = repositoryChangedNotifier.subscribe { [weak controller] _, _ in controller?.controller.reload() }
         controller.onClose = { [weak self] in subscription.cancel(); self?.fileHistoryWindows[id] = nil }
@@ -1505,6 +1731,27 @@ final class GitUICommands {
         controller.window?.setFrameOrigin(NSPoint(x: owner.frame.minX + 30, y: owner.frame.minY + 30))
         controller.showWindow(nil); controller.window?.makeKeyAndOrderFront(nil)
         return controller
+    }
+
+    func applyLinePatch(_ kind: FileStatusLinePatchKind, file: ChangedFile, diff: FileDiff, lineIDs: Set<String>, owner: NSWindow) {
+        guard let source = repositoryModule as? any RepositoryFileStatusDataSource else { return }
+        Task { @MainActor [weak self] in
+            do {
+                let result = try await source.applyLinePatch(kind, file: file, diff: diff, lineIDs: lineIDs)
+                self?.notifyRepositoryChanged()
+                guard !result.succeeded else { return }
+                if kind == .applyToWorkTree || kind == .revertToWorkTree {
+                    let conflicts = (try? await (self?.repositoryModule as? any RepositoryConflictDataSource)?.loadConflicts()) ?? []
+                    if !conflicts.isEmpty {
+                        if await Self.confirm("There are unresolved merge conflicts, solve conflicts now?", title: "Merge conflicts", owner: owner) {
+                            self?.startConflictResolution(offerCommit: false)
+                        }
+                        return
+                    }
+                }
+                await Self.showMessage("\(result.output)\n\n\(result.patch)", title: "Error", owner: owner)
+            } catch { await Self.showMessage(error.localizedDescription, title: "Error", owner: owner) }
+        }
     }
 
     func performFileStatusCommand(_ command: FileStatusListCommand, owner: NSWindow? = nil) {
@@ -1650,8 +1897,8 @@ final class GitUICommands {
     }
 
 
-    private func resetFileStatusItems(_ items: [FileStatusListItem], toFirst: Bool, source: any RepositoryFileStatusDataSource, owner: NSWindow) {
-        guard !items.isEmpty else { return }
+    private func resetFileStatusItems(_ items: [FileStatusListItem], toFirst: Bool, source: any RepositoryFileStatusDataSource, owner: NSWindow, onFinished: ((Bool) -> Void)? = nil) {
+        guard !items.isEmpty else { onFinished?(false); return }
         func isNew(_ file: ChangedFile) -> Bool { file.changeType == .added || file.changeType == .copied || !file.isTracked }
         let hasNewFiles = !items.allSatisfy { $0.file.changeType == .modified && $0.file.isTracked }
         let hasExistingFiles = items.contains { !((isNew($0.file) && $0.file.staged != .none) || ($0.file.changeType == .renamed && $0.file.staged == .index)) }
@@ -1663,6 +1910,8 @@ final class GitUICommands {
         }
         let description = toFirst ? "First: A \(describeAll(items.map(\.first)))" : "Second: B \(describeAll(items.map { $0.second }))"
         Task { @MainActor [weak self] in
+            var finished = false
+            defer { onFinished?(finished) }
             guard let deleteNew = await ResetDialogs.confirmResetChanges(
                 hasTrackedChanges: hasExistingFiles, hasUntrackedFiles: hasNewFiles,
                 message: "Are you sure you want to reset all selected files to \(description)?", owner: owner) else { return }
@@ -1688,6 +1937,7 @@ final class GitUICommands {
                 catch { output += error.localizedDescription }
             }
             self?.notifyRepositoryChanged()
+            finished = true
             if !output.isEmpty { await Self.showMessage(output, title: "Reset changes", owner: owner) }
         }
     }
@@ -1948,7 +2198,8 @@ final class GitUICommands {
 
     func startCommit(
         initialMode: RepositoryCommitMode = .normal,
-        specialKind: CommitWorkflowSpecialKind? = nil
+        specialKind: CommitWorkflowSpecialKind? = nil,
+        initialMessage: String? = nil
     ) {
         guard let browser,
               let identity = browser.repositoryIdentity,
@@ -1976,11 +2227,12 @@ final class GitUICommands {
             head: head,
             draft: browser.commitDraft,
             owner: window,
+            initialMessage: initialMessage,
             previousSelection: browser.selectedCommitID
         )
     }
 
-    func startPull(action: PullActionPreference, immediately: Bool) {
+    func startPull(action: PullActionPreference, immediately: Bool, initialRemoteBranch: String? = nil, onCompletion: ((Bool) -> Void)? = nil) {
         guard let browser, let context = browser.networkContext else { return }
         let effectiveAction = action == .openDialog ? AppSettingsStore.shared.pullPreferences.formAction : action
         let initialAction: NetworkDialogInitialAction = switch effectiveAction {
@@ -2000,6 +2252,7 @@ final class GitUICommands {
         let controller = ApplicationShellDialogs.presentPullWindow(
             initialAction: initialAction,
             executeImmediately: immediately,
+            initialRemoteBranch: initialRemoteBranch,
             context: context,
             source: source,
             onManageRemotes: { [weak self] remote, localBranch in
@@ -2012,7 +2265,7 @@ final class GitUICommands {
             onClose: { [weak browser] in
                 browser?.pullWindowController = nil
                 browser?.fetchWindowController = nil
-            }
+            }, onCompletion: onCompletion
         )
         if isFetch {
             browser.fetchWindowController = controller
@@ -2135,7 +2388,8 @@ final class GitUICommands {
     func startPush(
         immediately: Bool = false,
         initialBranch: String? = nil,
-        forceWithLease: Bool = false
+        forceWithLease: Bool = false,
+        onCompletion: ((Bool) -> Void)? = nil
     ) {
         guard let browser,
               let context = browser.networkContext,
@@ -2160,6 +2414,7 @@ final class GitUICommands {
             onRepositoryChanged: { [weak self, weak browser] preferredCommitID in
                 self?.notifyRepositoryChanged(preferredCommitID: preferredCommitID ?? browser?.selectedCommitID)
             },
+            onCompletion: onCompletion,
             onCreatePullRequest: { [weak self] in self?.startCreatePullRequest(fromPush: true) },
             onClose: { [weak browser] in
                 browser?.pushWindowController = nil
@@ -2201,7 +2456,7 @@ final class GitUICommands {
         }
     }
 
-    func startCherryPick(_ selectedCommits: [Commit], owner: NSWindow? = nil) {
+    func startCherryPick(_ selectedCommits: [Commit], owner: NSWindow? = nil, onFinished: ((Bool) -> Void)? = nil) {
         guard let browser,
               browser.repositoryIdentity != nil,
               let window = owner ?? browser.view.window,
@@ -2221,7 +2476,8 @@ final class GitUICommands {
             history: browser.revisions,
             mutationSource: source,
             window: window,
-            previousSelection: browser.selectedCommitID
+            previousSelection: browser.selectedCommitID,
+            onFinished: onFinished
         )
     }
 
@@ -2618,7 +2874,7 @@ final class GitUICommands {
     }
 
 
-    func startResetChanges(onlyWorkTree: Bool = false) {
+    func startResetChanges(onlyWorkTree: Bool = false, onFinished: ((Bool) -> Void)? = nil) {
         guard let browser,
               let owner = browser.view.window,
               let identity = browser.repositoryIdentity,
@@ -2628,6 +2884,8 @@ final class GitUICommands {
             return
         }
         Task { @MainActor [weak self, weak browser, weak owner] in
+            var finished = false
+            defer { onFinished?(finished) }
             guard let self, let browser, let owner else { return }
             do {
                 let state = try await source.loadMutationState()
@@ -2650,6 +2908,7 @@ final class GitUICommands {
                 ))
                 notifyRepositoryChanged(preferredCommitID: result.selectedCommitID)
                 browser.statusLabel.stringValue = result.message
+                finished = true
             } catch {
                 await ResetDialogs.showError(error, title: "Reset changes failed", owner: owner)
             }

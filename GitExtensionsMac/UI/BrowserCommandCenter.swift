@@ -96,6 +96,8 @@ enum BrowserCommand: Equatable, Sendable {
     case focusFilter
     case focusNextTab(Bool)
     case goToSuperproject
+    case goToSubmodule
+    case revisionGridRestoringFileFocus(String)
 
 
     case revisionGrid(String)
@@ -205,6 +207,11 @@ extension BrowserCommand {
         case "focusNextTab": .focusNextTab(true)
         case "focusPrevTab": .focusNextTab(false)
         case "goToSuperproject": .goToSuperproject
+        case "goToSubmodule": .goToSubmodule
+        case "goToChild": .revisionGridRestoringFileFocus("revision.navigate.child")
+        case "goToParent": .revisionGridRestoringFileFocus("revision.navigate.parent")
+        case "toggleArtificialAndHead": .revisionGrid("revision.navigate.toggleArtificial")
+        case "openCommitsWithDifftool": .revisionGrid("revision.compare.difftool")
         case "addNotes": .addNotes
         case "openWithDifftool", "openWithDifftoolFirstToLocal", "openWithDifftoolSelectedToLocal",
              "openAsTempFile", "openAsTempFileWith", "findFileInSelectedCommit", "editFile": .fileListCommand(identifier)

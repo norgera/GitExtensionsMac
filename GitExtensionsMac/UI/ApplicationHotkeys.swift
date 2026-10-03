@@ -48,7 +48,8 @@ final class ApplicationHotkeys: ObservableObject {
 
     static let browseWindowCommands: Set<String> = ["stash", "stashPop", "stashStaged", "quickPull", "quickFetch", "quickPullOrFetch",
                                                     "quickPush", "toggleLeftPanel", "gitBash", "focusFilter", "focusNextTab",
-                                                    "focusPrevTab", "goToSuperproject", "addNotes", "openWithDifftool",
+                                                    "focusPrevTab", "goToSuperproject", "goToSubmodule", "goToChild", "goToParent",
+                                                    "toggleArtificialAndHead", "openCommitsWithDifftool", "addNotes", "openWithDifftool",
                                                     "openWithDifftoolFirstToLocal", "openWithDifftoolSelectedToLocal",
                                                     "openAsTempFile", "openAsTempFileWith", "findFileInSelectedCommit", "editFile"]
     private static let baseDefinitions: [ApplicationHotkeyDefinition] = {
@@ -79,6 +80,11 @@ final class ApplicationHotkeys: ObservableObject {
             ("focusNextTab", "Focus next tab", .init("\t", .control)),
             ("focusPrevTab", "Focus previous tab", .init("\t", [.control, .shift])),
             ("goToSuperproject", "Go to superproject", .init("")),
+            ("goToSubmodule", "Go to submodule", .init("")),
+            ("goToChild", "Go to child", .init("n", .control)),
+            ("goToParent", "Go to parent", .init("p", .control)),
+            ("toggleArtificialAndHead", "Toggle between artificial and HEAD commits", .init("\\", .control)),
+            ("openCommitsWithDifftool", "Open commits with difftool", .init("")),
             ("addNotes", "Add notes", .init("n", [.control, .shift])),
             ("findFileInSelectedCommit", "Find file in selected commit", .init("f", [.control, .shift])),
             ("openAsTempFile", "Open as temp file", .init("\u{f706}", .control)),
@@ -153,6 +159,7 @@ final class ApplicationHotkeys: ObservableObject {
             ("filter", "Filter files", .init("f", .command)),
             ("refresh", "Refresh", .init("r", .command)),
             ("createBranch", "Create branch", .init("b", .command)),
+            ("openWithDifftool", "Open with difftool", .init("\u{f706}")),
             ("nextFile", "Next file", .init("n", .command)),
             ("previousFile", "Previous file", .init("p", .command)),
             ("nextFile.alternative", "Next file (alternative)", .init("\u{f703}", .option)),
@@ -245,11 +252,13 @@ final class ApplicationHotkeys: ObservableObject {
 }
 
 enum FileViewerShortcut: String, CaseIterable {
-    case find, findNext, findPrevious, goToLine, increaseContext, decreaseContext, nextChange, previousChange
-    case entireFile, syntax, treatAsText, ignoreWhitespace, stageLines, unstageLines
+    case find, replace, findNext, findPrevious, goToLine, increaseContext, decreaseContext, nextChange, previousChange
+    case nextOccurrence, previousOccurrence
+    case entireFile, syntax, wordDiff, difftastic, treatAsText, ignoreWhitespace, stageLines, unstageLines, resetLines
     var title: String {
         switch self {
         case .find: "Find"
+        case .replace: "Replace"
         case .findNext: "Find next or open with difftool"
         case .findPrevious: "Find previous"
         case .goToLine: "Go to line"
@@ -257,17 +266,23 @@ enum FileViewerShortcut: String, CaseIterable {
         case .decreaseContext: "Decrease the number of lines of context"
         case .nextChange: "Next change"
         case .previousChange: "Previous change"
+        case .nextOccurrence: "Next occurrence"
+        case .previousOccurrence: "Previous occurrence"
         case .entireFile: "Show entire file"
         case .syntax: "Show syntax highlighting"
+        case .wordDiff: "Git word diff"
+        case .difftastic: "Difftastic"
         case .treatAsText: "Treat all files as text"
         case .ignoreWhitespace: "Ignore all whitespace changes"
         case .stageLines: "Stage selected lines"
         case .unstageLines: "Unstage selected lines"
+        case .resetLines: "Reset selected lines"
         }
     }
     var defaultChord: ApplicationKeyChord {
         switch self {
         case .find: .init("f", .command)
+        case .replace: .init("f", [.command, .option])
         case .findNext: .init("\u{f706}")
         case .findPrevious: .init("\u{f706}", .shift)
         case .goToLine: .init("g", .command)
@@ -275,12 +290,17 @@ enum FileViewerShortcut: String, CaseIterable {
         case .decreaseContext: .init("-", .command)
         case .nextChange: .init("\u{f701}", .option)
         case .previousChange: .init("\u{f700}", .option)
+        case .nextOccurrence: .init("\u{f703}", .option)
+        case .previousOccurrence: .init("\u{f702}", .option)
         case .entireFile: .init("e", .command)
         case .syntax: .init("x")
+        case .wordDiff: .init("d", .command)
+        case .difftastic: .init("t", .command)
         case .treatAsText: .init("")
         case .ignoreWhitespace: .init("w", [.command, .shift])
         case .stageLines: .init("s")
         case .unstageLines: .init("u")
+        case .resetLines: .init("r")
         }
     }
 }
@@ -310,7 +330,10 @@ final class FileViewerTableView: NSTableView {
         return onShortcut?(action) == true
     }
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        if window?.firstResponder === self, performConfiguredShortcut(event) { return true }
+        let responder = window?.firstResponder as? NSView
+        let editorOwner = (responder as? NSTextView)?.delegate as? NSView
+        let ownsFocus = responder === self || responder?.isDescendant(of: self) == true || editorOwner?.isDescendant(of: self) == true
+        if ownsFocus, performConfiguredShortcut(event) { return true }
         return super.performKeyEquivalent(with: event)
     }
     override func keyDown(with event: NSEvent) {

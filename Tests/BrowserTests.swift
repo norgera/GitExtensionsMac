@@ -15,6 +15,7 @@ enum BrowserTests {
         try await testMaintenance()
         try await testContinueMerge()
         try await testBrowserComposition()
+        try await testDeferredHotkeys()
         print("BrowserTests: passed")
     }
 
@@ -70,6 +71,90 @@ enum BrowserTests {
         check(BrowserCommand.browseHotkey("stashPop") == .stashPop && BrowserCommand.browseHotkey("gitBash") == .openTerminal,
               "hotkey: window-level FormBrowse commands")
         check(ApplicationHotkeys.browseWindowCommands.allSatisfy { BrowserCommand.browseHotkey($0) != nil }, "hotkey: every window command maps")
+        check(ApplicationHotkeys.chord("goToChild", overrides: overrides) == .init("n", .control)
+              && ApplicationHotkeys.chord("goToParent", overrides: overrides) == .init("p", .control)
+              && ApplicationHotkeys.chord("toggleArtificialAndHead", overrides: overrides) == .init("\\", .control)
+              && ApplicationHotkeys.chord("goToSubmodule", overrides: overrides).key.isEmpty
+              && ApplicationHotkeys.chord("openCommitsWithDifftool", overrides: overrides).key.isEmpty, "hotkey: FormBrowse forward defaults")
+        check(BrowserCommand.browseHotkey("goToChild") == .revisionGridRestoringFileFocus("revision.navigate.child")
+              && BrowserCommand.browseHotkey("goToParent") == .revisionGridRestoringFileFocus("revision.navigate.parent")
+              && BrowserCommand.browseHotkey("toggleArtificialAndHead") == .revisionGrid("revision.navigate.toggleArtificial")
+              && BrowserCommand.browseHotkey("openCommitsWithDifftool") == .revisionGrid("revision.compare.difftool")
+              && BrowserCommand.browseHotkey("goToSubmodule") == .goToSubmodule, "hotkey: FormBrowse forwards route to grid/toolbar owners")
+        check(ApplicationHotkeys.matching(.init("\u{f706}"), category: "Commit", overrides: overrides) == "commit.openWithDifftool", "hotkey: Commit F3")
+    }
+
+    private static func key(_ window: NSWindow, _ characters: String, _ modifiers: NSEvent.ModifierFlags, keyCode: UInt16) -> Bool {
+        let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: modifiers, timestamp: 1, windowNumber: window.windowNumber,
+                                     context: nil, characters: characters, charactersIgnoringModifiers: characters, isARepeat: false, keyCode: keyCode)!
+        return window.performKeyEquivalent(with: event)
+    }
+
+    private static func wait(_ message: String, _ condition: () -> Bool) async throws {
+        let deadline = ContinuousClock.now + .seconds(15)
+        while !condition() {
+            guard ContinuousClock.now < deadline else { preconditionFailure("BrowserTests: timed out waiting for \(message)") }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+    }
+
+    @MainActor
+    private static func testDeferredHotkeys() async throws {
+        let fixture = try FileStatusFixture.make(); defer { fixture.remove() }
+        try fixture.write("a.txt", "base\n"); try fixture.commitAll("base")
+        let base = try fixture.head()
+        try fixture.write("a.txt", "second\n"); try fixture.commitAll("second")
+        let head = try fixture.head()
+        try fixture.write("a.txt", "worktree\n")
+        try fixture.write("b.txt", "staged\n"); _ = try fixture.git(["add", "b.txt"])
+        let module = GitRepositoryModule(repositoryURL: fixture.repo, git: FileStatusFixtureGit())
+        let browser = RepositoryBrowserViewController(repositoryModule: module)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1200, height: 800), styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentViewController = browser
+        window.setContentSize(NSSize(width: 1200, height: 800))
+        window.makeKeyAndOrderFront(nil)
+        defer { browser.viewWillDisappear(); window.close() }
+        func controllers(_ root: NSViewController) -> [NSViewController] { [root] + root.children.flatMap(controllers) }
+        func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
+        try await wait("browser loaded") { browser.revisions.contains { $0.id == .object(head) } }
+        let grid = controllers(browser).compactMap { $0 as? RevisionGridViewController }.first!
+        let diff = controllers(browser).compactMap { $0 as? RevisionDiffViewController }.first { $0.mode == .diff }!
+        try await wait("history finished") { !grid.isShowingLoading }
+        let tabs = controllers(browser).compactMap { $0 as? DetailTabsViewController }.first!
+        for index in 0..<4 where diff.view.window == nil || diff.view.isHiddenOrHasHiddenAncestor { tabs.selectTab(at: index) }
+        grid.selectCommit(id: .object(head))
+        try await wait("head selected") { browser.selectedCommitID == .object(head) }
+        let fileList = descendants(diff.view).first { $0 is NSOutlineView || $0 is NSTableView }!
+        window.makeFirstResponder(fileList)
+        check(key(window, "p", .control, keyCode: 35), "hotkey: ⌃P handled by the Browse window")
+        try await wait("parent selected") { browser.selectedCommitID == .object(base) }
+        check(window.firstResponder === fileList, "hotkey: ⌃P restores file-list focus")
+        check(key(window, "n", .control, keyCode: 45), "hotkey: ⌃N handled by the Browse window")
+        try await wait("child selected") { browser.selectedCommitID == .object(head) }
+        check(window.firstResponder === fileList, "hotkey: ⌃N restores file-list focus")
+        check(key(window, "\\", .control, keyCode: 42), "hotkey: ⌃\\ handled by the Browse window")
+        try await wait("artificial selected") { browser.selectedCommitID == .workingDirectory }
+        check(!key(window, "s", [.control, .option], keyCode: 1), "hotkey: unbound chords fall through")
+
+        var opened: [(RevisionID, String)] = []
+        let controller = CommitWorkflowDialog.present(source: module, initialMode: .normal, head: nil, draft: nil, owner: window,
+                                                      onDifftool: { commit, file in opened.append((commit.id, file.path)) },
+                                                      onRepositoryChanged: { _ in }, onClose: {})
+        let commitWindow = controller.window!
+        defer { commitWindow.close() }
+        try await wait("commit lists") { descendants(commitWindow.contentView!).compactMap { $0 as? NSOutlineView }.filter { $0.numberOfRows > 0 }.count >= 2 }
+        let lists = descendants(commitWindow.contentView!).compactMap { $0 as? NSOutlineView }.filter { $0.numberOfRows > 0 }
+        for (list, kind, path) in [(lists[0], RevisionID.workingDirectory, "a.txt"), (lists[1], RevisionID.index, "b.txt")] {
+            let row = (0..<list.numberOfRows).first { (list.item(atRow: $0) as? ChangedFileNode)?.file != nil }!
+            list.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+            commitWindow.makeFirstResponder(list)
+            try await wait("F3 \(path)") {
+                opened.removeAll()
+                _ = key(commitWindow, "\u{f706}", .function, keyCode: 99)
+                return opened.count == 1 && opened[0].0 == kind && opened[0].1 == path
+            }
+        }
     }
 
     private static func testWindowTitle() throws {

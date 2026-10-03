@@ -91,6 +91,10 @@ package protocol RepositoryFileStatusDataSource: Sendable {
 
     func cherryPickChanges(group: FileStatusGroup, file: ChangedFile) async throws -> FileStatusApplyResult
 
+    func applyLinePatch(_ kind: FileStatusLinePatchKind, file: ChangedFile, diff: FileDiff, lineIDs: Set<String>) async throws -> FileStatusApplyResult
+
+    func isDifftasticEnabled() async -> Bool
+
     func submoduleCommit(path: String, at revision: RevisionID?) async throws -> ObjectID?
 
     func fileStatusSubmodule(group: FileStatusGroup, file: ChangedFile) async throws -> FileStatusSubmodule?
@@ -104,6 +108,15 @@ package protocol RepositoryFileStatusDataSource: Sendable {
     func blobSpecifier(path: String, at revision: RevisionID) async throws -> String?
 
     func loadDiffTools() async throws -> [String]
+}
+
+package enum FileStatusLinePatchKind: Hashable, Sendable {
+    case stage
+    case unstage
+    case resetWorkTree
+    case resetIndex
+    case applyToWorkTree
+    case revertToWorkTree
 }
 
 package struct FileStatusApplyResult: Sendable {

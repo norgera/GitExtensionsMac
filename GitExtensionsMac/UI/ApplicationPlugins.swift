@@ -15,6 +15,7 @@ public enum GitExtensionPluginWorkflow {
 public enum GitExtensionPluginSettingKind {
     case text, password, boolean, path
     case number(minimum: Int, maximum: Int)
+    case decimal(minimum: Double, maximum: Double)
     case choice([String])
     case information
 }
@@ -31,6 +32,10 @@ public struct GitExtensionPluginSetting {
         switch kind {
         case .number(let minimum, let maximum):
             guard minimum <= maximum, let number = Int(value), number >= minimum, number <= maximum else {
+                throw PluginError.invalid("\(caption): enter a number from \(minimum) to \(maximum).")
+            }
+        case .decimal(let minimum, let maximum):
+            guard minimum <= maximum, let number = Double(value), number.isFinite, number >= minimum, number <= maximum else {
                 throw PluginError.invalid("\(caption): enter a number from \(minimum) to \(maximum).")
             }
         case .choice(let values):
@@ -76,6 +81,8 @@ public final class GitExtensionPluginHost {
     public private(set) var selectedRevisions: [RevisionID] = []
     public var repositoryURL: URL? { context["WorkingDir"]?.first.map { URL(fileURLWithPath: $0, isDirectory: true) } }
     public weak var owner: NSWindow?
+    var builtInRepository: (any RepositoryBuiltInPluginDataSource)?
+    var builtInSettings: (any RepositorySettingsDataSource)?
     private let refresh: () -> Void
     private let navigate: (String) async throws -> Void
     private let readSetting: (String, GitExtensionPluginSettingsScope) throws -> String?
@@ -219,6 +226,9 @@ final class ApplicationPluginRegistry {
         if directories == nil {
             do { try add(GitHubRepositoryPlugin()) }
             catch { failures.append(error.localizedDescription) }
+            for plugin in BuiltInPlugins.make() {
+                do { try add(plugin) } catch { failures.append(error.localizedDescription) }
+            }
         }
         let roots = directories ?? [Bundle.main.builtInPlugInsURL, Self.userDirectory].compactMap { $0 }
         for root in roots {

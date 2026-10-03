@@ -135,6 +135,9 @@ package struct ScriptInvocation: Sendable {
     package let arguments: [String]
     package let workingDirectory: URL
     package let environment: [String: String]
+    package init(executable: URL, arguments: [String], workingDirectory: URL, environment: [String: String]) {
+        self.executable = executable; self.arguments = arguments; self.workingDirectory = workingDirectory; self.environment = environment
+    }
 }
 
 package enum ScriptExecutionOutcome: Sendable {

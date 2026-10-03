@@ -24,16 +24,19 @@ extension ApplicationShellDialogs {
     static func presentPullWindow(
         initialAction: NetworkDialogInitialAction,
         executeImmediately: Bool,
+        initialRemoteBranch: String? = nil,
         context: RepositoryNetworkContext,
         source: any RepositoryPullingDataSource,
         onManageRemotes: @escaping (String?, String?) -> Void,
         scriptHooks: ApplicationScriptHooks? = nil,
         onRepositoryChanged: @escaping (RevisionID?) -> Void,
-        onClose: @escaping () -> Void
+        onClose: @escaping () -> Void,
+        onCompletion: ((Bool) -> Void)? = nil
     ) -> NSWindowController {
         let controller = PullDialogViewController(
             initialAction: initialAction,
             executeImmediately: executeImmediately,
+            initialRemoteBranch: initialRemoteBranch,
             context: context,
             source: source,
             onManageRemotes: onManageRemotes,
@@ -51,6 +54,7 @@ extension ApplicationShellDialogs {
         window.isReleasedWhenClosed = false
         window.delegate = controller
         controller.onClose = onClose
+        controller.onCompletion = onCompletion
         let windowController = NSWindowController(window: window)
         windowController.showWindow(nil)
         window.makeKeyAndOrderFront(nil)
@@ -62,9 +66,12 @@ extension ApplicationShellDialogs {
 private final class PullDialogViewController: NSViewController, NSWindowDelegate, NSComboBoxDelegate {
     var scriptHooks: ApplicationScriptHooks?
     var onClose: (() -> Void)?
+    var onCompletion: ((Bool) -> Void)?
+    private var lastPullCompleted = false
 
     private let initialAction: NetworkDialogInitialAction
     private let executeImmediately: Bool
+    private var initialRemoteBranch: String?
     private var context: RepositoryNetworkContext
     private let source: any RepositoryPullingDataSource
     private let onManageRemotes: (String?, String?) -> Void
@@ -111,6 +118,7 @@ private final class PullDialogViewController: NSViewController, NSWindowDelegate
     init(
         initialAction: NetworkDialogInitialAction,
         executeImmediately: Bool,
+        initialRemoteBranch: String? = nil,
         context: RepositoryNetworkContext,
         source: any RepositoryPullingDataSource,
         onManageRemotes: @escaping (String?, String?) -> Void,
@@ -118,6 +126,7 @@ private final class PullDialogViewController: NSViewController, NSWindowDelegate
     ) {
         self.initialAction = initialAction
         self.executeImmediately = executeImmediately
+        self.initialRemoteBranch = initialRemoteBranch
         self.context = context
         self.source = source
         self.onManageRemotes = onManageRemotes
@@ -398,6 +407,10 @@ private final class PullDialogViewController: NSViewController, NSWindowDelegate
                 statusLabel.stringValue = state.isDetached ? "Detached HEAD" : ""
                 updateEnabledState()
                 operationTask = nil
+                if let initialRemoteBranch {
+                    remoteBranchCombo.stringValue = initialRemoteBranch
+                    self.initialRemoteBranch = nil
+                }
                 attemptImmediateExecutionIfReady()
             } catch {
                 operationTask = nil
@@ -602,6 +615,7 @@ private final class PullDialogViewController: NSViewController, NSWindowDelegate
                     _ = await scriptHooks?.run(.afterFetch)
                     if prepared.mode != .fetch { _ = await scriptHooks?.run(.afterPull) }
                 }
+                lastPullCompleted = runAfterScripts
                 view.window?.performClose(nil)
             case .failure(let error):
                 statusLabel.stringValue = error is CancellationError ? "Aborted" : error.localizedDescription
@@ -1082,7 +1096,7 @@ private final class PullDialogViewController: NSViewController, NSWindowDelegate
     private func finish() {
         guard !didClose else { return }
         didClose = true
-        remoteBranchTask?.cancel(); operationTask?.cancel(); onClose?()
+        remoteBranchTask?.cancel(); operationTask?.cancel(); onCompletion?(lastPullCompleted); onClose?()
     }
 }
 

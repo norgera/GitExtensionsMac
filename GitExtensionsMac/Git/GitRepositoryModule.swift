@@ -548,6 +548,8 @@ package actor GitRepositoryModule: RepositoryOpeningDataSource {
     private var detailsCache: [RevisionID: RepositoryRevisionDetails] = [:]
     private var treeCache: [RevisionID: [RepositoryFileEntry]] = [:]
     private var diffCache: [String: FileDiff] = [:]
+    private var difftasticEnabled: Bool?
+    private var diffColorConfiguredKeys: Set<String>?
     package var pendingCherryPickItems: [RepositoryCherryPickItem] = []
     package var pendingCherryPickOptions: RepositoryCherryPickOptions?
     package var pendingRebaseActions: [String: RepositoryRebaseTodoAction] = [:]
@@ -565,6 +567,8 @@ package actor GitRepositoryModule: RepositoryOpeningDataSource {
         detailsCache = [:]
         treeCache = [:]
         diffCache = [:]
+        difftasticEnabled = nil
+        diffColorConfiguredKeys = nil
         pendingCherryPickItems = []
         pendingCherryPickOptions = nil
         pendingRebaseActions = [:]
@@ -577,6 +581,7 @@ package actor GitRepositoryModule: RepositoryOpeningDataSource {
         detailsCache = [:]
         treeCache = [:]
         diffCache = [:]
+        diffColorConfiguredKeys = nil
         let repository = try await resolveRepository(at: requestedURL)
         resolvedRepository = repository
 
@@ -786,6 +791,90 @@ package actor GitRepositoryModule: RepositoryOpeningDataSource {
         return tree
     }
 
+    package func isDifftasticEnabled() async -> Bool {
+        if let difftasticEnabled { return difftasticEnabled }
+        guard let repository = resolvedRepository else { return false }
+        let result = try? await git.run(
+            GitCommand(arguments: ["config", "--get", GitDiffAppearance.difftasticCommandKey], accessesRemote: false, changesRepositoryState: false),
+            in: repository.rootURL
+        )
+        let enabled = result.map { $0.succeeded && !$0.standardOutputString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } ?? false
+        difftasticEnabled = enabled
+        return enabled
+    }
+
+    func emptyTreeID(in directory: URL) async throws -> String {
+        let result = try await git.run(
+            GitCommand(arguments: ["hash-object", "-t", "tree", "--stdin"], accessesRemote: false, changesRepositoryState: false),
+            in: directory, standardInput: Data(), environment: [:]
+        )
+        guard result.succeeded else {
+            throw GitError.commandFailed(arguments: result.arguments, status: result.exitStatus, stderr: result.standardErrorString)
+        }
+        return result.standardOutputString.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    func appearanceDiff(
+        file: ChangedFile,
+        options: FileDiffOptions,
+        patchArguments: [String],
+        difftastic: () async throws -> (revisions: [String], paths: [String], noIndex: Bool),
+        directory: URL
+    ) async throws -> FileDiff? {
+        guard !file.isSubmodule else { return nil }
+        switch options.appearance {
+        case .patch:
+            guard options.useGitColoring else { return nil }
+            let configured: Set<String>
+            if let diffColorConfiguredKeys { configured = diffColorConfiguredKeys }
+            else {
+                let config = try await git.run(GitCommand(arguments: ["config", "--get-regexp", GitDiffAppearance.colorConfigurationPattern], accessesRemote: false, changesRepositoryState: false), in: directory)
+                configured = config.succeeded ? GitDiffAppearance.configuredKeys(fromGetRegexp: config.standardOutputString) : []
+                diffColorConfiguredKeys = configured
+            }
+            var arguments = patchArguments.filter { $0 != "--no-color" }
+            arguments.insert("--color=always", at: min(1, arguments.count))
+            let result = try await git.run(GitCommand(arguments: GitDiffAppearance.colorConfiguration(configured: configured, reverse: options.reverseGitColoring) + arguments, accessesRemote: false, changesRepositoryState: false), in: directory)
+            guard result.succeeded || result.exitStatus == 1 else { throw GitError.commandFailed(arguments: result.arguments, status: result.exitStatus, stderr: result.standardErrorString) }
+            return GitDiffAppearance.parseColoredPatch(result.standardOutput, file: file)
+        case .difftastic:
+            guard await isDifftasticEnabled() else { return nil }
+            let target = try await difftastic()
+            let result = try await git.run(
+                GitCommand(arguments: GitDiffAppearance.difftasticArguments(revisions: target.revisions, paths: target.paths,
+                                                                            noIndex: target.noIndex, options: options),
+                           accessesRemote: false, changesRepositoryState: false),
+                in: directory, standardInput: nil, environment: GitDiffAppearance.difftasticEnvironment(options)
+            )
+            guard result.succeeded || (target.noIndex && result.exitStatus == 1) else {
+                throw GitError.commandFailed(arguments: result.arguments, status: result.exitStatus, stderr: result.standardErrorString)
+            }
+            return GitDiffAppearance.parseDifftastic(result.standardOutput, file: file, width: options.difftasticWidth, reverse: options.reverseGitColoring)
+        case .gitWordDiff:
+            let configured: Set<String>
+            if let diffColorConfiguredKeys {
+                configured = diffColorConfiguredKeys
+            } else {
+                let result = try await git.run(
+                    GitCommand(arguments: ["config", "--get-regexp", GitDiffAppearance.colorConfigurationPattern],
+                               accessesRemote: false, changesRepositoryState: false),
+                    in: directory
+                )
+                configured = result.succeeded ? GitDiffAppearance.configuredKeys(fromGetRegexp: result.standardOutputString) : []
+                diffColorConfiguredKeys = configured
+            }
+            let result = try await git.run(
+                GitCommand(arguments: GitDiffAppearance.wordDiffCommand(patchArguments, configured: configured, reverse: options.reverseGitColoring),
+                           accessesRemote: false, changesRepositoryState: false),
+                in: directory
+            )
+            guard result.succeeded || result.exitStatus == 1 else {
+                throw GitError.commandFailed(arguments: result.arguments, status: result.exitStatus, stderr: result.standardErrorString)
+            }
+            return GitDiffAppearance.parseWordDiff(result.standardOutput, file: file)
+        }
+    }
+
     package func loadDiff(for commit: Commit, file: ChangedFile, options: FileDiffOptions) async throws -> FileDiff? {
         let cacheKey = "\(commit.id.description)\u{0}\(file.id)\u{0}\(options.hashValue)"
         if let cached = diffCache[cacheKey] { return cached }
@@ -795,7 +884,9 @@ package actor GitRepositoryModule: RepositoryOpeningDataSource {
 
         var seenPaths = Set<String>()
         let paths = [file.oldPath, file.path].compactMap { $0 }.filter { seenPaths.insert($0).inserted }
-        let output: GitCommandResult
+        let arguments: [String]
+        var acceptedStatuses: Set<Int32> = [0]
+        let difftastic: () async throws -> (revisions: [String], paths: [String], noIndex: Bool)
         switch commit.kind {
         case .revision:
             guard let objectID = commit.objectID else { throw RepositoryDataSourceError.unavailable }
@@ -806,42 +897,43 @@ package actor GitRepositoryModule: RepositoryOpeningDataSource {
                     acceptedStatuses: [0, 1, 128]
                 )
                 if untrackedObject.succeeded {
-                    output = try await checked(
-                        GitCommand(arguments: ["show", "--format=", "--patch", "--no-color"] + options.gitArguments + ["\(objectID.string)^3", "--"] + paths, accessesRemote: false, changesRepositoryState: false),
-                        directory: repository.rootURL
-                    )
+                    arguments = ["show", "--format=", "--patch", "--no-color"] + options.gitArguments + ["\(objectID.string)^3", "--"] + paths
+                    difftastic = { [self] in ([try await emptyTreeID(in: repository.rootURL), "\(objectID.string)^3"], paths, false) }
                 } else {
-                    output = try await checked(
-                        GitCommand(arguments: ["diff", "--no-ext-diff", "--patch", "--no-color"] + options.gitArguments + ["\(objectID.string)^1", objectID.string, "--"] + paths, accessesRemote: false, changesRepositoryState: false),
-                        directory: repository.rootURL
-                    )
+                    arguments = ["diff", "--no-ext-diff", "--patch", "--no-color"] + options.gitArguments + ["\(objectID.string)^1", objectID.string, "--"] + paths
+                    difftastic = { (["\(objectID.string)^1", objectID.string], paths, false) }
                 }
             } else {
-                let commands = revisionDiffArguments(commit: commit)
-                output = try await checked(
-                    GitCommand(arguments: commands.patch + options.gitArguments + ["--"] + paths, accessesRemote: false, changesRepositoryState: false),
-                    directory: repository.rootURL
-                )
+                arguments = revisionDiffArguments(commit: commit).patch + options.gitArguments + ["--"] + paths
+                if let parent = commit.parentIDs.first {
+                    difftastic = { ([parent.string, objectID.string], paths, false) }
+                } else {
+                    difftastic = { [self] in ([try await emptyTreeID(in: repository.rootURL), objectID.string], paths, false) }
+                }
             }
         case .index:
-            output = try await checked(
-                GitCommand(arguments: diffBaseArguments() + ["--cached", "--patch", "--no-color"] + options.gitArguments + ["--"] + paths, accessesRemote: false, changesRepositoryState: false),
-                directory: repository.rootURL
-            )
+            arguments = diffBaseArguments() + ["--cached", "--patch", "--no-color"] + options.gitArguments + ["--"] + paths
+            difftastic = { (["--cached"], paths, false) }
         case .workingDirectory:
             if statusRecords.contains(where: { $0.path == file.path && $0.isUntracked }) {
-                output = try await checked(
-                    GitCommand(arguments: ["diff", "--no-ext-diff", "--no-index", "--patch", "--no-color"] + options.gitArguments + ["--", "/dev/null", file.path], accessesRemote: false, changesRepositoryState: false),
-                    directory: repository.rootURL,
-                    acceptedStatuses: [0, 1]
-                )
+                arguments = ["diff", "--no-ext-diff", "--no-index", "--patch", "--no-color"] + options.gitArguments + ["--", "/dev/null", file.path]
+                acceptedStatuses = [0, 1]
+                difftastic = { ([], ["/dev/null", file.path], true) }
             } else {
-                output = try await checked(
-                    GitCommand(arguments: diffBaseArguments() + ["--patch", "--no-color"] + options.gitArguments + ["--"] + paths, accessesRemote: false, changesRepositoryState: false),
-                    directory: repository.rootURL
-                )
+                arguments = diffBaseArguments() + ["--patch", "--no-color"] + options.gitArguments + ["--"] + paths
+                difftastic = { ([], paths, false) }
             }
         }
+        if let diff = try await appearanceDiff(file: file, options: options, patchArguments: arguments,
+                                               difftastic: difftastic, directory: repository.rootURL) {
+            diffCache[cacheKey] = diff
+            return diff
+        }
+        let output = try await checked(
+            GitCommand(arguments: arguments, accessesRemote: false, changesRepositoryState: false),
+            directory: repository.rootURL,
+            acceptedStatuses: acceptedStatuses
+        )
 
         let parsed = GitOutputParser.parseUnifiedDiff(output.standardOutput, files: [file])
         let diff = parsed[file.id] ?? parsed.values.first
