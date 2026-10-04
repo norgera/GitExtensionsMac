@@ -288,7 +288,7 @@ final class FileHistoryViewController: NSViewController, NSMenuDelegate {
                 initialRevision = nil; isLoading = false
                 status.stringValue = "\(revisions.filter { !$0.isArtificial }.count) revisions"
                 selectionChanged(); launchBuildWatcher()
-                diffTools = (try? await (source as? any RepositoryFileStatusDataSource)?.loadDiffTools()) ?? []
+                diffTools = AppSettingsStore.shared.fileViewerPreferences.availableDiffTools((try? await (source as? any RepositoryFileStatusDataSource)?.loadDiffTools()) ?? [])
             } catch {
                 guard !Task.isCancelled, generation == token else { return }
                 isLoading = false; status.stringValue = error.localizedDescription; grid.finishLoading(failed: true)
@@ -447,6 +447,7 @@ final class FileHistoryViewController: NSViewController, NSMenuDelegate {
             let tools = NSMenuItem(title: "Open with", action: nil, keyEquivalent: "")
             let toolMenu = NSMenu(); toolMenu.autoenablesItems = false
             for tool in diffTools { add(tool, id: "difftool.named." + tool, to: toolMenu, enabled: canDiff) }
+            toolMenu.addItem(.separator()); add("Disable", id: "difftool.disableTools", to: toolMenu, enabled: true)
             tools.submenu = toolMenu; menu.addItem(tools)
         }
         let exists = repositoryPath.map { FileManager.default.fileExists(atPath: URL(fileURLWithPath: $0).appendingPathComponent(selectedPath ?? file).path) } ?? false
@@ -455,6 +456,7 @@ final class FileHistoryViewController: NSViewController, NSMenuDelegate {
             let tools = NSMenuItem(title: "Selected < - > local with", action: nil, keyEquivalent: "")
             let toolMenu = NSMenu(); toolMenu.autoenablesItems = false
             for tool in diffTools { add(tool, id: "difftool.local." + tool, to: toolMenu, enabled: single && !isBare && exists && selected.first?.kind != .workingDirectory && shownItem != nil) }
+            toolMenu.addItem(.separator()); add("Disable", id: "difftool.disableTools", to: toolMenu, enabled: true)
             tools.submenu = toolMenu; menu.addItem(tools)
         }
         if !isSubmodule { add("Save as", id: "file.save", to: menu, enabled: single && shownItem != nil) }
@@ -486,6 +488,13 @@ final class FileHistoryViewController: NSViewController, NSMenuDelegate {
     @objc private func menuAction(_ sender: NSMenuItem) {
         guard let id = sender.identifier?.rawValue else { return }
         if id.hasPrefix("revision.copy") { grid.copyToClipboard(id); return }
+        if id == "difftool.disableTools" {
+            var viewer = AppSettingsStore.shared.fileViewerPreferences
+            viewer.showAvailableDiffTools = false
+            AppSettingsStore.shared.saveFileViewerPreferences(viewer)
+            diffTools = []
+            return
+        }
         var p = AppSettingsStore.shared.revisionGridPreferences
         switch id {
         case "loadHistory": p.loadFileHistoryOnShow.toggle()

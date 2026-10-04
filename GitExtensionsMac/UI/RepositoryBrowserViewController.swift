@@ -44,6 +44,9 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
     private let fileTreeController = RevisionDiffViewController(mode: .fileTree)
     private var activationObserver: NSObjectProtocol?
     private let gpgController = GPGInfoViewController()
+    private var gpgTask: Task<Void, Never>?
+    private var gpgTabShown = true
+    private var gpgLoadedFor: RevisionID?
     private let detailTabs = DetailTabsViewController()
     let outputHistoryController = OutputHistoryViewController()
     private let leftPanelSplitController = RetainingSplitViewController(resizeBehavior: .fixedTrailingPane)
@@ -336,6 +339,8 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         applyPreferences()
         preferencesObserver = NotificationCenter.default.addObserver(forName: .appPreferencesDidChange, object: nil, queue: .main) { [weak self] _ in
             self?.applyPreferences()
+            guard let self, let commit = revisions.first(where: { $0.id == self.selectedCommitID }) else { return }
+            loadGPGInfo(commit)
         }
         pullPreferencesObserver = NotificationCenter.default.addObserver(forName: .pullPreferencesDidChange, object: nil, queue: .main) { [weak self] _ in
             self?.rebuildPullMenu()
@@ -482,9 +487,9 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             ? [("Commit", "CommitSummary", commitDetailController)] : []
         items += [
             ("Diff", "Diff", revisionDiffController),
-            ("File tree", "FileTree", fileTreeController),
-            ("GPG", "Key", gpgController)
+            ("File tree", "FileTree", fileTreeController)
         ]
+        if gpgTabShown { items.append(("GPG", "Key", gpgController)) }
         if showsBuildReportTab { items.append(("Build Report", "", buildReportController)) }
         if outputHistoryEnabled && outputTabEnabled { items.append(("Output", "GitCommandLog", outputHistoryController)) }
         detailTabControllers = items.map(\.2)
@@ -557,7 +562,9 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             case "focus.details": controller = commitDetailController
             case "focus.diff": controller = revisionDiffController
             case "focus.files": controller = fileTreeController
-            case "focus.gpg": controller = gpgController
+            case "focus.gpg":
+                guard gpgTabShown else { return }
+                controller = gpgController
             case "focus.build":
                 guard showsBuildReportTab else { return }
                 controller = buildReportController
@@ -1235,6 +1242,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         }
         detailTabs.onSelectionChanged = { [weak self] _ in
             guard let self else { return }
+            if selectedDetailController === gpgController { gpgLoadedFor = nil }
             if let commit = revisions.first(where: { $0.id == self.selectedCommitID }) { fillCommitInfo(commit) }
             loadActiveDetailTab()
             updateOutputPanelLayout()
@@ -1700,7 +1708,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         commitInfoChildren = relations.childIDs
         commitInfoFilledFor = nil
         fillCommitInfo(commit)
-        gpgController.apply(commit: commit, info: nil)
+        loadGPGInfo(commit)
         statusLabel.stringValue = commit.isArtificial ? "Selected \(commit.subject)" : "Selected \(commit.shortID): \(commit.subject)"
         updateBuildReportTab()
 
@@ -1752,9 +1760,38 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         }
     }
 
+    private func loadGPGInfo(_ commit: Commit) {
+        gpgTask?.cancel()
+        gpgTask = nil
+        gpgLoadedFor = nil
+        let shows = !commit.isArtificial && AppSettingsStore.shared.revisionGridPreferences.showGpgInformation
+        if shows != gpgTabShown {
+            gpgTabShown = shows
+            let selected = selectedDetailController
+            configureDetailTabs(selecting: selected === gpgController && !shows ? revisionDiffController : selected)
+        }
+        guard shows, selectedDetailController === gpgController,
+              let source = repositoryModule as? any RepositorySignatureDataSource else { return }
+        gpgController.showPending()
+        gpgLoadedFor = commit.id
+        gpgTask = Task { @MainActor [weak self] in
+            let info: RevisionGPGInfo?
+            do {
+                info = try await source.loadSignatureInfo(for: commit)
+            } catch {
+                guard let self, !Task.isCancelled, selectedCommitID == commit.id else { return }
+                gpgController.show(error: error.localizedDescription)
+                return
+            }
+            guard let self, !Task.isCancelled, selectedCommitID == commit.id else { return }
+            gpgController.apply(commit: commit, info: info)
+        }
+    }
+
     private func loadActiveDetailTab(commit: Commit? = nil) {
         guard repositoryIdentity != nil else { return }
         guard let activeCommit = commit ?? revisions.first(where: { $0.id == selectedCommitID }) else { return }
+        if selectedDetailController === gpgController, gpgLoadedFor != activeCommit.id { loadGPGInfo(activeCommit) }
 
         revisionDetailsTask?.cancel()
         if fileHistory != nil, let reader = activeRevisionReader,
@@ -2619,14 +2656,13 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             beginAbortRebase()
             return
         }
-        if identifier == "revision.branch.rebase.selected" {
-            guard !focused.isArtificial else { return }
-            uiCommands.startRebase(on: focused, interactive: false)
-            return
-        }
-        if identifier == "revision.branch.rebase.interactive" {
-            guard !focused.isArtificial else { return }
-            uiCommands.startRebase(on: focused, interactive: true)
+        if identifier == "revision.branch.rebase.selected" || identifier == "revision.branch.rebase.interactive" {
+            guard !focused.isArtificial, let window = view.window else { return }
+            let interactive = identifier == "revision.branch.rebase.interactive"
+            Task { @MainActor [weak self] in
+                guard await MutationDialogs.confirmRebaseOnSelected(interactive: interactive, window: window) else { return }
+                self?.uiCommands.startRebase(on: focused, interactive: interactive)
+            }
             return
         }
         if identifier == "revision.branch.rebase.advanced" {
@@ -2855,7 +2891,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
     private func loadDiffTools() {
         guard let source = repositoryModule as? any RepositoryFileStatusDataSource else { return }
         Task { @MainActor [weak self] in
-            let tools = (try? await source.loadDiffTools()) ?? []
+            let tools = AppSettingsStore.shared.fileViewerPreferences.availableDiffTools((try? await source.loadDiffTools()) ?? [])
             self?.revisionDiffController.diffTools = tools
             self?.fileTreeController.diffTools = tools
         }
@@ -3026,8 +3062,8 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         )
     }
 
-    func showPlaceholderStatus(_ title: String) {
-        showPlaceholderStatus(for: title)
+    func showStatus(_ message: String) {
+        statusLabel.stringValue = message
     }
 
     private func performStashMutation(_ kind: StashMutationKind, stash: Stash) {

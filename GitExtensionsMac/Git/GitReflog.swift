@@ -112,7 +112,7 @@ package enum GitReflogCommands {
             ],
             accessesRemote: false,
             changesRepositoryState: false
-        )
+        ).logMetadata()
     }
 }
 

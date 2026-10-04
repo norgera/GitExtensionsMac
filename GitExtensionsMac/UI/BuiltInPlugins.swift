@@ -3,7 +3,7 @@ import GitCommands
 import GitExtensionsCore
 
 enum BuiltInPluginKind: CaseIterable {
-    case backgroundFetch, createBranches, deleteBranches, largeFiles, proxy, releaseNotes, statistics, gource, compileSubmodules
+    case backgroundFetch, createBranches, deleteBranches, largeFiles, proxy, releaseNotes, statistics, gource, compileSubmodules, impact
 
     var identity: (String, String) {
         switch self {
@@ -16,6 +16,7 @@ enum BuiltInPluginKind: CaseIterable {
         case .statistics: ("17D1507D-C00D-4A10-AB75-DECB2EA5FCBF", "Statistics")
         case .gource: ("F0A6A769-6DCC-4452-9A43-343347015EEC", "Gource")
         case .compileSubmodules: ("D4D1ACB7-0B6B-4A3C-B0DB-A25056A277D9", "Auto compile submodules")
+        case .impact: ("F1ACFE42-6A5E-4C30-AC10-9A7C4BB8B480", "Impact Graph")
         }
     }
 
@@ -47,7 +48,7 @@ enum BuiltInPluginKind: CaseIterable {
         case .compileSubmodules: return [value("Enabled", "false", .boolean),
             .init(name: "Path to msbuild.exe", caption: "Path to MSBuild", kind: .path),
             .init(name: "msbuild.exe arguments", caption: "MSBuild arguments", defaultValue: "/p:Configuration=Debug")]
-        case .createBranches, .releaseNotes: return []
+        case .createBranches, .releaseNotes, .impact: return []
         }
     }
 }
@@ -56,7 +57,7 @@ enum BuiltInPluginKind: CaseIterable {
 enum BuiltInPlugins {
     static func make() -> [BuiltInPlugin] {
         [BackgroundFetchPlugin(), CreateLocalBranchesPlugin(), DeleteUnusedBranchesPlugin(), FindLargeFilesPlugin(),
-         ProxySwitcherPlugin(), ReleaseNotesPlugin(), StatisticsPlugin(), GourcePlugin(), AutoCompileSubmodulesPlugin()]
+         ProxySwitcherPlugin(), ReleaseNotesPlugin(), StatisticsPlugin(), GourcePlugin(), AutoCompileSubmodulesPlugin(), ImpactGraphPlugin()]
     }
 }
 
@@ -69,7 +70,10 @@ class BuiltInPlugin: GitExtensionPlugin {
     var pluginDescription: String { name }
     var requiresRepository: Bool { kind != .proxy }
     var settings: [GitExtensionPluginSetting] { kind.settings }
-    var icon: NSImage? { NSImage(systemSymbolName: kind == .statistics ? "chart.pie" : "puzzlepiece.extension", accessibilityDescription: name) }
+    var icon: NSImage? {
+        NSImage(systemSymbolName: kind == .statistics ? "chart.pie" : kind == .impact ? "chart.line.uptrend.xyaxis" : "puzzlepiece.extension",
+                accessibilityDescription: name)
+    }
 
     func value(_ name: String, in host: GitExtensionPluginHost) throws -> String {
         try host.setting(name) ?? settings.first { $0.name == name }?.defaultValue ?? ""

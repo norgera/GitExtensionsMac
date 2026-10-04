@@ -295,6 +295,7 @@ private final class RebaseManagerViewController: NSViewController, NSTableViewDa
         let content = NSStackView(views: [currentBranch, idleOptions, heading, scroll, secondary, footer])
         content.orientation = .vertical; content.alignment = .leading; content.spacing = 8
         configureHelpPanel()
+        helpPanel.isHidden = AppSettingsStore.shared.preferences.dontShowHelpImages
         let stack = NSStackView(views: [helpPanel, content])
         stack.orientation = .horizontal; stack.alignment = .top; stack.spacing = 12; stack.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(stack)
@@ -975,10 +976,7 @@ private final class ConflictResolverViewController: NSViewController, NSTableVie
         alert.informativeText = "All merge conflicts are resolved, you can commit.\nDo you want to commit now?"
         alert.addButton(withTitle: "Commit")
         alert.addButton(withTitle: "Not now")
-        let response = await withCheckedContinuation { continuation in
-            alert.beginSheetModal(for: panel) { continuation.resume(returning: $0) }
-        }
-        if response == .alertFirstButtonReturn {
+        if await MutationDialogs.confirmSuppressible(alert, window: panel, suppressedBy: \.dontConfirmCommitAfterConflictsResolved) {
             presentMergeCommit(closeWhenCommitWindowCloses: true)
         } else {
             finish(repositoryChanged)
@@ -1004,6 +1002,7 @@ private final class ConflictResolverViewController: NSViewController, NSTableVie
         case .bothAdded: "Both added"
         case .deletedLocally: "Deleted locally"
         case .deletedRemotely: "Deleted remotely"
+        case .bothDeleted: "Deleted both"
         case .unmerged: "Unmerged"
         }
     }
@@ -1027,7 +1026,7 @@ private final class ConflictResolverViewController: NSViewController, NSTableVie
         let values = selectedConflicts
         let single = values.count == 1 ? values[0] : nil
         if let conflict = single {
-            descriptionLabel.stringValue = "\(conflictKindTitle(conflict)): \(conflict.path)"
+            descriptionLabel.stringValue = RepositoryConflictDescription.text(for: conflict.kind, rebase: state?.rebaseInProgress == true)
             localLabel.stringValue = "\(sideTitle(.local)): \(versionText(conflict.local))"
             baseLabel.stringValue = "Base: \(versionText(conflict.base))"
             remoteLabel.stringValue = "\(sideTitle(.remote)): \(versionText(conflict.remote))"
@@ -1319,13 +1318,13 @@ private final class ConflictResolverViewController: NSViewController, NSTableVie
         guard first.runModal() == .alertFirstButtonReturn else { return }
         let second = NSAlert()
         second.alertStyle = .critical
-        second.messageText = "Delete all changes?"
-        second.informativeText = "This action cannot be undone."
+        second.messageText = "WARNING!"
+        second.informativeText = "Are you sure you want to DELETE all changes?\n\nThis action cannot be made undone."
         second.addButton(withTitle: "Reset")
         second.addButton(withTitle: "Cancel")
-        guard second.runModal() == .alertFirstButtonReturn else { return }
         task = Task { @MainActor [weak self] in
-            guard let self else { return }
+            guard await MutationDialogs.confirmSuppressible(second, window: nil, suppressedBy: \.dontConfirmSecondAbortConfirmation),
+                  let self else { return }
             await execute(sequencerAction: .aborted) { source in
                 try await source.resetChanges(RepositoryResetChangesRequest(scope: .all, deleteUntracked: false))
             }

@@ -2,6 +2,26 @@ import GitExtensionsCore
 import GitCommands
 import AppKit
 
+enum StashReapplyAnswer: Equatable {
+    case apply
+    case keep
+    case cancel
+
+    init(_ response: NSApplication.ModalResponse) {
+        switch response {
+        case .alertFirstButtonReturn: self = .apply
+        case .alertSecondButtonReturn: self = .keep
+        default: self = .cancel
+        }
+    }
+
+    var shouldApply: Bool { self == .apply }
+
+    func rememberedChoice(remember: Bool) -> Bool? {
+        remember && self != .cancel ? self == .apply : nil
+    }
+}
+
 enum CheckoutDialogTarget {
     case local(Branch)
     case remote(Branch)
@@ -372,7 +392,7 @@ enum MutationDialogs {
         alert.alertStyle = .warning
         alert.addButton(withTitle: "Resolve conflicts")
         alert.addButton(withTitle: "Later")
-        return await begin(alert: alert, for: window) == .alertFirstButtonReturn
+        return await confirmSuppressible(alert, window: window, suppressedBy: \.dontConfirmResolveConflicts)
     }
 
     static func confirmResolveRevertConflicts(paths: [String], window: NSWindow) async -> Bool {
@@ -384,7 +404,7 @@ enum MutationDialogs {
         alert.alertStyle = .warning
         alert.addButton(withTitle: "Resolve conflicts")
         alert.addButton(withTitle: "Later")
-        return await begin(alert: alert, for: window) == .alertFirstButtonReturn
+        return await confirmSuppressible(alert, window: window, suppressedBy: \.dontConfirmResolveConflicts)
     }
 
     static func confirmAbortRevert(window: NSWindow) async -> Bool {
@@ -404,7 +424,27 @@ enum MutationDialogs {
         alert.alertStyle = .warning
         alert.addButton(withTitle: "Resolve conflicts")
         alert.addButton(withTitle: "Later")
-        return await begin(alert: alert, for: window) == .alertFirstButtonReturn
+        return await confirmSuppressible(alert, window: window, suppressedBy: \.dontConfirmResolveConflicts)
+    }
+
+    static func confirmResolveUnresolvedConflicts(window: NSWindow) async -> Bool {
+        let alert = NSAlert()
+        alert.messageText = "Merge conflicts"
+        alert.informativeText = "There are unresolved merge conflicts, solve conflicts now?"
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Yes")
+        alert.addButton(withTitle: "No")
+        return await confirmSuppressible(alert, window: window, suppressedBy: \.dontConfirmResolveConflicts)
+    }
+
+    static func confirmRebaseOnSelected(interactive: Bool, window: NSWindow) async -> Bool {
+        let alert = NSAlert()
+        alert.messageText = interactive ? "Rebase branch interactively." : "Rebase branch."
+        alert.informativeText = "Are you sure you want to rebase? This action will rewrite commit history."
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "Yes")
+        alert.addButton(withTitle: "No")
+        return await confirmSuppressible(alert, window: window, suppressedBy: \.dontConfirmRebase)
     }
 
     static func confirmResolveMergeConflicts(paths: [String], window: NSWindow) async -> Bool {
@@ -416,7 +456,7 @@ enum MutationDialogs {
         alert.alertStyle = .warning
         alert.addButton(withTitle: "Resolve conflicts")
         alert.addButton(withTitle: "Later")
-        return await begin(alert: alert, for: window) == .alertFirstButtonReturn
+        return await confirmSuppressible(alert, window: window, suppressedBy: \.dontConfirmResolveConflicts)
     }
 
     static func confirmAbortMerge(window: NSWindow) async -> Bool {
@@ -746,6 +786,24 @@ enum MutationDialogs {
         alert.accessoryView = scroll
         guard await begin(alert: alert, for: window) == .alertFirstButtonReturn else { return nil }
         return textView.string
+    }
+
+    static let dontShowAgain = "Don't show me this message again"
+
+    static func confirmSuppressible(_ alert: NSAlert, window: NSWindow?,
+                                    suppressedBy key: WritableKeyPath<ConfirmationPreferences, Bool>,
+                                    store: AppSettingsStore = .shared) async -> Bool {
+        if store.confirmationPreferences[keyPath: key] { return true }
+        alert.showsSuppressionButton = true
+        alert.suppressionButton?.title = dontShowAgain
+        let response: NSApplication.ModalResponse
+        if let window { response = await begin(alert: alert, for: window) } else { response = alert.runModal() }
+        if alert.suppressionButton?.state == .on {
+            var preferences = store.confirmationPreferences
+            preferences[keyPath: key] = true
+            store.saveConfirmationPreferences(preferences)
+        }
+        return response == .alertFirstButtonReturn
     }
 
     private static func begin(alert: NSAlert, for window: NSWindow) async -> NSApplication.ModalResponse {

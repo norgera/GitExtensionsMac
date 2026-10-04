@@ -78,6 +78,13 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
     private var graphLayoutConfiguration = RevisionGraphLayout.Configuration.gitExtensionsDefault
     private var displayedGraph = RevisionGraphLayout(rows: [], maximumLaneCount: 1)
     private var graphCommits: [RevisionID: Commit] = [:]
+    private var hoveredLabel: (row: Int, hit: RevisionLabelHit?)?
+    private var contextMenuVisible = false
+    var hoverLocationInWindow: (() -> NSPoint)?
+    private(set) lazy var hoverHighlight = RevisionGraphHoverHighlight(
+        graph: { [unowned self] in RevisionGraphHoverHighlight.Graph(layout: self.displayedGraph, commits: self.graphCommits) },
+        visibleRange: { [unowned self] in self.visibleRowRange }
+    )
     private var buildStatuses: [RevisionID: BuildInfo] = [:]
     private var buildColumnEnabled = false
     private static let buildColumn = "Build Status"
@@ -181,6 +188,7 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
             queue: .main
         ) { [weak self] _ in
             self?.scheduleGraphColumnWidthRefresh()
+            self?.updateHoverAfterScroll()
         }
     }
 
@@ -219,6 +227,7 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
         allCommits = []
         commits = []
         graphRows = []
+        clearHoverHighlight()
         buildStatuses = [:]
         tableView.reloadData()
     }
@@ -434,6 +443,8 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
     }
 
     var visibleCommitCount: Int { commits.count }
+    func revisionID(atRow row: Int) -> RevisionID? { commits.indices.contains(row) ? commits[row].id : nil }
+    var graphDrawStyle: RevisionGraphLayout.DrawStyle { graphLayoutConfiguration.drawStyle }
     var cachedGraphRowCount: Int { graphRows.count }
     func visibleRevision(_ id: ObjectID) -> Commit? { commits.first { $0.objectID == id } }
 
@@ -507,12 +518,14 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
             self.graphReloadPending = false
             let byID = Dictionary(filteredCommits.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
             let orderedCommits = snapshot.orderedIDs.compactMap { byID[$0] }
+            let rowsChanged = !self.commits.map(\.id).elementsEqual(orderedCommits.map(\.id))
             self.commits = orderedCommits
             self.graphRows = graph.rows
             self.displayedGraph = graph
             self.graphCommits = byID
             self.graphRelatives = snapshot.relatives
             self.graphLayoutConfiguration = graph.configuration
+            if rowsChanged { self.clearHoverHighlight() }
             self.tableView.reloadData()
             self.updateGraphColumnWidthForVisibleRows(fallbackLaneCount: graph.maximumLaneCount)
             self.prepareVisibleGraphRows()
@@ -676,7 +689,8 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
         case "Graph":
             let cell = (tableView.makeView(withIdentifier: identifier, owner: self) as? CommitGraphCellView) ?? CommitGraphCellView()
             cell.identifier = identifier
-            cell.configure(row: graphRows.indices.contains(row) ? graphRows[row] : nil, configuration: graphLayoutConfiguration)
+            cell.configure(row: graphRows.indices.contains(row) ? graphRows[row] : nil, configuration: graphLayoutConfiguration,
+                           hoverHighlightedIDs: hoverHighlight.highlightedIDs)
             cell.laneDescription = { [weak self] lane in
                 guard let self, AppSettingsStore.shared.revisionGridPreferences.showRevisionGridTooltips else { return nil }
                 let text = RevisionGridPresentation.laneInfo(layout: self.displayedGraph, row: row, lane: lane, commits: self.graphCommits)
@@ -697,6 +711,7 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
                            toolTip: RevisionGridPresentation.messageToolTip(commit, notesInSeparateColumn: preferences.showNotesColumn,
                                                                             aheadBehind: { context.aheadBehind($0) }),
                            labels: labels)
+            cell.onLabelHover = { [weak self] cell, hit in self?.labelHoverChanged(cell, hit: hit) }
             cell.changeCounts = commit.kind == .index ? repositoryStatus?.index : repositoryStatus?.worktree
             return cell
         case "Notes":
@@ -956,6 +971,59 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
         quickSearchTimer = nil
         quickSearchString = ""
         quickSearchLabel.isHidden = true
+    }
+
+    func menuWillOpen(_ menu: NSMenu) { contextMenuVisible = true }
+    func menuDidClose(_ menu: NSMenu) { contextMenuVisible = false }
+
+    private var visibleRowRange: Range<Int> {
+        let visible = tableView.rows(in: tableView.visibleRect)
+        guard visible.location != NSNotFound else { return 0..<0 }
+        return visible.location..<(visible.location + visible.length)
+    }
+
+    private func labelHoverChanged(_ cell: RevisionMessageCellView, hit: RevisionLabelHit?) {
+        let row = tableView.row(for: cell)
+        if hit == nil, contextMenuVisible { return }
+        setHoveredLabel(row: row, hit: hit)
+    }
+
+    func setHoveredLabel(row: Int, hit: RevisionLabelHit?, force: Bool = false) {
+        let row = hit == nil ? -1 : row
+        if !force, let hoveredLabel, hoveredLabel.row == row, hoveredLabel.hit == hit { return }
+        if hoveredLabel == nil, hit == nil { return }
+        hoveredLabel = hit == nil ? nil : (row, hit)
+        let reference = hit.flatMap(RevisionGraphHoverRef.init(hit:))
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.hoverHighlight.set(reference, row: reference == nil ? -1 : row)
+            if self.hoverHighlight.consumeIsDirty() { self.refreshVisibleGraphCells() }
+        }
+    }
+
+    private func updateHoverAfterScroll() {
+        guard hoveredLabel != nil, let window = view.window, !contextMenuVisible else { return }
+        let location = hoverLocationInWindow?() ?? window.mouseLocationOutsideOfEventStream
+        let point = tableView.convert(location, from: nil)
+        let row = tableView.row(at: point)
+        let cell = row >= 0 && messageColumnIndex >= 0
+            ? tableView.view(atColumn: messageColumnIndex, row: row, makeIfNecessary: false) as? RevisionMessageCellView : nil
+        setHoveredLabel(row: row, hit: cell?.label(atWindowPoint: location), force: true)
+    }
+
+    private func clearHoverHighlight() {
+        hoveredLabel = nil
+        hoverHighlight.cancel()
+        hoverHighlight.clear()
+        if hoverHighlight.consumeIsDirty() { refreshVisibleGraphCells() }
+    }
+
+    private func refreshVisibleGraphCells() {
+        guard let column = tableView.tableColumns.firstIndex(where: { $0.identifier.rawValue == "Graph" }) else { return }
+        for row in visibleRowRange {
+            (tableView.view(atColumn: column, row: row, makeIfNecessary: false) as? CommitGraphCellView)?
+                .setHoverHighlightedIDs(hoverHighlight.highlightedIDs)
+        }
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
@@ -1842,16 +1910,46 @@ final class CommitGraphCellView: NSTableCellView {
         laneDescription?(Int(floor((point.x - 6) / 16))) ?? ""
     }
 
-    func configure(row: RevisionGraphLayout.Row?, configuration: RevisionGraphLayout.Configuration = .gitExtensionsDefault) {
+    func configure(row: RevisionGraphLayout.Row?, configuration: RevisionGraphLayout.Configuration = .gitExtensionsDefault,
+                   hoverHighlightedIDs: Set<RevisionID>? = nil) {
         graphRow = row
         self.configuration = configuration
+        self.hoverHighlightedIDs = hoverHighlightedIDs
         updateTrackingAreas()
         needsDisplay = true
     }
 
+    private(set) var hoverHighlightedIDs: Set<RevisionID>?
 
-    private func color(index: Int?, isRelative: Bool) -> NSColor {
-        guard let index, isRelative || configuration.drawStyle == .normal else { return GitExtensionsPalette.nonRelativeGraph }
+    func setHoverHighlightedIDs(_ ids: Set<RevisionID>?) {
+        guard ids != hoverHighlightedIDs else { return }
+        hoverHighlightedIDs = ids
+        needsDisplay = true
+    }
+
+    var nodeDrawnGray: Bool {
+        guard let graphRow else { return false }
+        return !usesLaneColor(index: graphRow.nodeColorIndex, isRelative: graphRow.isRelative, hover: hoverHighlightedIDs?.contains(graphRow.commitID))
+    }
+
+    private var orderedEdges: [RevisionGraphLayout.Edge] {
+        guard let graphRow else { return [] }
+        func key(_ edge: RevisionGraphLayout.Edge) -> (Int, Int) {
+            let hovered = hoverHighlightedIDs.map { $0.contains(edge.childID) || $0.contains(edge.parentID) } ?? false
+            return (edge.isRelative ? 1 : 0, hovered ? 1 : 0)
+        }
+        return graphRow.edges.enumerated().sorted { lhs, rhs in
+            let left = key(lhs.element), right = key(rhs.element)
+            return left != right ? left < right : lhs.offset < rhs.offset
+        }.map(\.element)
+    }
+
+    private func usesLaneColor(index: Int?, isRelative: Bool, hover: Bool?) -> Bool {
+        index != nil && hover != false && (hover == true || isRelative || configuration.drawStyle == .normal)
+    }
+
+    private func color(index: Int?, isRelative: Bool, hover: Bool? = nil) -> NSColor {
+        guard let index, usesLaneColor(index: index, isRelative: isRelative, hover: hover) else { return GitExtensionsPalette.nonRelativeGraph }
         let palette = GitExtensionsPalette.graph
         return palette[index % palette.count]
     }
@@ -1861,9 +1959,7 @@ final class CommitGraphCellView: NSTableCellView {
         guard let graphRow else { return }
         let originX: CGFloat = 6
         let centerY = bounds.midY
-        for edge in graphRow.edges.sorted(by: { lhs, rhs in
-            lhs.isRelative == rhs.isRelative ? false : !lhs.isRelative && rhs.isRelative
-        }) {
+        for edge in orderedEdges {
             draw(edge: edge, originX: originX, centerY: centerY)
         }
 
@@ -1874,7 +1970,7 @@ final class CommitGraphCellView: NSTableCellView {
         let nodePath = graphRow.hasReferences
             ? NSBezierPath(rect: nodeRect.integral)
             : NSBezierPath(ovalIn: nodeRect)
-        color(index: graphRow.nodeColorIndex, isRelative: graphRow.isRelative).setFill()
+        color(index: graphRow.nodeColorIndex, isRelative: graphRow.isRelative, hover: hoverHighlightedIDs?.contains(graphRow.commitID)).setFill()
         nodePath.fill()
 
         if graphRow.isHEAD {
@@ -1887,7 +1983,7 @@ final class CommitGraphCellView: NSTableCellView {
     }
 
     private func draw(edge: RevisionGraphLayout.Edge, originX: CGFloat, centerY: CGFloat) {
-        color(index: edge.colorIndex, isRelative: edge.isRelative).setStroke()
+        color(index: edge.colorIndex, isRelative: edge.isRelative, hover: hoverHighlightedIDs?.contains(edge.childID)).setStroke()
         let path = NSBezierPath()
         path.lineWidth = 2
         path.lineCapStyle = .round
@@ -2161,6 +2257,7 @@ final class RevisionMessageCellView: NSTableCellView {
     private var showsTags = true
     private var isRelative = true
     private var badges: [Badge] = []
+    var onLabelHover: ((RevisionMessageCellView, RevisionLabelHit?) -> Void)?
     private var hoveredBadge: Int?
     private var trackingAreaReference: NSTrackingArea?
     private var labels = RevisionLabelContext()
@@ -2300,6 +2397,7 @@ final class RevisionMessageCellView: NSTableCellView {
         let next = badges.firstIndex { $0.hit != nil && $0.contains(point) }
         guard next != hoveredBadge else { return }
         hoveredBadge = next
+        onLabelHover?(self, next.flatMap { badges[$0].hit })
         toolTip = next.flatMap { badges[$0].hit }.map(tooltip(for:)) ?? messageToolTip
         if next == nil {
             NSCursor.arrow.set()
@@ -2311,6 +2409,7 @@ final class RevisionMessageCellView: NSTableCellView {
 
     override func mouseExited(with event: NSEvent) {
         hoveredBadge = nil
+        onLabelHover?(self, nil)
         toolTip = messageToolTip
         NSCursor.arrow.set()
         needsDisplay = true

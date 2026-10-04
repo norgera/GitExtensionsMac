@@ -161,6 +161,7 @@ package struct RevisionGridFilter: Codable, Equatable, Sendable {
             if !showGitNotes { arguments.append("--exclude=refs/notes/commits") }
             if !showStashes { arguments.append("--exclude=refs/stash") }
             if !showSessionRefs {
+                arguments.append("--exclude=refs/agents/**")
                 arguments.append("--exclude=refs/sessions/**")
                 arguments.append("--exclude=refs/copilot/checkpoints/**")
             }

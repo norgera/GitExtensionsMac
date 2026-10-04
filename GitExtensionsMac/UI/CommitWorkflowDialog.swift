@@ -19,6 +19,106 @@ private enum CommitKeyboardShortcut: String {
     case conventionalScope
 }
 
+@MainActor
+enum CommitSpelling {
+    static let none = "none"
+
+    static func dictionaryName(language: String) -> String { language.replacingOccurrences(of: "_", with: "-") }
+
+    static func availableDictionaries() -> [String] {
+        NSSpellChecker.shared.availableLanguages.map(dictionaryName).sorted()
+    }
+
+    static func language(for dictionary: String) -> String? {
+        guard dictionary.lowercased() != none else { return nil }
+        let available = NSSpellChecker.shared.availableLanguages
+        let wanted = dictionary.replacingOccurrences(of: "-", with: "_")
+        if let exact = available.first(where: { $0.caseInsensitiveCompare(wanted) == .orderedSame }) { return exact }
+        let prefix = wanted.split(separator: "_").first.map(String.init) ?? wanted
+        return available.first { $0.caseInsensitiveCompare(prefix) == .orderedSame }
+    }
+
+    static func effectiveDictionary(_ dictionary: String) -> String? {
+        language(for: dictionary).map(dictionaryName)
+    }
+
+    static func apply(to textView: NSTextView) {
+        guard let language = language(for: AppSettingsStore.shared.spellingDictionary) else {
+            textView.isContinuousSpellCheckingEnabled = false
+            return
+        }
+        NSSpellChecker.shared.automaticallyIdentifiesLanguages = false
+        NSSpellChecker.shared.setLanguage(language)
+        textView.isContinuousSpellCheckingEnabled = true
+        textView.checkTextInDocument(nil)
+    }
+
+    static func misspelledWord(in textView: NSTextView, at index: Int) -> NSRange? {
+        guard let language = language(for: AppSettingsStore.shared.spellingDictionary) else { return nil }
+        let text = textView.string as NSString
+        guard text.length > 0 else { return nil }
+        let position = min(max(0, index), text.length - 1)
+        let range = textView.selectionRange(forProposedRange: NSRange(location: position, length: 0), granularity: .selectByWord)
+        guard range.length > 0 else { return nil }
+        var wordCount = 0
+        let found = NSSpellChecker.shared.checkSpelling(of: text.substring(with: range), startingAt: 0, language: language, wrap: false,
+                                                        inSpellDocumentWithTag: textView.spellCheckerDocumentTag, wordCount: &wordCount)
+        return found.location == NSNotFound ? nil : NSRange(location: range.location + found.location, length: found.length)
+    }
+
+    static func menuItems(for textView: NSTextView, at index: Int, target: AnyObject, replace: Selector, add: Selector, ignore: Selector, remove: Selector) -> [NSMenuItem] {
+        guard let range = misspelledWord(in: textView, at: index),
+              let language = language(for: AppSettingsStore.shared.spellingDictionary) else { return [] }
+        let word = (textView.string as NSString).substring(with: range)
+        var items: [NSMenuItem] = []
+        let guesses = NSSpellChecker.shared.guesses(forWordRange: range, in: textView.string, language: language,
+                                                    inSpellDocumentWithTag: textView.spellCheckerDocumentTag) ?? []
+        for guess in guesses.prefix(5) {
+            let item = NSMenuItem(title: guess, action: replace, keyEquivalent: "")
+            item.target = target
+            item.representedObject = [NSValue(range: range), guess] as [Any]
+            item.attributedTitle = NSAttributedString(string: guess, attributes: [.font: NSFont.boldSystemFont(ofSize: NSFont.systemFontSize)])
+            items.append(item)
+        }
+        for (title, action) in [("Add to dictionary", add), ("Ignore word", ignore), ("Remove word", remove)] {
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            item.target = target
+            item.representedObject = word
+            items.append(item)
+        }
+        items.append(.separator())
+        return items
+    }
+
+    static func dictionaryMenuItem(target: AnyObject, action: Selector) -> NSMenuItem {
+        let item = NSMenuItem(title: "Dictionary", action: nil, keyEquivalent: "")
+        let menu = NSMenu(title: "Dictionary")
+        let current = effectiveDictionary(AppSettingsStore.shared.spellingDictionary)
+        for name in ["None"] + availableDictionaries() {
+            let choice = NSMenuItem(title: name, action: action, keyEquivalent: "")
+            choice.target = target
+            choice.representedObject = name == "None" ? none : name
+            choice.state = (name == "None" ? current == nil : current == name) ? .on : .off
+            menu.addItem(choice)
+        }
+        item.submenu = menu
+        return item
+    }
+}
+
+enum CommitPushTarget {
+    static let untracked = "(untracked)"
+    static let withoutRemote = "(remote not configured)"
+
+    static func describe(_ tracking: RepositoryBranchTracking) -> String {
+        guard !tracking.trackingRemote.isEmpty else {
+            let remote = tracking.remotes.first { $0 == "origin" } ?? tracking.remotes.sorted().first
+            return remote.map { "\($0)/\(tracking.branch) \(untracked)" } ?? withoutRemote
+        }
+        return "\(tracking.trackingRemote)/\(tracking.mergeWith)"
+    }
+}
+
 enum CommitWorkflowSpecialKind {
     case fixup(Commit)
     case squash(Commit)
@@ -207,7 +307,10 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
     private var pushWindowController: NSWindowController?
     private var didInitialFocus = false
     private var persistDraftOnClose = true
+    private let composesMessage = AppSettingsStore.shared.preferences.composeCommitMessages
+    private let messageWatermark = NSTextField(labelWithString: "")
     private var didBecomeKeyOnce = false
+    private var refreshPushTargetOnFocus = false
     private var historyWasSoftReset = false
     private var closeWhenPushCompletes = false
     private var fileTreeMode: Bool
@@ -219,6 +322,12 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
     private var fileGroupingButtons: [NSButton] = []
     private var fileCollapseButtons: [NSButton] = []
     private var fileGroupingMenus: [NSMenu] = []
+    private var showsIgnoredFiles = false
+    private var showsAssumeUnchangedFiles = false
+    private var showsSkipWorktreeFiles = false
+    private var stagedShowsSkipWorktreeFiles = false
+    private var fileToolbarItems: [ObjectIdentifier: [(name: String, title: String, view: NSView)]] = [:]
+    private var fileToolbarMenus: [NSMenu] = []
     private var isFormattingMessage = false
     private var lastShownMessageLoadError: String?
     private var selectedCommitMode: RepositoryCommitMode = .normal
@@ -385,13 +494,21 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
         messageView.isRichText = false
         messageView.font = AppSettingsStore.shared.commitFont
         messageView.delegate = self
-        messageView.isAutomaticTextCompletionEnabled = true
+        messageView.isAutomaticTextCompletionEnabled = settings.preferences.provideAutocompletion
+        CommitSpelling.apply(to: messageView)
+        NotificationCenter.default.addObserver(self, selector: #selector(spellingDictionaryChanged), name: .spellingDictionaryDidChange, object: nil)
         let messageScroll = NSScrollView()
         messageScroll.documentView = messageView
         messageScroll.hasVerticalScroller = true
         messageScroll.borderType = .bezelBorder
         configureDocumentView(messageView, width: 760, height: 260)
         messageScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 115).isActive = true
+        messageWatermark.stringValue = composesMessage ? "Enter commit message" : "Commit Message is requested during commit"
+        messageWatermark.textColor = .placeholderTextColor
+        messageWatermark.font = messageView.font
+        messageWatermark.sizeToFit()
+        messageWatermark.setFrameOrigin(NSPoint(x: messageView.textContainerInset.width + 5, y: messageView.textContainerInset.height))
+        messageView.addSubview(messageWatermark)
 
         commitButton.target = self
         commitButton.action = #selector(commit)
@@ -807,7 +924,7 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
         let selectedMode = initial?.mode ?? initialMode
         selectedCommitMode = selectedMode
         amend.state = selectedMode == .normal ? .off : .on
-        messageView.string = activeSpecialKind?.message ?? commandLineMessage ?? initial?.message ?? (selectedMode == .normal ? "" : headMessage())
+        messageView.string = !composesMessage ? "" : activeSpecialKind?.message ?? commandLineMessage ?? initial?.message ?? (selectedMode == .normal ? "" : headMessage())
         let preferences = settings.preferences
         let commitPreferences = settings.commitPreferences
         stageAll.state = initial?.stageAllBeforeCommit == true ? .on : .off
@@ -902,6 +1019,32 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
             controls.append(AppKitFactory.separator())
         }
         controls += [tree, AppKitFactory.separator(), path, fileExtension, statusGrouping, AppKitFactory.separator(), settings, spacer]
+        var named: [(name: String, title: String, view: NSView)] = [("btnCollapseGroups", collapse.toolTip ?? "", collapse)]
+        if table === unstagedTable {
+            named += [("sepRefresh", "", controls[1]), ("btnRefresh", "Refresh changes", controls[2]), ("sepAsTree", "", controls[3])]
+        } else {
+            named.append(("sepAsTree", "", controls[1]))
+        }
+        let base = table === unstagedTable ? 4 : 2
+        named += [("btnAsTree", "Toggle flat list / tree", controls[base]), ("sepGroupBy", "", controls[base + 1]),
+                  ("btnByPath", "Group by file path", path), ("btnByExtension", "Group by file type (extension)", fileExtension),
+                  ("btnByStatus", "Group by diff status", statusGrouping), ("sepSettings", "", controls[base + 5]), ("btnSettings", "Settings", settings)]
+        fileToolbarItems[ObjectIdentifier(table)] = named
+        if let menu = settings.menu {
+            let toolbarItem = menu.items.first { $0.title == "Toolbar" }
+            let toolbarMenu = NSMenu()
+            for (index, item) in named.enumerated() {
+                let title = item.name.hasPrefix("sep") && index + 1 < named.count ? "Separator '\(named[index + 1].title)'" : item.title
+                let menuItem = NSMenuItem(title: title, action: #selector(toggleFileToolbarItem(_:)), keyEquivalent: "")
+                menuItem.target = self
+                menuItem.representedObject = item.name
+                menuItem.isEnabled = item.name != "btnSettings"
+                toolbarMenu.addItem(menuItem)
+            }
+            toolbarItem?.submenu = toolbarMenu
+            fileToolbarMenus.append(toolbarMenu)
+        }
+        applyFileToolbarVisibility()
         let bar = NSStackView(views: controls)
         bar.orientation = .horizontal
         bar.alignment = .centerY
@@ -997,20 +1140,22 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
         button.itemArray.first?.image = AppKitFactory.resourceImage("Settings", accessibilityDescription: "File list settings")
 
         if table === unstagedTable {
-            let ignoredFiles = NSMenuItem(title: "Show ignored files", action: nil, keyEquivalent: "")
-            ignoredFiles.isEnabled = false
-            ignoredFiles.toolTip = "Ignored-file discovery is not available in the typed repository status service."
+            let ignoredFiles = NSMenuItem(title: "Show ignored files", action: #selector(toggleFileDiscovery(_:)), keyEquivalent: "")
+            ignoredFiles.target = self
+            ignoredFiles.tag = 0
+            ignoredFiles.state = showsIgnoredFiles ? .on : .off
             button.menu?.addItem(ignoredFiles)
         }
-        let skipWorktree = NSMenuItem(title: "Show skip-worktree files", action: nil, keyEquivalent: "")
-        skipWorktree.state = .off
-        skipWorktree.isEnabled = false
-        skipWorktree.toolTip = "Skip-worktree inspection is not available in this repository view."
+        let skipWorktree = NSMenuItem(title: "Show skip-worktree files", action: #selector(toggleFileDiscovery(_:)), keyEquivalent: "")
+        skipWorktree.target = self
+        skipWorktree.tag = table === unstagedTable ? 1 : 3
+        skipWorktree.state = (table === unstagedTable ? showsSkipWorktreeFiles : stagedShowsSkipWorktreeFiles) ? .on : .off
         button.menu?.addItem(skipWorktree)
         if table === unstagedTable {
-            let assumeUnchanged = NSMenuItem(title: "Show assumed-unchanged files", action: nil, keyEquivalent: "")
-            assumeUnchanged.isEnabled = false
-            assumeUnchanged.toolTip = "Assume-unchanged discovery is not available in the typed repository status service."
+            let assumeUnchanged = NSMenuItem(title: "Show assumed-unchanged files", action: #selector(toggleFileDiscovery(_:)), keyEquivalent: "")
+            assumeUnchanged.target = self
+            assumeUnchanged.tag = 2
+            assumeUnchanged.state = showsAssumeUnchangedFiles ? .on : .off
             button.menu?.addItem(assumeUnchanged)
         }
         let untracked = NSMenuItem(title: "Show untracked files", action: #selector(toggleShowUntrackedFiles(_:)), keyEquivalent: "")
@@ -1037,10 +1182,92 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
             button.menu?.addItem(.separator())
         }
         let toolbar = NSMenuItem(title: "Toolbar", action: nil, keyEquivalent: "")
-        toolbar.isEnabled = false
-        toolbar.toolTip = "Per-item toolbar customization is not available."
         button.menu?.addItem(toolbar)
         return button
+    }
+
+    @objc private func spellingDictionaryChanged() { CommitSpelling.apply(to: messageView) }
+
+    func textView(_ view: NSTextView, menu: NSMenu, for event: NSEvent, at charIndex: Int) -> NSMenu? {
+        guard view === messageView else { return menu }
+        for (offset, item) in CommitSpelling.menuItems(for: view, at: charIndex, target: self, replace: #selector(replaceMisspelledWord(_:)),
+                                                       add: #selector(addWordToDictionary(_:)), ignore: #selector(ignoreMisspelledWord(_:)),
+                                                       remove: #selector(removeWordFromDictionary(_:))).enumerated() {
+            menu.insertItem(item, at: offset)
+        }
+        menu.addItem(.separator())
+        menu.addItem(CommitSpelling.dictionaryMenuItem(target: self, action: #selector(selectSpellingDictionary(_:))))
+        let completion = NSMenuItem(title: "Provide auto completion", action: #selector(toggleAutoCompletion(_:)), keyEquivalent: "")
+        completion.target = self
+        completion.state = settings.preferences.provideAutocompletion ? .on : .off
+        menu.addItem(completion)
+        return menu
+    }
+
+    @objc private func toggleAutoCompletion(_ sender: NSMenuItem) {
+        var preferences = settings.preferences
+        preferences.provideAutocompletion.toggle()
+        settings.save(preferences)
+        messageView.isAutomaticTextCompletionEnabled = preferences.provideAutocompletion
+    }
+
+    @objc private func replaceMisspelledWord(_ sender: NSMenuItem) {
+        guard let values = sender.representedObject as? [Any], let range = (values.first as? NSValue)?.rangeValue,
+              let replacement = values.last as? String, messageView.shouldChangeText(in: range, replacementString: replacement) else { return }
+        messageView.replaceCharacters(in: range, with: replacement)
+        messageView.didChangeText()
+    }
+
+    @objc private func addWordToDictionary(_ sender: NSMenuItem) {
+        guard let word = sender.representedObject as? String else { return }
+        NSSpellChecker.shared.learnWord(word)
+        messageView.checkTextInDocument(nil)
+    }
+
+    @objc private func ignoreMisspelledWord(_ sender: NSMenuItem) {
+        guard let word = sender.representedObject as? String else { return }
+        NSSpellChecker.shared.ignoreWord(word, inSpellDocumentWithTag: messageView.spellCheckerDocumentTag)
+        messageView.checkTextInDocument(nil)
+    }
+
+    @objc private func removeWordFromDictionary(_ sender: NSMenuItem) {
+        guard let word = sender.representedObject as? String else { return }
+        NSSpellChecker.shared.unlearnWord(word)
+        messageView.checkTextInDocument(nil)
+    }
+
+    @objc private func selectSpellingDictionary(_ sender: NSMenuItem) {
+        guard let name = sender.representedObject as? String else { return }
+        AppSettingsStore.shared.spellingDictionary = name
+    }
+
+    @objc private func toggleFileDiscovery(_ sender: NSMenuItem) {
+        switch sender.tag {
+        case 0: showsIgnoredFiles.toggle(); sender.state = showsIgnoredFiles ? .on : .off
+        case 1: showsSkipWorktreeFiles.toggle(); sender.state = showsSkipWorktreeFiles ? .on : .off
+        case 2: showsAssumeUnchangedFiles.toggle(); sender.state = showsAssumeUnchangedFiles ? .on : .off
+        default: stagedShowsSkipWorktreeFiles.toggle(); sender.state = stagedShowsSkipWorktreeFiles ? .on : .off
+        }
+        reloadChanges(preserveMessage: true)
+    }
+
+    @objc private func toggleFileToolbarItem(_ sender: NSMenuItem) {
+        guard let name = sender.representedObject as? String else { return }
+        var preferences = settings.fileStatusListPreferences
+        if preferences.hiddenToolbarItems.contains(name) { preferences.hiddenToolbarItems.removeAll { $0 == name } }
+        else { preferences.hiddenToolbarItems.append(name) }
+        settings.saveFileStatusListPreferences(preferences)
+        applyFileToolbarVisibility()
+    }
+
+    private func applyFileToolbarVisibility() {
+        let hidden = Set(settings.fileStatusListPreferences.hiddenToolbarItems)
+        for items in fileToolbarItems.values {
+            for item in items { item.view.isHidden = hidden.contains(item.name) }
+        }
+        for menu in fileToolbarMenus {
+            for item in menu.items { item.state = (item.representedObject as? String).map { hidden.contains($0) ? .off : .on } ?? .off }
+        }
     }
 
     private func transferToolbar(unstageAll: NSButton, unstage: NSButton, stage: NSButton, stageAll: NSButton) -> NSView {
@@ -1462,14 +1689,18 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
                 commitState = loadedCommitState
                 if preserveMessage {
                     messageView.string = preservedMessage
+                } else if !composesMessage {
+                    messageView.string = loadedCommitState.loadedTemplate ?? ""
+                    usingTemplate = loadedCommitState.loadedTemplate != nil
                 } else if draft == nil, commandLineMessage == nil, activeSpecialKind == nil, !loadedCommitState.message.isEmpty {
                     messageView.string = loadedCommitState.message
                     usingTemplate = loadedCommitState.loadedTemplate != nil
                 }
+                updateMessageWatermark()
                 if draft == nil, initialMode == .normal, loadedCommitState.rememberedAmend {
                     amend.state = .on
                     selectedCommitMode = .amend
-                    if messageView.string.isEmpty { messageView.string = headMessage() }
+                    if composesMessage, messageView.string.isEmpty { messageView.string = headMessage() }
                     modeChanged()
                 }
                 configureMessageMenu()
@@ -1481,7 +1712,15 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
                 manageTrackingButton.toolTip = context.branches.first(where: \.isCurrent).map {
                     "Change the remote and merge branch tracked by ‘\($0.name)’"
                 }
-                unstaged = worktreeValue.files
+                var discovered: [ChangedFile] = []
+                if showsIgnoredFiles || showsAssumeUnchangedFiles || showsSkipWorktreeFiles,
+                   let files = source as? any RepositoryFileStatusDataSource {
+                    let existing = Set(worktreeValue.files.map(\.path))
+                    discovered = try await files.workingTreeDiscoveryFiles(ignored: showsIgnoredFiles, assumeUnchanged: showsAssumeUnchangedFiles,
+                                                                         skipWorktree: showsSkipWorktreeFiles).filter { !existing.contains($0.path) }
+                    guard !Task.isCancelled else { return }
+                }
+                unstaged = worktreeValue.files + discovered
                 staged = indexValue.files
                 reloadFileTrees(preserveSelection: false)
                 restoreSelection(path: unstagedSelection, in: unstagedTable)
@@ -1509,6 +1748,7 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
 
     @objc private func manageTracking() {
         guard let branch = repositoryContext?.branches.first(where: \.isCurrent)?.name else { return }
+        refreshPushTargetOnFocus = true
         onManageRemotes?(nil, branch)
     }
 
@@ -1558,9 +1798,9 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
             defer { actionTask = nil; updateButtonStates() }
             do {
                 status.stringValue = stage ? "Staging…" : "Unstaging…"
-                _ = try await (stage ? source.stage(paths: paths) : source.unstage(paths: paths))
+                _ = try await (stage ? source.stage(paths: paths, showErrors: settings.preferences.showErrorsWhenStagingFiles) : source.unstage(paths: paths))
                 reloadChanges(preserveMessage: true, preferredPath: paths.first)
-            } catch { await showOperationError(error, title: stage ? "Stage failed" : "Unstage failed") }
+            } catch { await stagingFailed(error, stage: stage, count: paths.count) }
         }
     }
 
@@ -1575,16 +1815,28 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
             defer { actionTask = nil; updateButtonStates() }
             do {
                 status.stringValue = stage ? "Staging all…" : "Unstaging all…"
+                let showErrors = settings.preferences.showErrorsWhenStagingFiles
                 if filter.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    _ = try await (stage ? source.stageAll() : source.unstageAll())
+                    _ = try await (stage ? source.stageAll(showErrors: showErrors) : source.unstageAll())
                 } else {
                     guard !visiblePaths.isEmpty else { throw RepositoryMutationError.noPaths }
-                    _ = try await (stage ? source.stage(paths: visiblePaths) : source.unstage(paths: visiblePaths))
+                    _ = try await (stage ? source.stage(paths: visiblePaths, showErrors: showErrors) : source.unstage(paths: visiblePaths))
                 }
                 if stage { unstagedFilter.stringValue = "" } else { stagedFilter.stringValue = "" }
                 reloadChanges(preserveMessage: true, preferredPath: preferredPath)
-            } catch { await showOperationError(error, title: stage ? "Stage failed" : "Unstage failed") }
+            } catch { await stagingFailed(error, stage: stage, count: visiblePaths.count) }
         }
+    }
+
+    private func stagingFailed(_ error: Error, stage: Bool, count: Int) async {
+        guard stage, !(error is CancellationError) else {
+            await showOperationError(error, title: stage ? "Stage failed" : "Unstage failed")
+            return
+        }
+        if settings.preferences.showErrorsWhenStagingFiles {
+            await showOperationError(error, title: "Stage Details")
+        }
+        reloadChanges(preserveMessage: true)
     }
 
     private func applySelectedHunk(lineID: String, direction: RepositoryHunkDirection) {
@@ -1654,7 +1906,7 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
     @objc private func amendChanged() {
         if amend.state == .off { resetAuthor.state = .off }
         selectedCommitMode = amend.state == .on ? .amend : .normal
-        if amend.state == .on, messageView.string.isEmpty { messageView.string = headMessage() }
+        if composesMessage, amend.state == .on, messageView.string.isEmpty { messageView.string = headMessage() }
         modeChanged()
     }
 
@@ -1666,12 +1918,14 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
 
     private func applySpecialCommitState() {
         let isSpecial = activeSpecialKind != nil
-        messageView.isEditable = !isSpecial
-        messageMenu.isEnabled = !isSpecial
-        templatesMenu.isEnabled = !isSpecial
+        let canChangeMessage = composesMessage && !isSpecial
+        messageView.isEditable = canChangeMessage
+        messageMenu.isEnabled = canChangeMessage
+        templatesMenu.isEnabled = canChangeMessage
         amend.isHidden = isSpecial
         amendPanel.isHidden = isSpecial || currentCommitMode == .normal
-        modifyCommitMessageButton.isHidden = !isSpecial
+        modifyCommitMessageButton.isHidden = !(composesMessage && isSpecial)
+        updateMessageWatermark()
     }
 
     @objc private func refreshChanges() { reloadChanges(preserveMessage: true) }
@@ -1720,8 +1974,8 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
             let originalMutationState = try? await source.loadMutationState()
             do {
                 let message = messageView.string
-                guard !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                      !(usingTemplate && message == commitState?.loadedTemplate) else {
+                guard !composesMessage || (!message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                      && !(usingTemplate && message == commitState?.loadedTemplate)) else {
                     status.stringValue = "Please enter a commit message."
                     commitWindow.makeFirstResponder(messageView)
                     return
@@ -1769,7 +2023,7 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
                 }
 
                 let validationContext = validationContext(for: message)
-                let issues = CommitMessageValidator.issues(
+                let issues = !composesMessage ? [] : CommitMessageValidator.issues(
                     in: message,
                     preferences: settings.commitPreferences.validation,
                     skipRegularExpression: validationContext.skipRegularExpression,
@@ -1791,7 +2045,8 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
                     gpgSigning: gpgSigning,
                     messageEncoding: commitState?.commitEncoding,
                     usingTemplate: usingTemplate,
-                    ensureSecondLineEmpty: settings.commitPreferences.ensureSecondLineEmpty
+                    ensureSecondLineEmpty: settings.commitPreferences.ensureSecondLineEmpty,
+                    composesMessage: composesMessage
                 )
                 commitButton.isEnabled = false
                 commitAndPushButton.isEnabled = false
@@ -1810,7 +2065,7 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
                 repositoryContext = repositoryState.commitContext
                 networkContext = repositoryState.networkContext
                 var preferences = settings.commitPreferences
-                preferences.lastCommitMessage = message
+                if composesMessage { preferences.lastCommitMessage = message }
                 settings.saveCommitPreferences(preferences)
                 noVerify = false
                 usingTemplate = false
@@ -2161,6 +2416,7 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
     }
 
     private func updateButtonStates() {
+        updateMessageWatermark()
         let busy = actionTask != nil || loadTask != nil
         let conflicts = !(commitState?.mutationState.conflictedPaths.isEmpty ?? true)
         commitButton.title = conflicts ? "Solve conflicts" : "Commit"
@@ -2283,7 +2539,10 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
     }
 
     private func updateStatus() {
-        let branch = commitState?.mutationState.currentBranch ?? "detached HEAD"
+        var branch = commitState?.mutationState.currentBranch ?? "detached HEAD"
+        if let tracking = commitState?.branchTracking {
+            branch += " \u{2192} \(CommitPushTarget.describe(tracking))"
+        }
         let encoding = commitState?.commitEncoding ?? "UTF-8"
         let committer = commitState?.committer ?? "Loading author…"
         status.stringValue = "\(committer)   \(branch)   \(staged.count) staged / \(unstaged.count) unstaged   \(encoding)"
@@ -2314,7 +2573,12 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
         }
     }
 
+    private func updateMessageWatermark() {
+        messageWatermark.isHidden = !messageView.string.isEmpty
+    }
+
     func textDidChange(_ notification: Notification) {
+        updateMessageWatermark()
         if !isFormattingMessage {
             let original = messageView.string
             let formatted = CommitMessageAutoFormatter.format(
@@ -2343,6 +2607,7 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
         forPartialWordRange charRange: NSRange,
         indexOfSelectedItem index: UnsafeMutablePointer<Int>?
     ) -> [String] {
+        guard settings.preferences.provideAutocompletion else { return [] }
         var completions = Set(words)
         completions.formUnion([
             "Co-authored-by: ",
@@ -2434,7 +2699,9 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
 
     func windowDidBecomeKey(_ notification: Notification) {
         guard didBecomeKeyOnce else { didBecomeKeyOnce = true; return }
-        if settings.commitPreferences.refreshOnFocus, actionTask == nil, !commitDiffView.isResetConfirmationOpen {
+        let pushTargetChanged = refreshPushTargetOnFocus
+        refreshPushTargetOnFocus = false
+        if settings.commitPreferences.refreshOnFocus || pushTargetChanged, actionTask == nil, !commitDiffView.isResetConfirmationOpen {
             reloadChanges(preserveMessage: true)
         }
     }
@@ -2483,6 +2750,7 @@ private final class CommitDiffView: NSView, NSTableViewDataSource, NSTableViewDe
     private let trackingView = DiffTrackingView()
     private let hoverToolbar = DiffViewerToolbar(preferences: AppSettingsStore.shared.preferencesForNewFileViewer())
     private var presentations: [DiffLinePresentation] = []
+    private var syntaxStates: [Int?] = []
     private var gutterMetrics = DiffGutterMetrics.empty
     private var caretRow = -1
     private var searchQuery = ""
@@ -2635,6 +2903,7 @@ private final class CommitDiffView: NSView, NSTableViewDataSource, NSTableViewDe
         self.direction = direction
         patchingAllowed = diff?.appearance ?? .patch == .patch
         presentations = DiffLinePresentation.build(from: diff?.lines ?? [], appearance: diff?.appearance ?? .patch)
+        syntaxStates = DiffSyntaxHighlighter.lineStates(diff?.lines ?? [], filePath: file.path)
         occurrences.row = -1; occurrences.column = -1
         gutterMetrics = DiffGutterMetrics(lines: diff?.lines ?? [], font: AppSettingsStore.shared.diffGutterFont)
         caretRow = -1
@@ -2793,7 +3062,8 @@ private final class CommitDiffView: NSView, NSTableViewDataSource, NSTableViewDe
             showsSyntaxHighlighting: preferences.showsSyntaxHighlighting,
             filePath: file?.path,
             appearance: diff?.appearance ?? .patch,
-            highlightTerm: occurrences.term
+            highlightTerm: occurrences.term,
+            openSpan: syntaxStates.indices.contains(row) ? syntaxStates[row] : nil
         )
         return cell
     }
@@ -2830,6 +3100,9 @@ private final class CommitDiffView: NSView, NSTableViewDataSource, NSTableViewDe
             persistPreferences(reloadDiff: true)
         case "Treat all files as text":
             preferences.treatsAllFilesAsText.toggle()
+            persistPreferences(reloadDiff: true)
+        case let value where value.hasPrefix("Encoding:"):
+            preferences.textEncoding = RepositoryTextEncoding(rawValue: String(value.dropFirst("Encoding:".count))) ?? .automatic
             persistPreferences(reloadDiff: true)
         default:
             break

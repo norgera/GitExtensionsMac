@@ -84,11 +84,7 @@ enum ResetDialogs {
         let remember = NSButton(checkboxWithTitle: "Remember my answer", target: nil, action: nil)
         alert.accessoryView = remember
         let update = await alert.beginSheetModal(for: owner) == .alertFirstButtonReturn
-        if remember.state == .on {
-            var preferences = AppSettingsStore.shared.checkoutBranchPreferences
-            preferences.updateSubmodulesOnCheckout = update
-            AppSettingsStore.shared.saveCheckoutBranchPreferences(preferences)
-        }
+        if remember.state == .on { AppSettingsStore.shared.rememberUpdateSubmodulesOnCheckout(update) }
         return update
     }
 

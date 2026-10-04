@@ -28,6 +28,7 @@ final class BlameViewController: NSViewController, NSTableViewDataSource, NSTabl
     private var scrollObservers: [NSObjectProtocol] = []
     private let messageLabel = NSTextField(wrappingLabelWithString: "")
     private(set) var blame: BlameResult?
+    private var syntaxStates: [Int?] = []
     private(set) var blameID: ObjectID?
     private(set) var fileName: String?
     private var encoding: RepositoryTextEncoding?
@@ -275,6 +276,9 @@ final class BlameViewController: NSViewController, NSTableViewDataSource, NSTabl
 
     private func process(_ result: BlameResult, revision: ObjectID, file: String, line: Int) {
         blame = result
+        syntaxStates = DiffSyntaxHighlighter.lineStates(result.lines.enumerated().map {
+            DiffLine(id: String($0.offset), oldLineNumber: nil, newLineNumber: $0.offset + 1, kind: .context, text: $0.element.text)
+        }, filePath: file)
         gutterTexts = Self.gutter(result, fileName: file, preferences: preferences)
         ageBuckets = Self.ageBuckets(result.lines.map(\.commit.authorTime), now: Date())
         let font = AppSettingsStore.shared.codeFont
@@ -385,7 +389,8 @@ final class BlameViewController: NSViewController, NSTableViewDataSource, NSTabl
             let diffLine = DiffLine(id: String(row), oldLineNumber: nil, newLineNumber: row + 1, kind: .context, text: line.text)
             let text = DiffSyntaxHighlighter.attributedText(for: diffLine, displayText: line.text,
                                                             enabled: syntaxEnabled,
-                                                            filePath: fileName ?? "")
+                                                            filePath: fileName ?? "",
+                                                            openSpan: syntaxStates.indices.contains(row) ? syntaxStates[row] : nil)
             let attributed = NSMutableAttributedString(attributedString: text)
             FileViewerOccurrences.highlight(occurrences.term, in: attributed)
             attributed.addAttribute(.font, value: font, range: NSRange(location: 0, length: attributed.length))

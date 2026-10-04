@@ -174,7 +174,7 @@ final class BuiltInPluginDialog: NSWindowController, NSWindowDelegate, NSTableVi
             button("Gource project", #selector(gourceProject), in: browse)
             button("Help", #selector(gourceHelp), in: browse); stack.addArrangedSubview(browse)
             stack.addArrangedSubview(NSTextField(wrappingLabelWithString: "Install the native macOS Gource binary and select it above. $(AVATARS) uses the shared avatar provider and its privacy settings."))
-        case .backgroundFetch, .compileSubmodules: break
+        case .backgroundFetch, .compileSubmodules, .impact: break
         }
         stack.addArrangedSubview(status)
         let actions = NSStackView(); actions.orientation = .horizontal; actions.spacing = 8

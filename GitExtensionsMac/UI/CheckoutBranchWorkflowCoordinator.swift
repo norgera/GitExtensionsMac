@@ -489,33 +489,30 @@ final class CheckoutBranchWorkflowCoordinator {
         alert.informativeText = "Apply the automatically stashed changes again?"
         alert.addButton(withTitle: "Apply")
         alert.addButton(withTitle: "Keep stash")
+        alert.addButton(withTitle: "Cancel")
         let remember = NSButton(checkboxWithTitle: "Remember my answer", target: nil, action: nil)
         alert.accessoryView = remember
-        let apply = await response(alert, owner: owner) == .alertFirstButtonReturn
-        if remember.state == .on {
+        let answer = StashReapplyAnswer(await response(alert, owner: owner))
+        if let remembered = answer.rememberedChoice(remember: remember.state == .on) {
             var preferences = AppSettingsStore.shared.checkoutBranchPreferences
-            preferences.autoPopStash = apply ? .always : .never
+            preferences.autoPopStash = remembered ? .always : .never
             AppSettingsStore.shared.saveCheckoutBranchPreferences(preferences)
         }
-        return apply
+        return answer.shouldApply
     }
 
     private func shouldUpdateSubmodules(context: RepositoryBranchContext, owner: NSWindow) async -> Bool {
         guard !context.submodules.isEmpty else { return false }
-        if let value = AppSettingsStore.shared.checkoutBranchPreferences.updateSubmodulesOnCheckout { return value }
+        if let value = AppSettingsStore.shared.effectiveUpdateSubmodulesOnCheckout { return value }
         let alert = NSAlert()
-        alert.messageText = "Update submodules"
-        alert.informativeText = "Update and initialize submodules after checkout?"
-        alert.addButton(withTitle: "Update")
-        alert.addButton(withTitle: "Not now")
-        let remember = NSButton(checkboxWithTitle: "Remember my answer", target: nil, action: nil)
+        alert.messageText = "Update submodules on checkout?"
+        alert.informativeText = "Since this repository has submodules, it's necessary to update them on every checkout.\n\nThis will just checkout on the submodule the commit determined by the superproject."
+        alert.addButton(withTitle: "Yes")
+        alert.addButton(withTitle: "No")
+        let remember = NSButton(checkboxWithTitle: "Remember choice", target: nil, action: nil)
         alert.accessoryView = remember
         let update = await response(alert, owner: owner) == .alertFirstButtonReturn
-        if remember.state == .on {
-            var preferences = AppSettingsStore.shared.checkoutBranchPreferences
-            preferences.updateSubmodulesOnCheckout = update
-            AppSettingsStore.shared.saveCheckoutBranchPreferences(preferences)
-        }
+        if remember.state == .on { AppSettingsStore.shared.rememberUpdateSubmodulesOnCheckout(update) }
         return update
     }
 

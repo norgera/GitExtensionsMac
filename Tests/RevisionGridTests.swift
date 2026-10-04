@@ -29,7 +29,7 @@ enum RevisionGridTests {
         let head = testObjectID("head")
         var filter = RevisionGridFilter()
         check(filter.revisionArguments(currentCheckout: head, defaultCommitsLimit: 100, showStashes: true, showGitNotes: false, showSessionRefs: false)
-              == ["--max-count=100", "--exclude=refs/notes/commits", "--exclude=refs/sessions/**", "--exclude=refs/copilot/checkpoints/**", "--all"],
+              == ["--max-count=100", "--exclude=refs/notes/commits", "--exclude=refs/agents/**", "--exclude=refs/sessions/**", "--exclude=refs/copilot/checkpoints/**", "--all"],
               "filter: all branches excludes notes/session refs and keeps stashes")
         check(filter.revisionArguments(currentCheckout: head, defaultCommitsLimit: 0, showStashes: false, showGitNotes: true, showSessionRefs: true)
               == ["--exclude=refs/stash", "--all"], "filter: hidden stashes are excluded, notes/session refs included")
@@ -54,7 +54,7 @@ enum RevisionGridTests {
         filter.byCommitsLimit = true; filter.commitsLimit = 5
         check(filter.revisionArguments(currentCheckout: head, defaultCommitsLimit: 100, showStashes: true, showGitNotes: false, showSessionRefs: false)
               == ["--max-count=5", "--no-merges", "--author=Ann", "--regexp-ignore-case", "-Gneedle", "--grep=fix", "--parents",
-                  "--first-parent", "--reflog", "--exclude=refs/notes/commits", "--exclude=refs/sessions/**",
+                  "--first-parent", "--reflog", "--exclude=refs/notes/commits", "--exclude=refs/agents/**", "--exclude=refs/sessions/**",
                   "--exclude=refs/copilot/checkpoints/**", "--all", "--boundary"],
               "filter: upstream option order with boundary for message+diff filters")
 

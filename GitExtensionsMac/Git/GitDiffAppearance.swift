@@ -209,9 +209,9 @@ package enum GitDiffAppearance {
         return colorConfiguration(configured: configured, reverse: reverse) + arguments
     }
 
-    package static func parseColoredPatch(_ output: Data, file: ChangedFile) -> FileDiff? {
-        let parsed = AnsiEscapeParser.parse(String(decoding: output, as: UTF8.self))
-        guard let diff = GitOutputParser.parseUnifiedDiff(Data(parsed.text.utf8), files: [file])[file.id] else { return nil }
+    package static func parseColoredPatch(_ output: Data, file: ChangedFile, contentEncoding: String.Encoding = .utf8) -> FileDiff? {
+        let parsed = AnsiEscapeParser.parse(GitOutputParser.decodeDiff(output, contentEncoding: contentEncoding))
+        guard let diff = GitOutputParser.parseUnifiedDiff(text: parsed.text, files: [file], contentEncoding: contentEncoding)[file.id] else { return nil }
         var start = 0
         let lines = diff.lines.map { line -> DiffLine in
             let prefix = [.context, .addition, .deletion].contains(line.kind) && !line.text.hasPrefix("\\ No newline") ? 1 : 0
@@ -220,7 +220,7 @@ package enum GitDiffAppearance {
             start += length + prefix + 1
             return DiffLine(id: line.id, oldLineNumber: line.oldLineNumber, newLineNumber: line.newLineNumber, kind: line.kind, text: line.text, styles: styles)
         }
-        return FileDiff(id: diff.id, fileID: file.id, lines: lines)
+        return FileDiff(id: diff.id, fileID: file.id, lines: lines, contentEncoding: contentEncoding)
     }
 
     package static func difftasticArguments(revisions: [String], paths: [String], noIndex: Bool, options: FileDiffOptions) -> [String] {
@@ -245,8 +245,8 @@ package enum GitDiffAppearance {
         max(88, min(200, Int(viewerWidth) / 7)) / 2 * 2
     }
 
-    package static func parseWordDiff(_ output: Data, file: ChangedFile) -> FileDiff {
-        let parsed = AnsiEscapeParser.parse(String(decoding: output, as: UTF8.self))
+    package static func parseWordDiff(_ output: Data, file: ChangedFile, contentEncoding: String.Encoding = .utf8) -> FileDiff {
+        let parsed = AnsiEscapeParser.parse(GitOutputParser.decodeDiff(output, contentEncoding: contentEncoding))
         let text = parsed.text as NSString
         var lines: [DiffLine] = []
         var left = 0
@@ -284,7 +284,7 @@ package enum GitDiffAppearance {
             }
             lineStart += min(fullLength + 1, text.length - lineStart)
         }
-        return FileDiff(id: file.id, fileID: file.id, lines: lines, appearance: .gitWordDiff)
+        return FileDiff(id: file.id, fileID: file.id, lines: lines, appearance: .gitWordDiff, contentEncoding: contentEncoding)
     }
 
     private static func isGitWordMatch(red: Bool, line: String, start: Int, length: Int, markers: [DiffTextStyle]) -> Bool {
@@ -517,9 +517,7 @@ package enum GitResetLinePatchBuilder {
             emitted = true
         }
         guard emitted else { return nil }
-        var text = output.joined(separator: "\n")
-        if !text.hasSuffix("\n") { text.append("\n") }
-        return Data(text.utf8)
+        return GitOutputParser.encodePatch(output, contentEncoding: diff.contentEncoding)
     }
 
     private static func newStart(_ header: String) -> Int? {

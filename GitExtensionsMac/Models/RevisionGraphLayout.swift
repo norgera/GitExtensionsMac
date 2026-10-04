@@ -74,6 +74,8 @@ struct RevisionGraphLayout: Hashable, Sendable {
         let bottomLane: Int?
         let colorIndex: Int
         let isRelative: Bool
+        let childID: RevisionID
+        let parentID: RevisionID
         let role: Role
         let diagonal: Diagonal
         let previousDiagonal: Diagonal?
@@ -92,6 +94,7 @@ struct RevisionGraphLayout: Hashable, Sendable {
         let isRelative: Bool
         let commitKind: Commit.Kind
         let edges: [Edge]
+        let segmentParentIDs: [RevisionID]
     }
 
     let rows: [Row]
@@ -642,7 +645,8 @@ private final class GraphBuilder {
             laneCount: min(Layout.maximumVisibleLanes, max(1, state.laneCount)),
             hasReferences: commit.references.contains { $0.kind != .stash || $0.name == "stash@{0}" },
             isHEAD: commit.isHEAD, isRelative: relativeIDs.contains(commit.id), commitKind: commit.kind,
-            edges: makeEdges(for: state, at: index, previous: previous, next: next))
+            edges: makeEdges(for: state, at: index, previous: previous, next: next),
+            segmentParentIDs: state.segments.map(\.parentID))
     }
 
 
@@ -1137,6 +1141,8 @@ private final class GraphBuilder {
                     colorIndex: colorBySegment[segment].map(\.index)
                         ?? Self.chooseColor(seed: Self.objectIDHash(segment.childID), avoiding: [], count: configuration.colorCount),
                     isRelative: relativeIDs.contains(segment.childID),
+                    childID: segment.childID,
+                    parentID: segment.parentID,
                     role: role,
                     diagonal: diagonal(for: current),
                     previousDiagonal: previousDiagonal,

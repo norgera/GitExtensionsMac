@@ -16,7 +16,7 @@ enum BuiltInPluginTests {
     }
     static func models() throws {
         let plugins = BuiltInPlugins.make()
-        check(plugins.count == 9 && Set(plugins.map(\.identifier)).count == 9, "nine distinct pinned identities")
+        check(plugins.count == 10 && Set(plugins.map(\.identifier)).count == 10, "ten distinct pinned identities")
         check(plugins.filter { !$0.requiresRepository }.map(\.name) == ["Proxy Switcher"], "repository eligibility")
         for plugin in plugins { check(type(of: plugin).init().identifier == plugin.identifier, "child repository plugin identity") }
         let threshold = BuiltInPluginKind.largeFiles.settings[0]
@@ -219,7 +219,7 @@ enum BuiltInPluginTests {
     static func presentation() async throws {
         let host = GitExtensionPluginHost(refresh: {}, navigate: { _ in }, readSetting: { _, _ in nil }, writeSetting: { _, _, _ in })
         for plugin in BuiltInPlugins.make() {
-            if [.backgroundFetch, .compileSubmodules].contains(plugin.kind) { continue }
+            if [.backgroundFetch, .compileSubmodules, .impact].contains(plugin.kind) { continue }
             let controller = try BuiltInPluginDialog(plugin: plugin, host: host)
             check(controller.window?.title == plugin.name && controller.window?.contentView != nil, "native dialog \(plugin.name)")
             controller.close()

@@ -790,9 +790,16 @@ final class SettingsViewController: NSViewController, NSOutlineViewDataSource, N
     private var pullDraft: PullPreferences
     private var creationDraft: RepositoryCreationPreferences
     private var checkoutDraft: CheckoutBranchPreferences
+    private var confirmationDraft: ConfirmationPreferences
+    private var showDiffForAllParentsDraft: Bool
+    private var showGitGrepDraft: Bool
     private var treeDraft: RepositoryTreePreferences
+    private var revisionSortDraft: RevisionSortOrder
     private var tagDraft: TagPreferences
     private var gridTooltipsDraft: Bool
+    private var relativeDateDraft: Bool
+    private var showGpgInformationDraft: Bool
+    private var spellingDictionaryDraft: String
     private var fileHistoryDraft: RevisionGridPreferences
     private var showRepoCurrentBranchDraft = AppSettingsStore.shared.recentRepositorySettings.showCurrentBranch
     private var confirmUndoLastCommitDraft = !UserDefaults.standard.bool(forKey: GitUICommands.dontConfirmUndoLastCommitKey)
@@ -876,9 +883,16 @@ final class SettingsViewController: NSViewController, NSOutlineViewDataSource, N
         pullDraft = store.pullPreferences
         creationDraft = store.repositoryCreationPreferences
         checkoutDraft = store.checkoutBranchPreferences
+        confirmationDraft = store.confirmationPreferences
+        showDiffForAllParentsDraft = store.fileStatusListPreferences.showDiffForAllParents
+        showGitGrepDraft = store.fileStatusListPreferences.showFindInCommitFilesGitGrep
         treeDraft = store.repositoryTreePreferences
+        revisionSortDraft = store.revisionGridRuntime.sortOrder
         tagDraft = store.tagPreferences
         gridTooltipsDraft = store.revisionGridPreferences.showRevisionGridTooltips
+        relativeDateDraft = store.revisionGridPreferences.relativeDate
+        showGpgInformationDraft = store.revisionGridPreferences.showGpgInformation
+        spellingDictionaryDraft = store.spellingDictionary
         fileHistoryDraft = store.revisionGridPreferences
         draft = store.preferences
         pushDraft = store.pushPreferences
@@ -1176,10 +1190,21 @@ final class SettingsViewController: NSViewController, NSOutlineViewDataSource, N
         case "git_config", "git_advanced":
             showGitConfiguration(advanced: node.id == "git_advanced")
         case "sorting":
-            content.addArrangedSubview(popup("Order refs by:", values: RepositoryTreeSortBy.allCases.map(\.title), selected: treeDraft.sortBy.title) { value in
+            let revisionSort = popup("Sort revisions by:", values: RevisionSortOrder.allCases.map(\.settingsTitle), selected: revisionSortDraft.settingsTitle) { value in
+                self.revisionSortDraft = RevisionSortOrder.allCases.first { $0.settingsTitle == value } ?? .gitDefault
+            }
+            revisionSort.toolTip = "Sorting revisions may delay rendering of the revision graph."
+            content.addArrangedSubview(revisionSort)
+            content.addArrangedSubview(popup("Sort branches by:", values: RepositoryTreeSortBy.allCases.map(\.title), selected: treeDraft.sortBy.title) { value in
                 self.treeDraft.sortBy = RepositoryTreeSortBy.allCases.first { $0.title == value } ?? .gitDefault
             })
-            content.addArrangedSubview(popup("Sort direction:", values: RepositoryTreeSortOrder.allCases.map(\.rawValue), selected: treeDraft.sortOrder.rawValue) { self.treeDraft.sortOrder = RepositoryTreeSortOrder(rawValue: $0) ?? .ascending })
+            content.addArrangedSubview(popup("Order branches:", values: RepositoryTreeSortOrder.allCases.map(\.rawValue), selected: treeDraft.sortOrder.rawValue) { self.treeDraft.sortOrder = RepositoryTreeSortOrder(rawValue: $0) ?? .ascending })
+            let branches = pathField("Prioritized branches:", value: treeDraft.prioritizedBranchNames) { self.treeDraft.prioritizedBranchNames = $0 }
+            branches.toolTip = "Regex to prioritize branch names in the left panel and commit info.\nThe branches matching the pattern will be shown before the others.\nSeparate the priorities with ';'."
+            content.addArrangedSubview(branches)
+            let remotes = pathField("Prioritized remotes:", value: treeDraft.prioritizedRemoteNames) { self.treeDraft.prioritizedRemoteNames = $0 }
+            remotes.toolTip = "Regex to prioritize remote names in the left panel and commit info.\nThe remotes matching the pattern will be shown before the others.\nSeparate the priorities with ';'."
+            content.addArrangedSubview(remotes)
         case "fonts":
             content.addArrangedSubview(note("Fonts (restart required). Native macOS fonts replace Windows-specific font families."))
             content.addArrangedSubview(toggle("Show end-of-line markers as glyph instead of \\r\\n etc.", value: fontDraft.showEolMarkerAsGlyph) { self.fontDraft.showEolMarkerAsGlyph = $0 })
@@ -1201,6 +1226,15 @@ final class SettingsViewController: NSViewController, NSOutlineViewDataSource, N
         case "appearance":
             content.addArrangedSubview(popup("Theme:", values: ApplicationTheme.allCases.map(\.rawValue), selected: draft.theme.rawValue) { value in
                 self.draft.theme = ApplicationTheme(rawValue: value) ?? .system
+            })
+            content.addArrangedSubview(toggle("Show relative date instead of full date", value: relativeDateDraft) { self.relativeDateDraft = $0 })
+            content.addArrangedSubview(popup("Truncate long filenames:", values: TruncatePathMethod.allCases.map(\.rawValue), selected: draft.truncatePathMethod.rawValue) { value in
+                self.draft.truncatePathMethod = TruncatePathMethod(rawValue: value) ?? .none
+            })
+            let dictionaries = ["None"] + CommitSpelling.availableDictionaries()
+            let selectedDictionary = CommitSpelling.effectiveDictionary(spellingDictionaryDraft) ?? "None"
+            content.addArrangedSubview(popup("Dictionary for spelling checker:", values: dictionaries, selected: selectedDictionary) { value in
+                self.spellingDictionaryDraft = value == "None" ? CommitSpelling.none : value
             })
             content.addArrangedSubview(toggle("Show author's avatar in the commit info view", value: avatarDraft.showInCommitInfo) { self.avatarDraft.showInCommitInfo = $0 })
             content.addArrangedSubview(toggle("Show author's avatar in the revision graph", value: fileHistoryDraft.showAuthorAvatarColumn) { self.fileHistoryDraft.showAuthorAvatarColumn = $0 })
@@ -1257,7 +1291,9 @@ final class SettingsViewController: NSViewController, NSOutlineViewDataSource, N
         case "browse":
             content.addArrangedSubview(toggle("Show blame in diff viewer", value: blameDraft.useDiffViewerForBlame) { self.blameDraft.useDiffViewerForBlame = $0 })
             content.addArrangedSubview(toggle("Show tags in revision grid", value: tagDraft.showTagsInRevisionGrid) { self.tagDraft.showTagsInRevisionGrid = $0 })
+            content.addArrangedSubview(toggle("Show 'Find in commit files using git-grep'", value: showGitGrepDraft) { self.showGitGrepDraft = $0 })
             content.addArrangedSubview(toggle("Show revision grid tooltips", value: gridTooltipsDraft) { self.gridTooltipsDraft = $0 })
+            content.addArrangedSubview(toggle("Show GPG information", value: showGpgInformationDraft) { self.showGpgInformationDraft = $0 })
             for root in RepositoryTreeRoot.allCases {
                 content.addArrangedSubview(toggle("Show \(root.title) in repository tree", value: treeDraft.visibleRoots.contains(root)) { visible in
                     if visible { self.treeDraft.visibleRoots.insert(root) } else { self.treeDraft.visibleRoots.remove(root) }
@@ -1320,11 +1356,24 @@ final class SettingsViewController: NSViewController, NSOutlineViewDataSource, N
             content.addArrangedSubview(toggle("Use Git coloring", value: viewerDraft.useGitColoring) { self.viewerDraft.useGitColoring = $0; reverseColors.isEnabled = $0 })
             content.addArrangedSubview(reverseColors)
             content.addArrangedSubview(toggle("Enable automatic continuous scroll (without Option key)", value: draft.automaticContinuousScroll) { self.draft.automaticContinuousScroll = $0 })
+            content.addArrangedSubview(toggle("Omit uninteresting changes from combined diff", value: viewerDraft.omitUninterestingDiff) { self.viewerDraft.omitUninterestingDiff = $0 })
             content.addArrangedSubview(toggle("Open Submodule Diff in separate window", value: draft.openSubmoduleDiffInSeparateWindow) { self.draft.openSubmoduleDiffInSeparateWindow = $0 })
+            content.addArrangedSubview(toggle("Show file differences for all parents in browse dialog", value: showDiffForAllParentsDraft) {
+                self.showDiffForAllParentsDraft = $0
+            })
+            content.addArrangedSubview(toggle("Show all available difftools", value: viewerDraft.showAvailableDiffTools) { self.viewerDraft.showAvailableDiffTools = $0 })
+            content.addArrangedSubview(stepper("Vertical ruler position [chars]:", value: viewerDraft.verticalRulerPosition, range: 0...1000) { self.viewerDraft.verticalRulerPosition = $0 })
             let encodings = store.viewerEncodings(including: viewerDraft.textEncoding)
             content.addArrangedSubview(popup("Text encoding:", values: encodings.map(\.title), selected: viewerDraft.textEncoding.title) { title in self.viewerDraft.textEncoding = encodings.first { $0.title == title } ?? .automatic })
             content.addArrangedSubview(note("Apply changes the current viewer preferences. Runtime choices persist for future sessions only with Save current view settings as default; remembered context lines are persisted automatically."))
         case "commit":
+            content.addArrangedSubview(settingsGroup("Behaviour", [
+                toggle("Provide auto-completion in commit dialog", value: draft.provideAutocompletion) { self.draft.provideAutocompletion = $0 },
+                toggle("Show errors when staging files", value: draft.showErrorsWhenStagingFiles) { self.draft.showErrorsWhenStagingFiles = $0 },
+                toggle("Compose commit messages in Commit dialog\n(otherwise the message will be requested during commit)", value: draft.composeCommitMessages) {
+                    self.draft.composeCommitMessages = $0
+                }
+            ]))
             content.addArrangedSubview(settingsGroup("Commit defaults", [
                 toggle("Sign-off commit by default", value: draft.defaultSignOff) { self.draft.defaultSignOff = $0 },
                 toggle("Allow empty commit by default", value: draft.defaultAllowEmpty) { self.draft.defaultAllowEmpty = $0 },
@@ -1376,24 +1425,76 @@ final class SettingsViewController: NSViewController, NSOutlineViewDataSource, N
         case "ssh":
             content.addArrangedSubview(note("Git uses the configured SSH executable, credential helpers and the macOS SSH agent. Configure Git tools and credentials under Git → Config. PuTTY/Pageant controls are Windows-only."))
         case "advanced":
-            content.addArrangedSubview(toggle("Always show advanced options", value: pushDraft.showAdvancedOptions) { self.pushDraft.showAdvancedOptions = $0 })
+            content.addArrangedSubview(settingsGroup("Checkout", [
+                toggle("Always show checkout dialog", value: checkoutDraft.alwaysShowDialog) { self.checkoutDraft.alwaysShowDialog = $0 },
+                toggle("Use last chosen \"local changes\" action as default action.\nThis action will be performed without warning while checking out branch.",
+                       value: checkoutDraft.useDefaultLocalChangesAction) { self.checkoutDraft.useDefaultLocalChangesAction = $0 }
+            ]))
+            let symbols = [("_", "_"), ("-", "-"), ("(none)", "")]
+            let symbol = popup("Symbol to use:", values: symbols.map(\.0),
+                               selected: symbols.first { $0.1 == checkoutDraft.branchNameReplacement }?.0 ?? "_") { title in
+                self.checkoutDraft.branchNameReplacement = symbols.first { $0.0 == title }?.1 ?? "_"
+            }
+            (symbol as? NSStackView)?.arrangedSubviews.compactMap { $0 as? NSControl }.forEach { $0.isEnabled = checkoutDraft.autoNormaliseBranchName }
+            content.addArrangedSubview(settingsGroup("General", [
+                toggle("Don't show help images", value: draft.dontShowHelpImages) { self.draft.dontShowHelpImages = $0 },
+                toggle("Always show advanced options", value: pushDraft.showAdvancedOptions) { self.pushDraft.showAdvancedOptions = $0 },
+                toggle("Auto normalise branch name", value: checkoutDraft.autoNormaliseBranchName) { enabled in
+                    self.checkoutDraft.autoNormaliseBranchName = enabled
+                    (symbol as? NSStackView)?.arrangedSubviews.compactMap { $0 as? NSControl }.forEach { $0.isEnabled = enabled }
+                },
+                symbol
+            ]))
+            content.addArrangedSubview(settingsGroup("Commit", [
+                toggle("Push forced with lease when Commit & Push action is performed with Amend option checked", value: commitDraft.forceWithLeaseAfterAmend) {
+                    self.commitDraft.forceWithLeaseAfterAmend = $0
+                }
+            ]))
             content.addArrangedSubview(pathField("Signing key:", value: draft.signingKey) { self.draft.signingKey = $0 })
             content.addArrangedSubview(note("The Commit window can use Git's configured signing behavior, disable signing, sign with the default key, or pass this key explicitly."))
         case "confirmations":
-            content.addArrangedSubview(settingsGroup("Confirm actions — Branches", [
-                toggle("Fetch and prune all", value: pullDraft.confirmFetchAndPruneAll) { self.pullDraft.confirmFetchAndPruneAll = $0 },
-                toggle("Delete an unmerged branch", value: !checkoutDraft.dontConfirmDeleteUnmerged) { self.checkoutDraft.dontConfirmDeleteUnmerged = !$0 },
-                toggle("Check out a branch directly", value: checkoutDraft.confirmDirectCheckout) { self.checkoutDraft.confirmDirectCheckout = $0 },
-                toggle("Push a new branch for the remote", value: pushDraft.confirmNewBranch) { self.pushDraft.confirmNewBranch = $0 },
-                toggle("Add a tracking reference for newly pushed branch", value: pushDraft.confirmAddTrackingReference) { self.pushDraft.confirmAddTrackingReference = $0 }
-            ]))
-            content.addArrangedSubview(settingsGroup("Confirm actions — Commit", [
-                toggle("Amend the current commit", value: commitDraft.confirmAmend) { self.commitDraft.confirmAmend = $0 },
+            func autoPop(_ title: String, _ value: PullAutoPopPreference, _ changed: @escaping (PullAutoPopPreference) -> Void) -> NSView {
+                let titles: [PullAutoPopPreference: String] = [.ask: "Ask", .always: "Apply stash automatically", .never: "Keep stash"]
+                return popup(title, values: [.ask, .always, .never].map { titles[$0]! }, selected: titles[value]!) { selected in
+                    changed(titles.first { $0.value == selected }?.key ?? .ask)
+                }
+            }
+            content.addArrangedSubview(settingsGroup("Commits:", [
+                toggle("Amend last commit", value: commitDraft.confirmAmend) { self.commitDraft.confirmAmend = $0 },
                 toggle("Undo last commit", value: confirmUndoLastCommitDraft) { self.confirmUndoLastCommitDraft = $0 },
-                toggle("Commit while HEAD is detached", value: commitDraft.confirmDetachedHead) { self.commitDraft.confirmDetachedHead = $0 },
-                toggle("Use force-with-lease when pushing an amended commit", value: commitDraft.forceWithLeaseAfterAmend) { self.commitDraft.forceWithLeaseAfterAmend = $0 }
+                toggle("Commit when no branch is currently checked out (headless state)", value: commitDraft.confirmDetachedHead) { self.commitDraft.confirmDetachedHead = $0 },
+                toggle("Rebase on top of selected commit", value: !confirmationDraft.dontConfirmRebase) { self.confirmationDraft.dontConfirmRebase = !$0 }
             ]))
-            content.addArrangedSubview(toggle("Confirm stash drop", value: !stashDraft.dontConfirmDrop) { self.stashDraft.dontConfirmDrop = !$0 })
+            content.addArrangedSubview(settingsGroup("Branches:", [
+                toggle("Fetch and prune branches", value: pullDraft.confirmFetchAndPruneAll) { self.pullDraft.confirmFetchAndPruneAll = $0 },
+                toggle("Push a new branch for the remote", value: pushDraft.confirmNewBranch) { self.pushDraft.confirmNewBranch = $0 },
+                toggle("Add a tracking reference for newly pushed branch", value: pushDraft.confirmAddTrackingReference) { self.pushDraft.confirmAddTrackingReference = $0 },
+                toggle("Delete unmerged branches", value: !checkoutDraft.dontConfirmDeleteUnmerged) { self.checkoutDraft.dontConfirmDeleteUnmerged = !$0 },
+                toggle("Checkout branch using left panel", value: checkoutDraft.confirmDirectCheckout) { self.checkoutDraft.confirmDirectCheckout = $0 }
+            ]))
+            content.addArrangedSubview(settingsGroup("Stash:", [
+                autoPop("Apply stashed changes after successful checkout:", checkoutDraft.autoPopStash) { self.checkoutDraft.autoPopStash = $0 },
+                autoPop("Apply stashed changes after successful pull:", pullDraft.autoPopStash) { self.pullDraft.autoPopStash = $0 },
+                toggle("Drop stash", value: !stashDraft.dontConfirmDrop) { self.stashDraft.dontConfirmDrop = !$0 }
+            ]))
+            content.addArrangedSubview(settingsGroup("Rebase / conflict resolution:", [
+                toggle("Resolve conflicts", value: !confirmationDraft.dontConfirmResolveConflicts) { self.confirmationDraft.dontConfirmResolveConflicts = !$0 },
+                toggle("Commit changes after conflicts have been resolved", value: !confirmationDraft.dontConfirmCommitAfterConflictsResolved) {
+                    self.confirmationDraft.dontConfirmCommitAfterConflictsResolved = !$0
+                },
+                toggle("Confirm for the second time to abort a merge", value: !confirmationDraft.dontConfirmSecondAbortConfirmation) {
+                    self.confirmationDraft.dontConfirmSecondAbortConfirmation = !$0
+                }
+            ]))
+            content.addArrangedSubview(settingsGroup("Submodules:", [
+                popup("Update submodules on checkout:", values: ["Ask", "Yes", "No"],
+                      selected: confirmationDraft.dontConfirmUpdateSubmodulesOnCheckout.map { $0 ? "Yes" : "No" } ?? "Ask") { title in
+                    self.confirmationDraft.dontConfirmUpdateSubmodulesOnCheckout = title == "Ask" ? nil : title == "Yes"
+                }
+            ]))
+            content.addArrangedSubview(settingsGroup("Worktrees:", [
+                toggle("Switch worktree", value: !confirmationDraft.dontConfirmSwitchWorktree) { self.confirmationDraft.dontConfirmSwitchWorktree = !$0 }
+            ]))
         default:
             assertionFailure("Unregistered settings page: \(node.id)")
         }
@@ -1412,21 +1513,21 @@ final class SettingsViewController: NSViewController, NSOutlineViewDataSource, N
     private static let searchKeywords: [String: String] = [
         "application": "Checklist Git version username email editor merge tool diff tool repair save rescan check settings startup",
         "general": "Performance show number changed files artificial commits submodules status stash count ahead behind uncommitted checkout Behaviour close process dialog succeeds histogram diff algorithm untracked autostash open last working directory startup revision grid quick search timeout milliseconds maximum revisions unlimited default clone destination Pull button action update submodules checkout",
-        "appearance": "Theme system light dark show current branch names dashboard recent repositories dropdown menu author avatar image Gravatar GitHub custom template provider fallback initials cache days clear",
-        "sorting": "Order refs by sort direction natural alphabetical version Git default",
+        "appearance": "relative date full date truncate long filenames compact trim start file name only Theme system light dark show current branch names dashboard recent repositories dropdown menu author avatar image Gravatar GitHub custom template provider fallback initials cache days clear dictionary spelling checker",
+        "sorting": "Sort revisions by author date topology Sort branches by order branches natural alphabetical version Git default prioritized branches remotes regex",
         "colors": "Theme colorblind multicolor branches non relative graph gray fill ref labels alternate row background highlight authored revisions text user themes folder diff added removed context hunk line selected graph colors reset defaults",
         "fonts": "Code font application font commit font monospace font restart end of line markers glyph",
         "revision_links": "Revision links regex regular expression link caption URL enabled add remove global local distributed effective",
         "build_server": "Build server integration provider project URL credentials enabled status icon text report interval timeout global local distributed effective",
         "scripts": "Configure scripts event hooks prompts background execution context menu actions keyboard assignments",
         "hotkeys": "Keyboard shortcuts category command modifiers key override reset clear conflicts Scripts",
-        "advanced": "Always show advanced options signing key commit configured default disable sign",
-        "confirmations": "Confirm actions branches fetch prune all delete unmerged branch checkout directly push new branch tracking reference amend undo last commit detached HEAD force with lease stash drop",
+        "advanced": "Checkout always show checkout dialog use last chosen local changes action default General don't show help images always show advanced options auto normalise branch name symbol Commit push forced with lease amend signing key configured default disable sign",
+        "confirmations": "Confirm actions commits amend undo last commit headless rebase selected branches fetch prune push new branch tracking reference delete unmerged checkout left panel stash apply checkout pull drop conflict resolution resolve commit second abort merge submodules update worktrees switch worktree",
         "detailed": "Settings source get remote branches directly from remote add merge log messages count Revision graph merge lanes common parent render diagonals straighten",
-        "browse": "Browse repository window refresh status commit info revision grid search selection tags stashes branches artificial working directory index graph toolbar",
+        "browse": "Find in commit files git-grep Browse repository window refresh status commit info revision grid search selection tags stashes branches artificial working directory index graph toolbar",
         "blame": "Blame options ignore whitespace detect moved copied lines this file all files display author first date time line numbers original file path avatar",
-        "commit": "Commit dialog stage unstage untracked ignored files message amend signoff signing key spelling margin line length refresh focus remember close success stash",
-        "diff": "Diff viewer whitespace entire file context lines word moved highlighting syntax line numbers encoding BOM remember defaults reset submodule separate window toolbar font",
+        "commit": "Behaviour provide auto-completion autocompletion show errors when staging files compose commit messages requested during commit editor Commit dialog stage unstage untracked ignored files message amend signoff signing key margin line length refresh focus remember close success stash",
+        "diff": "Omit uninteresting changes combined diff all parents available difftools vertical ruler position chars Diff viewer whitespace entire file context lines word moved highlighting syntax line numbers encoding BOM remember defaults reset submodule separate window toolbar font",
         "ssh": "OpenSSH executable credential helpers macOS agent Keychain",
         "git": "Select subnodes view edit Git settings",
         "git_paths": "Git executable path newly opened repositories",
@@ -2085,10 +2186,28 @@ final class SettingsViewController: NSViewController, NSOutlineViewDataSource, N
                 }
                 store.saveBlamePreferences(blameDraft)
                 store.saveCheckoutBranchPreferences(checkoutDraft)
+                store.saveConfirmationPreferences(confirmationDraft)
+                if store.fileStatusListPreferences.showDiffForAllParents != showDiffForAllParentsDraft
+                    || store.fileStatusListPreferences.showFindInCommitFilesGitGrep != showGitGrepDraft {
+                    var fileStatus = store.fileStatusListPreferences
+                    fileStatus.showDiffForAllParents = showDiffForAllParentsDraft
+                    fileStatus.showFindInCommitFilesGitGrep = showGitGrepDraft
+                    store.saveFileStatusListPreferences(fileStatus)
+                }
+                if treeDraft != store.repositoryTreePreferences || revisionSortDraft != store.revisionGridRuntimeDefaults.sortOrder
+                    || revisionSortDraft != store.revisionGridRuntime.sortOrder {
+                    changed = true
+                }
+                if revisionSortDraft != store.revisionGridRuntime.sortOrder || revisionSortDraft != store.revisionGridRuntimeDefaults.sortOrder {
+                    store.saveRevisionSortOrder(revisionSortDraft)
+                }
                 store.saveRepositoryTreePreferences(treeDraft); store.saveTagPreferences(tagDraft)
                 UserDefaults.standard.set(!confirmUndoLastCommitDraft, forKey: GitUICommands.dontConfirmUndoLastCommitKey)
                 var gridPreferences = store.revisionGridPreferences
                 gridPreferences.showRevisionGridTooltips = gridTooltipsDraft
+                gridPreferences.relativeDate = relativeDateDraft
+                gridPreferences.showGpgInformation = showGpgInformationDraft
+                if store.spellingDictionary != spellingDictionaryDraft { store.spellingDictionary = spellingDictionaryDraft }
                 gridPreferences.useBrowseForFileHistory = fileHistoryDraft.useBrowseForFileHistory
                 gridPreferences.followRenamesInFileHistory = fileHistoryDraft.followRenamesInFileHistory
                 gridPreferences.followRenamesInFileHistoryExactOnly = fileHistoryDraft.followRenamesInFileHistoryExactOnly

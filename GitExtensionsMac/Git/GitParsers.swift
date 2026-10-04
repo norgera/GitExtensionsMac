@@ -256,18 +256,63 @@ package enum GitOutputParser {
         return result
     }
 
-    package static func parseUnifiedDiff(_ data: Data, files: [ChangedFile]) -> [String: FileDiff] {
-        let text = String(decoding: data, as: UTF8.self)
+    package static func parseUnifiedDiff(_ data: Data, files: [ChangedFile], contentEncoding: String.Encoding = .utf8) -> [String: FileDiff] {
+        parseUnifiedDiff(text: decodeDiff(data, contentEncoding: contentEncoding), files: files, contentEncoding: contentEncoding)
+    }
+
+    package static func parseUnifiedDiff(text: String, files: [ChangedFile], contentEncoding: String.Encoding) -> [String: FileDiff] {
         let sections = splitDiffSections(text)
         var result: [String: FileDiff] = [:]
         for (file, section) in zip(files, sections) {
             result[file.id] = FileDiff(
                 id: "diff:\(file.id)",
                 fileID: file.id,
-                lines: parseDiffLines(section, fileID: file.id)
+                lines: parseDiffLines(section, fileID: file.id),
+                contentEncoding: contentEncoding
             )
         }
         return result
+    }
+
+    package static func decodeDiff(_ data: Data, contentEncoding: String.Encoding) -> String {
+        guard contentEncoding != .utf8 else { return String(decoding: data, as: UTF8.self) }
+        var lines: [String] = []
+        var inBody = false
+        for raw in data.split(separator: 0x0A, omittingEmptySubsequences: false) {
+            let bytes = Data(raw)
+            let header = String(decoding: bytes, as: UTF8.self)
+            let plain = header.replacingOccurrences(of: "^(\u{1b}\\[[0-9;:]*m)+", with: "", options: .regularExpression)
+            if plain.hasPrefix("diff --git ") || plain.hasPrefix("diff --cc ") || plain.hasPrefix("diff --combined ") {
+                inBody = false
+            } else if plain.hasPrefix("@@") {
+                inBody = true
+                lines.append(header)
+                continue
+            }
+            lines.append(inBody ? (String(data: bytes, encoding: contentEncoding) ?? header) : header)
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    package static func encodePatch(_ lines: [String], contentEncoding: String.Encoding) -> Data {
+        guard contentEncoding != .utf8 else {
+            var text = lines.joined(separator: "\n")
+            if !text.hasSuffix("\n") { text.append("\n") }
+            return Data(text.utf8)
+        }
+        var data = Data()
+        var inBody = false
+        for line in lines {
+            if line.hasPrefix("diff --git ") { inBody = false }
+            if line.hasPrefix("@@") {
+                inBody = true
+                data.append(Data(line.utf8))
+            } else {
+                data.append(inBody ? (line.data(using: contentEncoding) ?? Data(line.utf8)) : Data(line.utf8))
+            }
+            data.append(0x0A)
+        }
+        return data
     }
 
     package static func parseTree(_ data: Data) throws -> [GitTreeRecord] {

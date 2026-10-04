@@ -45,10 +45,10 @@ enum FileViewerTests {
     }
 
     private static func testSyntaxDetection() {
-        expect(FileViewerSyntaxDetector.language(for: "Sources/App.swift") == .swift, "Swift extension detection")
-        expect(FileViewerSyntaxDetector.language(for: "Dockerfile") == .scripting, "filename-based detection")
-        expect(FileViewerSyntaxDetector.language(for: "config.yaml") == .data, "data-language detection")
-        expect(FileViewerSyntaxDetector.language(for: "LICENSE") == .plainText, "unknown names use plain text")
+        expect(FileViewerSyntaxRegistry.mode(for: "Sources/App.swift")?.name == "Swift", "Swift extension detection")
+        expect(FileViewerSyntaxRegistry.mode(for: ".editorconfig")?.name == "INI", "suffix-based detection")
+        expect(FileViewerSyntaxRegistry.mode(for: "config.yaml")?.name == "YAML", "YAML detection")
+        expect(FileViewerSyntaxRegistry.mode(for: "LICENSE") == nil, "unknown names use plain text")
     }
 
     private static func testDifftoolCommands() throws {

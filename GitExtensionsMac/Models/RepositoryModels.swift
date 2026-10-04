@@ -541,6 +541,7 @@ package struct ChangedFile: Identifiable, Hashable, Sendable {
     package var isUnchanged = false
     package var isSkipWorktree = false
     package var isAssumeUnchanged = false
+    package var isIgnored = false
 
     package var isStatusOnly = false
     package var isRangeDiff = false
@@ -620,12 +621,14 @@ package struct FileDiff: Identifiable, Hashable, Sendable {
     package let fileID: String
     package let lines: [DiffLine]
     package let appearance: DiffDisplayAppearance
+    package let contentEncoding: String.Encoding
 
-    package init(id: String, fileID: String, lines: [DiffLine], appearance: DiffDisplayAppearance = .patch) {
+    package init(id: String, fileID: String, lines: [DiffLine], appearance: DiffDisplayAppearance = .patch, contentEncoding: String.Encoding = .utf8) {
         self.id = id
         self.fileID = fileID
         self.lines = lines
         self.appearance = appearance
+        self.contentEncoding = contentEncoding
     }
 }
 
@@ -647,6 +650,10 @@ package struct FileDiffOptions: Hashable, Sendable {
     package var difftasticSyntaxHighlighting: Bool
     package var useGitColoring: Bool
     package var reverseGitColoring: Bool
+    package var textEncoding: RepositoryTextEncoding
+    package var omitsUninterestingCombinedDiff = false
+
+    package var combinedDiffArguments: [String] { omitsUninterestingCombinedDiff ? ["--cc"] : ["-c", "-p"] }
 
     package init(
         whitespace: DiffWhitespaceMode = .none,
@@ -658,7 +665,8 @@ package struct FileDiffOptions: Hashable, Sendable {
         difftasticWidth: Int = 88,
         difftasticSyntaxHighlighting: Bool = true,
         useGitColoring: Bool = false,
-        reverseGitColoring: Bool = true
+        reverseGitColoring: Bool = true,
+        textEncoding: RepositoryTextEncoding = .automatic
     ) {
         self.whitespace = whitespace
         self.contextLines = max(0, contextLines)
@@ -670,6 +678,7 @@ package struct FileDiffOptions: Hashable, Sendable {
         self.difftasticSyntaxHighlighting = difftasticSyntaxHighlighting
         self.useGitColoring = useGitColoring
         self.reverseGitColoring = reverseGitColoring
+        self.textEncoding = textEncoding
     }
 
     package var gitArguments: [String] {

@@ -162,7 +162,7 @@ private final class CloneRepositoryViewController: NSViewController, NSWindowDel
         branchField.addItems(withObjectValues: [Self.defaultBranchTitle, Self.noCheckoutTitle])
         branchField.selectItem(at: 0)
         branchField.delegate = self
-        recursive.state = .on
+        recursive.state = AppSettingsStore.shared.repositoryCreationPreferences.cloneInitializeAllSubmodules ? .on : .off
         fullHistory.state = .on
         personal.state = .on
         bare.state = .off
@@ -344,6 +344,9 @@ private final class CloneRepositoryViewController: NSViewController, NSWindowDel
             branch: branch
         )
         errorLabel.isHidden = true
+        var remembered = AppSettingsStore.shared.repositoryCreationPreferences
+        remembered.cloneInitializeAllSubmodules = recursive.state == .on
+        AppSettingsStore.shared.saveRepositoryCreationPreferences(remembered)
         Task { @MainActor [weak self, weak panel, weak owner] in
             guard let self, let panel, let owner else { return }
             let result = await RepositoryCreationProcessDialog.run(

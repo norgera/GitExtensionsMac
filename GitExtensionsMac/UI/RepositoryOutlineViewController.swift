@@ -111,11 +111,12 @@ enum RepositoryTreeBuilder {
             isRemote: false,
             namespace: "local",
             sortBy: preferences.sortBy,
-            sortOrder: effectiveSortOrder
+            sortOrder: effectiveSortOrder,
+            patterns: preferences.prioritizedBranchNames
         )
         let branchesRoot = root(.branches, symbol: "LocalBranchRoot", children: localBranches)
 
-        let activeRemoteNodes = prioritizedRemotes(navigation.remotes.filter { !$0.isDisabled }, order: effectiveSortOrder).map { remote in
+        let activeRemoteNodes = prioritizedRemotes(navigation.remotes.filter { !$0.isDisabled }, order: effectiveSortOrder, patterns: preferences.prioritizedRemoteNames).map { remote in
             RepositoryTreeNode(
                 id: "remote:\(remote.name)",
                 title: remote.name,
@@ -127,11 +128,12 @@ enum RepositoryTreeBuilder {
                     isRemote: true,
                     namespace: remote.name,
                     sortBy: preferences.sortBy,
-                    sortOrder: effectiveSortOrder
+                    sortOrder: effectiveSortOrder,
+                    patterns: preferences.prioritizedBranchNames
                 )
             )
         }
-        let inactiveRemoteNodes = prioritizedRemotes(navigation.remotes.filter(\.isDisabled), order: effectiveSortOrder).map { remote in
+        let inactiveRemoteNodes = prioritizedRemotes(navigation.remotes.filter(\.isDisabled), order: effectiveSortOrder, patterns: preferences.prioritizedRemoteNames).map { remote in
             RepositoryTreeNode(
                 id: "inactive-remote:\(remote.name)",
                 title: remote.name,
@@ -173,7 +175,8 @@ enum RepositoryTreeBuilder {
             children: buildTagTree(
                 references.tags,
                 sortBy: preferences.sortBy,
-                sortOrder: effectiveSortOrder
+                sortOrder: effectiveSortOrder,
+                patterns: preferences.prioritizedBranchNames
             )
         )
 
@@ -273,10 +276,11 @@ enum RepositoryTreeBuilder {
         isRemote: Bool,
         namespace: String,
         sortBy: RepositoryTreeSortBy,
-        sortOrder: RepositoryTreeSortOrder
+        sortOrder: RepositoryTreeSortOrder,
+        patterns: String
     ) -> [RepositoryTreeNode] {
         var roots: [RepositoryTreeNode] = []
-        for branch in sortedBranches(branches, by: sortBy, order: sortOrder) {
+        for branch in sortedBranches(branches, by: sortBy, order: sortOrder, patterns: patterns) {
             let parts = branch.name.split(separator: "/").map(String.init)
             guard !parts.isEmpty else { continue }
             var parent: RepositoryTreeNode?
@@ -320,7 +324,7 @@ enum RepositoryTreeBuilder {
             }
         }
         if sortBy == .alphaNumeric || sortBy == .version || sortBy == .gitDefault {
-            sortRecursively(&roots, order: sortOrder, versionAware: sortBy == .version)
+            sortRecursively(&roots, order: sortOrder, versionAware: sortBy == .version, patterns: patterns)
         }
         return roots
     }
@@ -328,7 +332,8 @@ enum RepositoryTreeBuilder {
     private static func buildTagTree(
         _ tags: [Tag],
         sortBy: RepositoryTreeSortBy,
-        sortOrder: RepositoryTreeSortOrder
+        sortOrder: RepositoryTreeSortOrder,
+        patterns: String
     ) -> [RepositoryTreeNode] {
         var roots: [RepositoryTreeNode] = []
         for tag in sortedTags(tags, by: sortBy, order: sortOrder) {
@@ -366,7 +371,7 @@ enum RepositoryTreeBuilder {
             }
         }
         if sortBy == .alphaNumeric || sortBy == .version || sortBy == .gitDefault {
-            sortRecursively(&roots, order: sortOrder, versionAware: sortBy == .version)
+            sortRecursively(&roots, order: sortOrder, versionAware: sortBy == .version, patterns: patterns)
         }
         return roots
     }
@@ -374,11 +379,12 @@ enum RepositoryTreeBuilder {
     private static func sortedBranches(
         _ branches: [Branch],
         by sortBy: RepositoryTreeSortBy,
-        order: RepositoryTreeSortOrder
+        order: RepositoryTreeSortOrder,
+        patterns: String
     ) -> [Branch] {
         branches.sorted { lhs, rhs in
-            let lhsPriority = branchPriority(lhs.name)
-            let rhsPriority = branchPriority(rhs.name)
+            let lhsPriority = branchPriority(lhs.name, patterns: patterns)
+            let rhsPriority = branchPriority(rhs.name, patterns: patterns)
             if lhsPriority != rhsPriority { return lhsPriority < rhsPriority }
             return compare(
                 name: lhs.name,
@@ -471,23 +477,20 @@ enum RepositoryTreeBuilder {
         }
     }
 
-    private static func branchPriority(_ name: String) -> Int {
-        if name.range(of: #"^main[^/]*$"#, options: .regularExpression) != nil { return 0 }
-        if name.range(of: #"^master[^/]*$"#, options: .regularExpression) != nil { return 1 }
-        if name.hasPrefix("release/") { return 2 }
-        return 3
+    private static func branchPriority(_ name: String, patterns: String) -> Int {
+        CommitInfoPresentation.priorityIndex(name, patterns: patterns) ?? Int.max
     }
 
     private static func prioritizedRemotes(
         _ remotes: [Remote],
-        order: RepositoryTreeSortOrder
+        order: RepositoryTreeSortOrder,
+        patterns: String
     ) -> [Remote] {
-        sorted(remotes, by: \.name, order: order).sorted { lhs, rhs in
-            let priorities = ["origin": 0, "upstream": 1]
-            let lhsPriority = priorities[lhs.name] ?? 2
-            let rhsPriority = priorities[rhs.name] ?? 2
-            return lhsPriority == rhsPriority ? false : lhsPriority < rhsPriority
-        }
+        sorted(remotes, by: \.name, order: order).enumerated().sorted { lhs, rhs in
+            let lhsPriority = CommitInfoPresentation.priorityIndex(lhs.element.name, patterns: patterns) ?? Int.max
+            let rhsPriority = CommitInfoPresentation.priorityIndex(rhs.element.name, patterns: patterns) ?? Int.max
+            return lhsPriority == rhsPriority ? lhs.offset < rhs.offset : lhsPriority < rhsPriority
+        }.map(\.element)
     }
 
     private static func sorted<T>(
@@ -504,25 +507,26 @@ enum RepositoryTreeBuilder {
     private static func sortRecursively(
         _ nodes: inout [RepositoryTreeNode],
         order: RepositoryTreeSortOrder,
-        versionAware: Bool
+        versionAware: Bool,
+        patterns: String
     ) {
         nodes.sort {
-            let lhsPriority = nodePriority($0)
-            let rhsPriority = nodePriority($1)
+            let lhsPriority = nodePriority($0, patterns: patterns)
+            let rhsPriority = nodePriority($1, patterns: patterns)
             if lhsPriority != rhsPriority { return lhsPriority < rhsPriority }
             let result = versionAware
                 ? $0.title.localizedStandardCompare($1.title)
                 : $0.title.caseInsensitiveCompare($1.title)
             return order == .ascending ? result == .orderedAscending : result == .orderedDescending
         }
-        for node in nodes { sortRecursively(&node.children, order: order, versionAware: versionAware) }
+        for node in nodes { sortRecursively(&node.children, order: order, versionAware: versionAware, patterns: patterns) }
     }
 
-    private static func nodePriority(_ node: RepositoryTreeNode) -> Int {
+    private static func nodePriority(_ node: RepositoryTreeNode, patterns: String) -> Int {
         switch node.kind {
-        case .branch(let branch): branchPriority(branch.name)
-        case .folder(let prefix, false): branchPriority(prefix + "/")
-        default: 3
+        case .branch(let branch): branchPriority(branch.name, patterns: patterns)
+        case .folder(let prefix, false): branchPriority(prefix + "/", patterns: patterns)
+        default: Int.max
         }
     }
 

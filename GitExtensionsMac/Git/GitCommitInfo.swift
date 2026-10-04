@@ -52,7 +52,7 @@ package enum CommitInfoCommands {
 
     package static func messageAndNotes(_ id: ObjectID) -> GitCommand {
         GitCommand(arguments: ["log", "-1", "--no-show-signature", "--pretty=format:%B\(messageSeparator)%N", id.string, "--"],
-                   accessesRemote: false, changesRepositoryState: false)
+                   accessesRemote: false, changesRepositoryState: false).logMetadata()
     }
 
     package static func branchesContaining(_ id: ObjectID, local: Bool, remote: Bool) -> GitCommand? {

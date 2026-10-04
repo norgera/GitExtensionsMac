@@ -354,7 +354,7 @@ final class RevisionFilterDialogController: NSViewController {
         root.edgeInsets = NSEdgeInsets(top: 16, left: 16, bottom: 16, right: 16)
         buttons.widthAnchor.constraint(equalTo: root.widthAnchor, constant: -32).isActive = true
         for control in [sinceCheck, untilCheck, authorCheck, committerCheck, messageCheck, diffCheck, limitCheck, pathCheck,
-                        branchCheck, currentBranchOnly, reflog] {
+                        branchCheck, currentBranchOnly, reflog, fullHistory] {
             control.target = self; control.action = #selector(optionChanged(_:))
         }
         view = root
@@ -406,6 +406,7 @@ final class RevisionFilterDialogController: NSViewController {
         currentBranchOnly.isEnabled = reflog.state == .off
         branchCheck.isEnabled = currentBranchOnly.state == .off && reflog.state == .off
         branch.isEnabled = branchCheck.state == .on
+        simplifyMerges.isEnabled = fullHistory.state == .on
     }
 
     @objc private func accept() {

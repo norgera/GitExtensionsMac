@@ -140,6 +140,7 @@ private final class MergeDialogViewController: NSViewController, NSWindowDelegat
 
         let helpWidth = helpPane.widthAnchor.constraint(equalToConstant: isHelpExpanded ? 289 : 80)
         helpWidthConstraint = helpWidth
+        if AppSettingsStore.shared.preferences.dontShowHelpImages { helpPane.isHidden = true; helpWidth.constant = 0 }
         NSLayoutConstraint.activate([
             helpPane.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 3),
             helpPane.topAnchor.constraint(equalTo: root.topAnchor, constant: 3),

@@ -105,10 +105,16 @@ struct AppPreferences: Codable, Equatable, Sendable {
     var outputHistoryDepth = 20
     var showOutputHistoryAsTab = true
     var outputHistoryPanelVisible = false
+    var provideAutocompletion = true
+    var showErrorsWhenStagingFiles = true
+    var dontShowHelpImages = false
+    var truncatePathMethod: TruncatePathMethod = .none
+    var composeCommitMessages = true
 
     init() {}
     private enum CodingKeys: String, CodingKey {
         case reopenLastRepository, maximumRecentRepositories, theme, mergeCommonParentLanes, straightenGraphDiagonals, renderGraphWithDiagonals, diffContextLines, ignoreWhitespace, defaultSignOff, defaultAllowEmpty, autoStashDuringRebase, gitExecutablePath, editorPath, shellPath, externalDiffToolPath, externalMergeToolPath, signingKey, openSubmoduleDiffInSeparateWindow, automaticContinuousScroll, automaticContinuousScrollDelay, outputHistoryDepth, showOutputHistoryAsTab, outputHistoryPanelVisible
+        case provideAutocompletion, showErrorsWhenStagingFiles, dontShowHelpImages, truncatePathMethod, composeCommitMessages
     }
 
     init(from decoder: Decoder) throws {
@@ -138,6 +144,44 @@ struct AppPreferences: Codable, Equatable, Sendable {
         outputHistoryDepth = max(0, value(.outputHistoryDepth, defaults.outputHistoryDepth))
         showOutputHistoryAsTab = value(.showOutputHistoryAsTab, defaults.showOutputHistoryAsTab)
         outputHistoryPanelVisible = value(.outputHistoryPanelVisible, defaults.outputHistoryPanelVisible)
+        provideAutocompletion = value(.provideAutocompletion, defaults.provideAutocompletion)
+        showErrorsWhenStagingFiles = value(.showErrorsWhenStagingFiles, defaults.showErrorsWhenStagingFiles)
+        dontShowHelpImages = value(.dontShowHelpImages, defaults.dontShowHelpImages)
+        truncatePathMethod = value(.truncatePathMethod, defaults.truncatePathMethod)
+        composeCommitMessages = value(.composeCommitMessages, defaults.composeCommitMessages)
+    }
+}
+
+enum TruncatePathMethod: String, Codable, CaseIterable, Sendable {
+    case none = "None"
+    case compact = "Compact"
+    case trimStart = "TrimStart"
+    case fileNameOnly = "FileNameOnly"
+
+    var lineBreakMode: NSLineBreakMode {
+        switch self {
+        case .none, .fileNameOnly: .byClipping
+        case .compact: .byTruncatingMiddle
+        case .trimStart: .byTruncatingHead
+        }
+    }
+
+    func title(path: String, oldPath: String?) -> String {
+        guard self == .fileNameOnly else { return oldPath.map { "\(path) (\($0))" } ?? path }
+        let name = Self.fileName(path)
+        guard let oldPath else { return name }
+        let oldName = Self.fileName(oldPath)
+        return oldName == name ? name : "\(name) (\(oldName))"
+    }
+
+    func filterKeys(path: String, oldPath: String?) -> [String] {
+        let trimmed = [path, oldPath].compactMap { $0 }.map { $0.hasSuffix("/") ? String($0.dropLast()) : $0 }
+        return self == .fileNameOnly ? trimmed.map(Self.fileName) : trimmed
+    }
+
+    private static func fileName(_ path: String) -> String {
+        let trimmed = path.hasSuffix("/") ? String(path.dropLast()) : path
+        return (trimmed as NSString).lastPathComponent
     }
 }
 
@@ -176,6 +220,19 @@ struct RepositoryCreationPreferences: Codable, Equatable, Sendable {
     var cloneWindowHeight = 359.0
     var initWindowWidth = 542.0
     var initWindowHeight = 174.0
+    var cloneInitializeAllSubmodules = true
+
+    init() {}
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        recentSources = try values.decodeIfPresent([String].self, forKey: .recentSources) ?? []
+        cloneDestinationPath = try values.decodeIfPresent(String.self, forKey: .cloneDestinationPath) ?? ""
+        cloneWindowWidth = try values.decodeIfPresent(Double.self, forKey: .cloneWindowWidth) ?? 647
+        cloneWindowHeight = try values.decodeIfPresent(Double.self, forKey: .cloneWindowHeight) ?? 359
+        initWindowWidth = try values.decodeIfPresent(Double.self, forKey: .initWindowWidth) ?? 542
+        initWindowHeight = try values.decodeIfPresent(Double.self, forKey: .initWindowHeight) ?? 174
+        cloneInitializeAllSubmodules = try values.decodeIfPresent(Bool.self, forKey: .cloneInitializeAllSubmodules) ?? true
+    }
 }
 
 struct ResetPreferences: Codable, Equatable, Sendable {
@@ -236,6 +293,7 @@ struct RevisionGridPreferences: Codable, Equatable, Sendable {
     var showAnnotatedTagsMessages = true
 
     var showRevisionGridTooltips = true
+    var showGpgInformation = true
 
     var revisionFilterHistory: [String] = []
 
@@ -273,11 +331,22 @@ struct RevisionGridPreferences: Codable, Equatable, Sendable {
         showSuperprojectRemoteBranches = try value(.showSuperprojectRemoteBranches, fallback.showSuperprojectRemoteBranches)
         showAnnotatedTagsMessages = try value(.showAnnotatedTagsMessages, fallback.showAnnotatedTagsMessages)
         showRevisionGridTooltips = try value(.showRevisionGridTooltips, fallback.showRevisionGridTooltips)
+        showGpgInformation = try value(.showGpgInformation, fallback.showGpgInformation)
         revisionFilterHistory = try value(.revisionFilterHistory, fallback.revisionFilterHistory)
     }
 }
 
 
+
+extension RevisionSortOrder {
+    var settingsTitle: String {
+        switch self {
+        case .gitDefault: "GitDefault"
+        case .authorDate: "AuthorDate"
+        case .topology: "Topology"
+        }
+    }
+}
 
 struct RevisionGridRuntimeSettings: Codable, Equatable, Sendable {
     var sortOrder: RevisionSortOrder = .gitDefault
@@ -373,11 +442,13 @@ struct RepositoryTreePreferences: Codable, Equatable, Sendable {
     var rootOrder = RepositoryTreeRoot.allCases
     var sortBy: RepositoryTreeSortBy = .gitDefault
     var sortOrder: RepositoryTreeSortOrder = .ascending
+    var prioritizedBranchNames = CommitInfoPresentation.prioritizedBranchNames
+    var prioritizedRemoteNames = CommitInfoPresentation.prioritizedRemoteNames
 
     init() {}
 
     private enum CodingKeys: String, CodingKey {
-        case visibleRoots, rootOrder, sortBy, sortOrder
+        case visibleRoots, rootOrder, sortBy, sortOrder, prioritizedBranchNames, prioritizedRemoteNames
     }
 
     init(from decoder: Decoder) throws {
@@ -388,6 +459,10 @@ struct RepositoryTreePreferences: Codable, Equatable, Sendable {
             ?? RepositoryTreeRoot.allCases
         sortBy = try container.decodeIfPresent(RepositoryTreeSortBy.self, forKey: .sortBy) ?? .gitDefault
         sortOrder = try container.decodeIfPresent(RepositoryTreeSortOrder.self, forKey: .sortOrder) ?? .ascending
+        prioritizedBranchNames = try container.decodeIfPresent(String.self, forKey: .prioritizedBranchNames)
+            ?? CommitInfoPresentation.prioritizedBranchNames
+        prioritizedRemoteNames = try container.decodeIfPresent(String.self, forKey: .prioritizedRemoteNames)
+            ?? CommitInfoPresentation.prioritizedRemoteNames
     }
 
     func encode(to encoder: Encoder) throws {
@@ -396,6 +471,8 @@ struct RepositoryTreePreferences: Codable, Equatable, Sendable {
         try container.encode(rootOrder, forKey: .rootOrder)
         try container.encode(sortBy, forKey: .sortBy)
         try container.encode(sortOrder, forKey: .sortOrder)
+        try container.encode(prioritizedBranchNames, forKey: .prioritizedBranchNames)
+        try container.encode(prioritizedRemoteNames, forKey: .prioritizedRemoteNames)
     }
 
     mutating func normalize() {
@@ -466,6 +543,31 @@ enum CheckoutLocalChangesPreference: String, Codable, CaseIterable, Sendable {
     case merge
     case stash
     case force
+}
+
+struct ConfirmationPreferences: Codable, Equatable, Sendable {
+    var dontConfirmRebase = false
+    var dontConfirmResolveConflicts = false
+    var dontConfirmCommitAfterConflictsResolved = false
+    var dontConfirmSecondAbortConfirmation = false
+    var dontConfirmSwitchWorktree = false
+    var dontConfirmUpdateSubmodulesOnCheckout: Bool?
+
+    init() {}
+    private enum CodingKeys: String, CodingKey {
+        case dontConfirmRebase, dontConfirmResolveConflicts, dontConfirmCommitAfterConflictsResolved
+        case dontConfirmSecondAbortConfirmation, dontConfirmSwitchWorktree, dontConfirmUpdateSubmodulesOnCheckout
+    }
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        func value(_ key: CodingKeys) -> Bool { ((try? values.decodeIfPresent(Bool.self, forKey: key)) ?? nil) ?? false }
+        dontConfirmRebase = value(.dontConfirmRebase)
+        dontConfirmResolveConflicts = value(.dontConfirmResolveConflicts)
+        dontConfirmCommitAfterConflictsResolved = value(.dontConfirmCommitAfterConflictsResolved)
+        dontConfirmSecondAbortConfirmation = value(.dontConfirmSecondAbortConfirmation)
+        dontConfirmSwitchWorktree = value(.dontConfirmSwitchWorktree)
+        dontConfirmUpdateSubmodulesOnCheckout = (try? values.decodeIfPresent(Bool.self, forKey: .dontConfirmUpdateSubmodulesOnCheckout)) ?? nil
+    }
 }
 
 struct CheckoutBranchPreferences: Codable, Equatable, Sendable {
@@ -659,11 +761,15 @@ struct FileViewerPreferences: Codable, Equatable, Sendable {
     var diffAppearance: DiffDisplayAppearance = .patch
     var useGitColoring = true
     var reverseGitColoring = true
+    var verticalRulerPosition = 0
+    var omitUninterestingDiff = false
+    var showAvailableDiffTools = true
 
     init() {}
     private enum CodingKeys: String, CodingKey {
         case usesHistogram, whitespace, contextLines, showsEntireFile, treatsAllFilesAsText
         case showsNonPrintingCharacters, showsSyntaxHighlighting, textEncoding, diffAppearance, useGitColoring, reverseGitColoring
+        case verticalRulerPosition, omitUninterestingDiff, showAvailableDiffTools
     }
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -678,10 +784,17 @@ struct FileViewerPreferences: Codable, Equatable, Sendable {
         diffAppearance = (try? values.decodeIfPresent(DiffDisplayAppearance.self, forKey: .diffAppearance)) ?? .patch
         useGitColoring = try values.decodeIfPresent(Bool.self, forKey: .useGitColoring) ?? true
         reverseGitColoring = try values.decodeIfPresent(Bool.self, forKey: .reverseGitColoring) ?? true
+        verticalRulerPosition = min(1000, max(0, try values.decodeIfPresent(Int.self, forKey: .verticalRulerPosition) ?? 0))
+        omitUninterestingDiff = try values.decodeIfPresent(Bool.self, forKey: .omitUninterestingDiff) ?? false
+        showAvailableDiffTools = try values.decodeIfPresent(Bool.self, forKey: .showAvailableDiffTools) ?? true
+    }
+
+    func availableDiffTools(_ loaded: [String]) -> [String] {
+        showAvailableDiffTools && loaded.count > 1 ? loaded : []
     }
 
     var diffOptions: FileDiffOptions {
-        FileDiffOptions(
+        var options = FileDiffOptions(
             whitespace: whitespace,
             contextLines: contextLines,
             showsEntireFile: showsEntireFile,
@@ -690,8 +803,11 @@ struct FileViewerPreferences: Codable, Equatable, Sendable {
             appearance: diffAppearance,
             difftasticSyntaxHighlighting: diffAppearance == .difftastic ? showsSyntaxHighlighting : true,
             useGitColoring: useGitColoring,
-            reverseGitColoring: reverseGitColoring
+            reverseGitColoring: reverseGitColoring,
+            textEncoding: textEncoding
         )
+        options.omitsUninterestingCombinedDiff = omitUninterestingDiff
+        return options
     }
 }
 
@@ -886,6 +1002,8 @@ final class AppSettingsStore {
         static let mergePreferences = "GitExtensionsMac.mergePreferences.v1"
         static let unsetDetailedSettings = "GitExtensionsMac.detailedSettings.unset.v1"
         static let checkoutBranchPreferences = "GitExtensionsMac.checkoutBranchPreferences.v1"
+        static let confirmationPreferences = "GitExtensionsMac.confirmationPreferences.v1"
+        static let legacyDontConfirmSwitchWorktree = "GitExtensionsMac.DontConfirmSwitchWorktree"
         static let repositoryCreationPreferences = "GitExtensionsMac.repositoryCreationPreferences.v1"
         static let resetPreferences = "GitExtensionsMac.resetPreferences.v1"
         static let showReflogReferences = "GitExtensionsMac.showReflogReferences"
@@ -1005,6 +1123,7 @@ final class AppSettingsStore {
     private(set) var browserLayoutPreferences: BrowserLayoutPreferences
     private(set) var mergePreferences: MergePreferences
     private(set) var checkoutBranchPreferences: CheckoutBranchPreferences
+    private(set) var confirmationPreferences: ConfirmationPreferences
     private(set) var repositoryCreationPreferences: RepositoryCreationPreferences
     private(set) var resetPreferences: ResetPreferences
 
@@ -1088,6 +1207,13 @@ final class AppSettingsStore {
         checkoutBranchPreferences = defaults.data(forKey: Key.checkoutBranchPreferences)
             .flatMap { try? decoder.decode(CheckoutBranchPreferences.self, from: $0) }
             ?? CheckoutBranchPreferences()
+        var confirmations = defaults.data(forKey: Key.confirmationPreferences)
+            .flatMap { try? decoder.decode(ConfirmationPreferences.self, from: $0) }
+            ?? ConfirmationPreferences()
+        if defaults.data(forKey: Key.confirmationPreferences) == nil, defaults.bool(forKey: Key.legacyDontConfirmSwitchWorktree) {
+            confirmations.dontConfirmSwitchWorktree = true
+        }
+        confirmationPreferences = confirmations
         repositoryCreationPreferences = defaults.data(forKey: Key.repositoryCreationPreferences)
             .flatMap { try? decoder.decode(RepositoryCreationPreferences.self, from: $0) }
             ?? RepositoryCreationPreferences()
@@ -1328,9 +1454,35 @@ final class AppSettingsStore {
         defaults.set(try? JSONEncoder().encode(preferences), forKey: Key.mergePreferences)
     }
 
+    func saveConfirmationPreferences(_ preferences: ConfirmationPreferences) {
+        confirmationPreferences = preferences
+        defaults.set(try? JSONEncoder().encode(preferences), forKey: Key.confirmationPreferences)
+    }
+
+    var effectiveUpdateSubmodulesOnCheckout: Bool? {
+        checkoutBranchPreferences.updateSubmodulesOnCheckout ?? confirmationPreferences.dontConfirmUpdateSubmodulesOnCheckout
+    }
+
+    func rememberUpdateSubmodulesOnCheckout(_ update: Bool) {
+        var confirmations = confirmationPreferences
+        confirmations.dontConfirmUpdateSubmodulesOnCheckout = update
+        saveConfirmationPreferences(confirmations)
+        var checkout = checkoutBranchPreferences
+        checkout.updateSubmodulesOnCheckout = update
+        saveCheckoutBranchPreferences(checkout)
+    }
+
     func saveCheckoutBranchPreferences(_ preferences: CheckoutBranchPreferences) {
         checkoutBranchPreferences = preferences
         defaults.set(try? JSONEncoder().encode(preferences), forKey: Key.checkoutBranchPreferences)
+    }
+
+    var spellingDictionary: String {
+        get { defaults.string(forKey: "GitExtensionsMac.spellingDictionary.v1") ?? "en-US" }
+        set {
+            defaults.set(newValue, forKey: "GitExtensionsMac.spellingDictionary.v1")
+            NotificationCenter.default.post(name: .spellingDictionaryDidChange, object: self)
+        }
     }
 
     func saveRepositoryCreationPreferences(_ preferences: RepositoryCreationPreferences) {
@@ -1383,6 +1535,12 @@ final class AppSettingsStore {
     }
 
 
+
+    func saveRevisionSortOrder(_ order: RevisionSortOrder) {
+        revisionGridRuntime.sortOrder = order
+        revisionGridRuntimeDefaults.sortOrder = order
+        defaults.set(try? JSONEncoder().encode(revisionGridRuntimeDefaults), forKey: Key.revisionGridRuntimeDefaults)
+    }
 
     func saveCurrentViewSettingsAsDefault() {
         revisionGridRuntimeDefaults = revisionGridRuntime
@@ -1532,6 +1690,7 @@ final class AppSettingsStore {
 
 extension Notification.Name {
     static let appPreferencesDidChange = Notification.Name("GitExtensionsMac.appPreferencesDidChange")
+    static let spellingDictionaryDidChange = Notification.Name("GitExtensionsMac.spellingDictionaryDidChange")
     static let recentRepositoriesDidChange = Notification.Name("GitExtensionsMac.recentRepositoriesDidChange")
     static let pullPreferencesDidChange = Notification.Name("GitExtensionsMac.pullPreferencesDidChange")
     static let pushPreferencesDidChange = Notification.Name("GitExtensionsMac.pushPreferencesDidChange")

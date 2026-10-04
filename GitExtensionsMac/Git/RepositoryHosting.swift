@@ -36,7 +36,7 @@ extension GitRepositoryModule: RepositoryHostingDataSource {
         let path = url.path.hasPrefix("/") ? String(url.path.dropFirst()) : url.path
         let input = "protocol=\(scheme)\nhost=\(host)\npath=\(path)\n\n"
         guard let result = try? await git.run(RepositoryHostingCommands.credentialFill, in: repository.rootURL,
-                                              standardInput: Data(input.utf8), environment: ["GIT_TERMINAL_PROMPT": "0"]),
+                                              standardInput: Data(input.utf8), environment: RepositoryHostingCommands.credentialFillEnvironment),
               result.succeeded else { return nil }
         for line in result.standardOutputString.split(separator: "\n") {
             guard let separator = line.firstIndex(of: "=") else { continue }
@@ -51,7 +51,7 @@ extension GitRepositoryModule: RepositoryHostingDataSource {
 package enum RepositoryHostingCommands {
     package static func previousCommitMessage(_ revision: String) -> GitCommand {
         GitCommand(arguments: ["log", "-z", "-n", "1", "--pretty=format:%B", "--end-of-options", revision, "--"],
-                   accessesRemote: false, changesRepositoryState: false)
+                   accessesRemote: false, changesRepositoryState: false).logMetadata()
     }
     package static func fetchPullRequest(url: String, headRef: String, localBranch: String) -> GitCommand {
         GitCommand(arguments: ["fetch", "--no-tags", "--progress", url, headRef + ":" + localBranch],
@@ -64,7 +64,9 @@ package enum RepositoryHostingCommands {
     package static func checkout(remote: String, ref: String) -> GitCommand {
         GitCommand(arguments: ["checkout", remote + "/" + ref], accessesRemote: false, changesRepositoryState: true)
     }
-    package static let credentialFill = GitCommand(arguments: ["credential", "fill"], accessesRemote: false, changesRepositoryState: false)
+    package static let credentialFill = GitCommand(arguments: ["-c", "credential.interactive=false", "credential", "fill"],
+                                                   accessesRemote: false, changesRepositoryState: false)
+    package static let credentialFillEnvironment = ["GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never"]
 }
 
 package struct HostedRepositoryIdentity: Hashable, Sendable {

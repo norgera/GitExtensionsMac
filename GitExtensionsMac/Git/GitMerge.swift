@@ -106,7 +106,7 @@ enum GitMergeCommandBuilder {
         guard !targets.isEmpty else { throw RepositoryMergeError.missingTarget }
 
         var arguments = ["merge"]
-        if !request.allowFastForward { arguments.append("--no-ff") }
+        arguments.append(request.allowFastForward ? "--ff" : "--no-ff")
         if let strategy = request.strategy?.trimmingCharacters(in: .whitespacesAndNewlines),
            !strategy.isEmpty {
             arguments.append("--strategy=\(strategy)")
@@ -168,6 +168,9 @@ extension GitRepositoryModule: RepositoryMergingDataSource {
         if !after.conflictedPaths.isEmpty {
             outcome = .conflicts(after.conflictedPaths)
         } else if command.succeeded, followUpCommands.allSatisfy(\.succeeded), after.mergeInProgress {
+            outcome = .readyToCommit
+        } else if !command.succeeded,
+                  GitActionContinuation.canContinueAction(output: command.standardOutputString + "\n" + command.standardErrorString, state: after) {
             outcome = .readyToCommit
         } else if command.succeeded, followUpCommands.allSatisfy(\.succeeded),
                   combinedOutput.contains("already up-to-date") || combinedOutput.contains("already up to date") {

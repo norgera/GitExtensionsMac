@@ -159,7 +159,7 @@ extension GitRepositoryModule: RepositorySubmoduleManagingDataSource {
             var timestamps: [ObjectID: Int64] = [:]
             for id in [module?.expectedCommitID, head].compactMap({ $0 }) {
                 guard timestamps[id] == nil else { continue }
-                let detail = try await git.run(GitCommand(arguments: ["show", "-s", "--format=%ct%x00%ci%x00%B", id.string], accessesRemote: false, changesRepositoryState: false), in: url)
+                let detail = try await git.run(GitCommand(arguments: ["show", "-s", "--format=%ct%x00%ci%x00%B", id.string], accessesRemote: false, changesRepositoryState: false).logMetadata(), in: url)
                 let fields = detail.standardOutputString.split(separator: "\0", maxSplits: 2, omittingEmptySubsequences: false)
                 if detail.succeeded, fields.count == 3 {
                     timestamps[id] = Int64(fields[0])

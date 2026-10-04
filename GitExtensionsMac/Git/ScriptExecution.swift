@@ -16,8 +16,9 @@ extension GitRepositoryModule: RepositoryScriptContextDataSource {
     }
     package func scriptContext(selected: [ObjectID], arguments: String) async throws -> [String: [String]] {
         let directory = try await settingsDirectories().working
-        func read(_ arguments: [String]) async throws -> String {
-            let result = try await git.run(GitCommand(arguments: arguments, accessesRemote: false, changesRepositoryState: false), in: directory)
+        func read(_ arguments: [String], logMetadata: Bool = false) async throws -> String {
+            let command = GitCommand(arguments: arguments, accessesRemote: false, changesRepositoryState: false)
+            let result = try await git.run(logMetadata ? command.logMetadata() : command, in: directory)
             guard result.succeeded else { throw GitError.commandFailed(arguments: arguments, status: result.exitStatus, stderr: result.standardErrorString) }
             return result.standardOutputString.trimmingCharacters(in: .newlines)
         }
@@ -32,7 +33,7 @@ extension GitRepositoryModule: RepositoryScriptContextDataSource {
         if !selected.isEmpty { values["sHashes"] = [selected.map(\.string).joined(separator: " ")] }
         for (prefix, revision) in [("c", head), ("s", selected.first?.string)] {
             guard let revision else { continue }
-            let raw = try await read(["show", "-s", "--format=%H%x00%B%x00%s%x00%an%x00%cn%x00%at%x00%ct", revision, "--"])
+            let raw = try await read(["show", "-s", "--format=%H%x00%B%x00%s%x00%an%x00%cn%x00%at%x00%ct", revision, "--"], logMetadata: true)
             let fields = raw.components(separatedBy: "\0")
             guard fields.count == 7 else { throw ScriptExecutionError.missingOption(prefix + "Hash") }
             _ = try ObjectID(parsing: fields[0])
@@ -62,21 +63,97 @@ extension GitRepositoryModule: RepositoryScriptContextDataSource {
                 values["sRemotePathFromUrl"] = urls.map(Self.scriptRemotePath)
             }
         }
-        let remote = (try? await read(["config", "--get", "branch.\(branch).remote"])) ?? ""
+        func branchRemote(_ name: String) async -> String {
+            name.isEmpty ? "" : (try? await read(["config", "--get", "branch.\(name).remote"])) ?? ""
+        }
+        func remoteURL(_ name: String) async -> String {
+            name.isEmpty ? "" : (try? await read(["config", "--get", "remote.\(name).url"])) ?? ""
+        }
+        let headLocals = values["cLocalBranch"] ?? []
+        let remote = headLocals.count == 1 ? await branchRemote(headLocals[0]) : await branchRemote(branch)
         values["cDefaultRemote"] = [remote]
-        let url = remote.isEmpty ? "" : (try? await read(["config", "--get", "remote.\(remote).url"])) ?? ""
+        let url = await remoteURL(remote)
         values["cDefaultRemoteUrl"] = [url]
         values["cDefaultRemotePathFromUrl"] = [Self.scriptRemotePath(url)]
+        if remote.isEmpty, headLocals.count > 1 {
+            var remotes: [String] = []
+            var urls: [String] = []
+            for local in headLocals {
+                let candidate = await branchRemote(local)
+                remotes.append(candidate)
+                urls.append(await remoteURL(candidate))
+            }
+            values[ScriptOptionSelection.defaultRemoteBranches] = headLocals
+            values[ScriptOptionSelection.defaultRemoteRemotes] = remotes
+            values[ScriptOptionSelection.defaultRemoteURLs] = urls
+        }
         for key in ["cTag", "cBranch", "cLocalBranch", "cRemoteBranch", "cRemoteBranchName", "sTag", "sBranch", "sLocalBranch", "sRemoteBranch", "sRemoteBranchName", "sRemote", "sRemoteUrl", "sRemotePathFromUrl"] where values[key]?.isEmpty == true {
             values[key] = [""]
         }
         return values
     }
 
-    private static func scriptRemotePath(_ value: String) -> String {
+    package static func scriptRemotePath(_ value: String) -> String {
         var path = URL(string: value)?.scheme != nil ? URL(string: value)?.path ?? "" : value.split(separator: ":", maxSplits: 1).last.map(String.init) ?? ""
         if path.hasSuffix(".git") { path.removeLast(4) }
         return path.isEmpty || path.hasPrefix("/") ? path : "/" + path
+    }
+}
+
+package enum ScriptOptionSelection {
+    package static let defaultRemoteBranches = "\u{0}cDefaultRemoteBranches"
+    package static let defaultRemoteRemotes = "\u{0}cDefaultRemoteRemotes"
+    package static let defaultRemoteURLs = "\u{0}cDefaultRemoteURLs"
+
+    package static let order = ["sHashes", "sTag", "sBranch", "sLocalBranch", "sRemoteBranch", "sRemoteBranchName", "sRemote", "sRemoteUrl",
+                                "sRemotePathFromUrl", "sHash", "sMessage", "sSubject", "sAuthor", "sCommitter", "sAuthorDate", "sCommitDate",
+                                "HEAD", "cTag", "cBranch", "cLocalBranch", "cRemoteBranch", "cRemoteBranchName", "cHash", "cMessage", "cSubject",
+                                "cAuthor", "cCommitter", "cAuthorDate", "cCommitDate", "cDefaultRemote", "cDefaultRemoteUrl",
+                                "cDefaultRemotePathFromUrl", "RepoName", "WorkingDir"]
+
+    package static func resolve(_ options: [String: [String]], arguments: String,
+                                choose: (_ option: String, _ choices: [String]) -> Int?) -> [String: [String]] {
+        var result = options
+        var resolvedCurrentRemote = false
+        func candidates(_ key: String) -> [String] { (options[key] ?? []).filter { !$0.isEmpty } }
+        func selectIndex(_ option: String, _ list: [String]) -> Int? {
+            switch list.count {
+            case 0: return nil
+            case 1: return 0
+            default: return choose(option, list)
+            }
+        }
+        func select(_ option: String, from key: String, mapping target: String? = nil) {
+            let list = candidates(key)
+            guard let index = selectIndex(option, list) else { result[option] = [""]; return }
+            let mapped = target.flatMap { options[$0] } ?? list
+            result[option] = [mapped.indices.contains(index) ? mapped[index] : ""]
+        }
+        for option in order where arguments.contains("{\(option)}") {
+            if !resolvedCurrentRemote, option.hasPrefix("c") || option == "HEAD" {
+                resolvedCurrentRemote = true
+                if (options["cDefaultRemote"]?.first ?? "").isEmpty, let branches = options[defaultRemoteBranches], !branches.isEmpty,
+                   let index = choose("cDefaultRemote", branches) {
+                    let remote = options[defaultRemoteRemotes]?[index] ?? ""
+                    let url = options[defaultRemoteURLs]?[index] ?? ""
+                    result["cDefaultRemote"] = [remote]
+                    result["cDefaultRemoteUrl"] = [remote.isEmpty ? "" : url]
+                    result["cDefaultRemotePathFromUrl"] = [remote.isEmpty ? "" : GitRepositoryModule.scriptRemotePath(url)]
+                }
+            }
+            switch option {
+            case "sTag", "sBranch", "sLocalBranch", "sRemoteBranch", "sRemote", "cTag", "cBranch", "cLocalBranch", "cRemoteBranch":
+                select(option, from: option)
+            case "sRemoteBranchName", "cRemoteBranchName":
+                select(option, from: String(option.dropLast(4)), mapping: option)
+            case "sRemoteUrl", "sRemotePathFromUrl":
+                select(option, from: "sRemote", mapping: option)
+            default:
+                break
+            }
+        }
+        for key in [defaultRemoteBranches, defaultRemoteRemotes, defaultRemoteURLs] { result[key] = nil }
+        return result
     }
 }
 

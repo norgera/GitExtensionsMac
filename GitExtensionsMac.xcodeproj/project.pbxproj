@@ -9,9 +9,14 @@
 /* Begin PBXBuildFile section */
         FA5000000000000000000001 = {isa = PBXBuildFile; fileRef = FA5000000000000000000002; };
         FA6000000000000000000001 = {isa = PBXBuildFile; fileRef = FA6000000000000000000002; };
+        FA7000000000000000000001 = {isa = PBXBuildFile; fileRef = FA7000000000000000000002; };
+        FA7000000000000000000009 = {isa = PBXBuildFile; fileRef = FA700000000000000000000A; };
+        FA700000000000000000000B = {isa = PBXBuildFile; fileRef = FA700000000000000000000C; };
         FA5000000000000000000003 = {isa = PBXBuildFile; fileRef = FA5000000000000000000004; };
         FA5000000000000000000005 = {isa = PBXBuildFile; fileRef = FA5000000000000000000006; };
+        FA7000000000000000000005 = {isa = PBXBuildFile; fileRef = FA7000000000000000000006; };
         FA5000000000000000000007 = {isa = PBXBuildFile; fileRef = FA5000000000000000000008; };
+        FA7000000000000000000003 = {isa = PBXBuildFile; fileRef = FA7000000000000000000004; };
 		FC4000000000000000000005 /* RepositoryHostingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC4000000000000000000006; };
 		FD322C66F57B501CA9C3A88B /* RevisionGridTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FDAB5E5676D3600B848F361C; };
 		FDDDE995903DB16FA78FE409 /* BrowserTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD2295D27EB8A7B41C325B25; };
@@ -270,6 +275,7 @@ F80000000000000000000001 /* GitWorktrees.swift in Sources */ = {isa = PBXBuildFi
 		B4C518AA41CC3D86D1E8A9EE /* WorkTree.png in Resources */ = {isa = PBXBuildFile; fileRef = 0C987A792115F7C216AE0623 /* WorkTree.png */; };
 		B564E35E270B4C8B170BFB33 /* CheckoutBranchWorkflowCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB7300000000000000000003 /* CheckoutBranchWorkflowCoordinator.swift */; };
 		B709DDB27203A51E0E01ECE4 /* RevisionGraphLayout.swift in Sources */ = {isa = PBXBuildFile; fileRef = D3ADEAF7E9D4A98D42033F1A /* RevisionGraphLayout.swift */; };
+		FA7000000000000000000007 /* RevisionGraphHoverHighlight.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA7000000000000000000008 /* RevisionGraphHoverHighlight.swift */; };
 		B94637CC6412028D55CF4C52 /* CherryPickDialog.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB7000000000000000000001 /* CherryPickDialog.swift */; };
 		BAB7FF7D52FB453EDCB18B7C /* Remotes.png in Resources */ = {isa = PBXBuildFile; fileRef = C49E5508949DA856172F8F09 /* Remotes.png */; };
 		C269F50EB93EE67B6713C4C5 /* GitRepositoryModule.swift in Sources */ = {isa = PBXBuildFile; fileRef = C00000000000000000000003 /* GitRepositoryModule.swift */; };
@@ -403,9 +409,14 @@ F80000000000000000000001 /* GitWorktrees.swift in Sources */ = {isa = PBXBuildFi
 /* Begin PBXFileReference section */
         FA5000000000000000000002 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandLineRepository.swift; sourceTree = "<group>"; };
         FA6000000000000000000002 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitDiffAppearance.swift; sourceTree = "<group>"; };
+        FA7000000000000000000002 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitSignatures.swift; sourceTree = "<group>"; };
+        FA700000000000000000000A = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitImpact.swift; sourceTree = "<group>"; };
+        FA700000000000000000000C = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImpactGraph.swift; sourceTree = "<group>"; };
         FA5000000000000000000004 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandLineInterface.swift; sourceTree = "<group>"; };
         FA5000000000000000000006 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandLineDialogs.swift; sourceTree = "<group>"; };
+        FA7000000000000000000006 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileViewerSyntax.swift; sourceTree = "<group>"; };
         FA5000000000000000000008 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CommandLineTests.swift; sourceTree = "<group>"; };
+        FA7000000000000000000004 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackendParityTests.swift; sourceTree = "<group>"; };
 		FC4000000000000000000006 /* RepositoryHostingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RepositoryHostingTests.swift; sourceTree = "<group>"; };
 		FDAB5E5676D3600B848F361C /* RevisionGridTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RevisionGridTests.swift; sourceTree = "<group>"; };
 		FD2295D27EB8A7B41C325B25 /* BrowserTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserTests.swift; sourceTree = "<group>"; };
@@ -605,6 +616,7 @@ F80000000000000000000001 /* GitWorktrees.swift in Sources */ = {isa = PBXBuildFi
 		CD98877CA9D0868A1851B8C6 /* RevisionGridViewController.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = RevisionGridViewController.swift; sourceTree = "<group>"; };
 		CF33F0EB3F8DB1738220F2F0 /* CommitDetailViewController.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CommitDetailViewController.swift; sourceTree = "<group>"; };
 		D3ADEAF7E9D4A98D42033F1A /* RevisionGraphLayout.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = RevisionGraphLayout.swift; sourceTree = "<group>"; };
+		FA7000000000000000000008 /* RevisionGraphHoverHighlight.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = RevisionGraphHoverHighlight.swift; sourceTree = "<group>"; };
 		D5A6667946728F14C998170D /* FunnelPencil.png */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = image.png; path = FunnelPencil.png; sourceTree = "<group>"; };
 		FE1F3B448DEC4C188AB8E162 /* TreeCollapseAll.png */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = image.png; path = TreeCollapseAll.png; sourceTree = "<group>"; };
 		FE918985C0990218D0980F0A /* ExpandAll.png */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = image.png; path = ExpandAll.png; sourceTree = "<group>"; };
@@ -825,6 +837,7 @@ F80000000000000000000001 /* GitWorktrees.swift in Sources */ = {isa = PBXBuildFi
                 FC3000000000000000000004 /* ApplicationPluginsTests.swift */,
                 FA4000000000000000000008,
                 FA5000000000000000000008,
+                FA7000000000000000000004,
 				FC4000000000000000000006 /* RepositoryHostingTests.swift */,
 				FC4200000000000000000006,
 				FDAB5E5676D3600B848F361C /* RevisionGridTests.swift */,
@@ -878,6 +891,8 @@ F80000000000000000000001 /* GitWorktrees.swift in Sources */ = {isa = PBXBuildFi
                 FA4000000000000000000004,
                 FA5000000000000000000004,
                 FA5000000000000000000006,
+                FA7000000000000000000006,
+                FA700000000000000000000C,
                 FA4000000000000000000006,
                 FC3000000000000000000002 /* ApplicationPlugins.swift */,
 				FC4000000000000000000004 /* RepositoryHostingDialog.swift */,
@@ -1129,6 +1144,8 @@ F80000000000000000000001 /* GitWorktrees.swift in Sources */ = {isa = PBXBuildFi
                 FA4000000000000000000002,
                 FA5000000000000000000002,
                 FA6000000000000000000002,
+                FA7000000000000000000002,
+                FA700000000000000000000A,
                 FC3000000000000000000006 /* GitPluginExecution.swift */,
 				FC4000000000000000000002 /* RepositoryHosting.swift */,
 				FC4200000000000000000002,
@@ -1169,6 +1186,7 @@ F80000000000000000000001 /* GitWorktrees.swift in Sources */ = {isa = PBXBuildFi
 			children = (
 				E1E3C08E72ED32A136ECFC29 /* RepositoryModels.swift */,
 				D3ADEAF7E9D4A98D42033F1A /* RevisionGraphLayout.swift */,
+				FA7000000000000000000008 /* RevisionGraphHoverHighlight.swift */,
 			);
 			name = Models;
 			path = Models;
@@ -1552,6 +1570,8 @@ F80000000000000000000001 /* GitWorktrees.swift in Sources */ = {isa = PBXBuildFi
                 FA4000000000000000000001,
                 FA5000000000000000000001,
                 FA6000000000000000000001,
+                FA7000000000000000000001,
+                FA7000000000000000000009,
                 FC3000000000000000000005 /* GitPluginExecution.swift in Sources */,
 				FC4000000000000000000001 /* RepositoryHosting.swift in Sources */,
 				FC4200000000000000000001,
@@ -1608,6 +1628,7 @@ F80000000000000000000001 /* GitWorktrees.swift in Sources */ = {isa = PBXBuildFi
                 FC3000000000000000000003 /* ApplicationPluginsTests.swift in Sources */,
                 FA4000000000000000000007,
                 FA5000000000000000000007,
+                FA7000000000000000000003,
 				FC4000000000000000000005 /* RepositoryHostingTests.swift in Sources */,
 				FC4200000000000000000005,
 				FD322C66F57B501CA9C3A88B /* RevisionGridTests.swift in Sources */,
@@ -1656,6 +1677,8 @@ F80000000000000000000001 /* GitWorktrees.swift in Sources */ = {isa = PBXBuildFi
                 FA4000000000000000000003,
                 FA5000000000000000000003,
                 FA5000000000000000000005,
+                FA7000000000000000000005,
+                FA700000000000000000000B,
                 FA4000000000000000000005,
                 FC3000000000000000000001 /* ApplicationPlugins.swift in Sources */,
 				FC4000000000000000000003 /* RepositoryHostingDialog.swift in Sources */,
@@ -1704,6 +1727,7 @@ F80000000000000000000001 /* GitWorktrees.swift in Sources */ = {isa = PBXBuildFi
 				9BC064D8D11B7CE9F0F934F8 /* StashDialog.swift in Sources */,
 				DE88A9FB3FF6A883DAF6D2BB /* WorkflowManagementDialogs.swift in Sources */,
 				B709DDB27203A51E0E01ECE4 /* RevisionGraphLayout.swift in Sources */,
+				FA7000000000000000000007 /* RevisionGraphHoverHighlight.swift in Sources */,
 				CF76A732AD3EBBE5AD4EB526 /* MockRepositoryDataSource.swift in Sources */,
 				3DDD7BB76954AABEFE2E6E92 /* GitExtensionsAppScene.swift in Sources */,
 				F10000000000000000000002 /* TagDialogs.swift in Sources */,

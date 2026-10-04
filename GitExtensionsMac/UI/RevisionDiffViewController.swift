@@ -446,6 +446,12 @@ final class RevisionDiffViewController: RetainingSplitViewController {
         fileContentController.view.isHidden = false
         guard let commit = revisions.first(where: { $0.id == item.second }), let contentProvider else { return }
         let path = item.file.path
+        if let source = fileStatusSource {
+            let revision = item.second
+            fileContentController.exporter = { url in try await source.exportFile(path: path, at: revision, to: url) }
+        } else {
+            fileContentController.exporter = nil
+        }
         fileContentController.applyRevision(commit)
         fileContentController.apply(file: nil, selectedPath: path)
         let encoding = fileContentController.selectedEncoding
@@ -476,11 +482,16 @@ final class RevisionDiffViewController: RetainingSplitViewController {
 
 
     var supportLinePatching: Bool {
-        guard !isBareRepository, let item = shownItem, let diff = shownDiff, diff.appearance == .patch else { return false }
-        let hasHunks = diff.lines.contains { $0.kind == .header || $0.text.hasPrefix("@@") }
+        guard let item = shownItem, let diff = shownDiff else { return false }
         let exists = repositoryURL.map { FileManager.default.fileExists(atPath: $0.appendingPathComponent(item.file.path).path) } ?? false
-        let isNew = item.file.changeType == .added || !item.file.isTracked
-        return (hasHunks && exists) || (isNew && (item.file.staged == .workTree || item.file.staged == .index || !exists))
+        return Self.supportsLinePatching(file: item.file, diff: diff, fileExists: exists, isBareRepository: isBareRepository)
+    }
+
+    static func supportsLinePatching(file: ChangedFile, diff: FileDiff, fileExists: Bool, isBareRepository: Bool) -> Bool {
+        guard !isBareRepository, diff.appearance == .patch else { return false }
+        let hasHunks = diff.lines.contains { $0.kind == .header || $0.text.hasPrefix("@@") }
+        let isAdded = file.changeType == .added || file.changeType == .copied || !file.isTracked
+        return (hasHunks && fileExists) || (isAdded && (file.staged == .workTree || file.staged == .index || !fileExists))
     }
 
     func repositoryChanged() {
@@ -538,6 +549,7 @@ final class ChangedFileCellView: NSTableCellView {
     func apply(node: ChangedFileNode, submodule: FileStatusSubmodule? = nil) {
         textField?.stringValue = node.title + (submodule?.countSuffix ?? "")
         textField?.font = AppSettingsStore.shared.applicationFont(size: 11)
+        textField?.lineBreakMode = node.file == nil ? .byTruncatingMiddle : AppSettingsStore.shared.preferences.truncatePathMethod.lineBreakMode
         toolTip = submodule.map { "From: \($0.first?.string ?? "—")\nTo: \($0.second?.string ?? "—")\($0.isDirty ? "\nDirty working directory" : "")" }
         if let file = node.file {
             let icon = submodule.flatMap { Self.submoduleImage($0, file: file) } ?? node.imageName
@@ -759,6 +771,7 @@ final class DiffContentViewController: NSViewController, NSTableViewDataSource, 
     private let emptyStateLabel = NSTextField(labelWithString: "")
     private let hoverToolbar = DiffViewerToolbar(preferences: AppSettingsStore.shared.preferencesForNewFileViewer())
     private var presentations: [DiffLinePresentation] = []
+    private var syntaxStates: [Int?] = []
     private var gutterMetrics = DiffGutterMetrics.empty
     private var caretRow = -1
     private var searchQuery = ""
@@ -868,6 +881,7 @@ final class DiffContentViewController: NSViewController, NSTableViewDataSource, 
         hoverToolbar.toolTip = "\(file.path) — \(file.changeType.description), +\(file.additions) −\(file.deletions)"
         let lines = diff?.lines ?? []
         presentations = DiffLinePresentation.build(from: lines, appearance: diff?.appearance ?? .patch)
+        syntaxStates = DiffSyntaxHighlighter.lineStates(lines, filePath: file.path)
         occurrences.row = -1
         occurrences.column = -1
         emptyStateLabel.stringValue = diff == nil ? "Loading diff…" : (lines.isEmpty ? "No differences to display." : "")
@@ -927,7 +941,7 @@ final class DiffContentViewController: NSViewController, NSTableViewDataSource, 
         case let value where value.hasPrefix("Encoding:"):
             let rawValue = String(value.dropFirst("Encoding:".count))
             preferences.textEncoding = RepositoryTextEncoding(rawValue: rawValue) ?? .automatic
-            persistPreferences(reloadDiff: false)
+            persistPreferences(reloadDiff: true)
         case "Settings":
             BrowserCommandCenter.perform(.settings)
         default:
@@ -998,7 +1012,8 @@ final class DiffContentViewController: NSViewController, NSTableViewDataSource, 
             showsSyntaxHighlighting: preferences.showsSyntaxHighlighting,
             filePath: currentFile?.path,
             appearance: currentDiff?.appearance ?? .patch,
-            highlightTerm: occurrences.term
+            highlightTerm: occurrences.term,
+            openSpan: syntaxStates.indices.contains(row) ? syntaxStates[row] : nil
         )
         return cell
     }
@@ -1615,6 +1630,17 @@ final class DiffLineCellView: NSTableCellView {
             ).fill()
         }
 
+        if let x = Self.verticalRulerX(position: AppSettingsStore.shared.fileViewerPreferences.verticalRulerPosition,
+                                       textOrigin: gutterWidth + prefixWidth, font: AppSettingsStore.shared.codeFont), x < bounds.width {
+            NSColor.separatorColor.setFill()
+            NSRect(x: floor(x), y: 0, width: 1, height: bounds.height).fill()
+        }
+    }
+
+    static func verticalRulerX(position: Int, textOrigin: CGFloat, font: NSFont) -> CGFloat? {
+        guard position > 0 else { return nil }
+        let characterWidth = ("0" as NSString).size(withAttributes: [.font: font]).width
+        return textOrigin + CGFloat(position - 1) * characterWidth
     }
 
     func apply(
@@ -1624,7 +1650,8 @@ final class DiffLineCellView: NSTableCellView {
         showsSyntaxHighlighting: Bool,
         filePath: String? = nil,
         appearance: DiffDisplayAppearance = .patch,
-        highlightTerm: String = ""
+        highlightTerm: String = "",
+        openSpan: Int? = nil
     ) {
         self.presentation = presentation
         self.gutterMetrics = gutterMetrics
@@ -1641,7 +1668,8 @@ final class DiffLineCellView: NSTableCellView {
             for: line,
             displayText: displayText,
             enabled: showsSyntaxHighlighting && appearance != .difftastic,
-            filePath: filePath
+            filePath: filePath,
+            openSpan: openSpan
         ))
         DiffTextColors.apply(line.styles, to: attributed)
         if appearance == .patch, !line.styles.isEmpty, let change = presentation.inlineChange,
@@ -1691,38 +1719,6 @@ final class DiffLineCellView: NSTableCellView {
     }
 }
 
-enum FileViewerSyntaxLanguage: String, Equatable {
-    case cLike, swift, scripting, markup, data, stylesheet, markdown, sql, plainText
-}
-
-enum FileViewerSyntaxDetector {
-    private static let names: [String: FileViewerSyntaxLanguage] = [
-        "makefile": .scripting, "dockerfile": .scripting, "gemfile": .scripting,
-        ".gitignore": .plainText, ".gitattributes": .plainText
-    ]
-    private static let extensions: [String: FileViewerSyntaxLanguage] = [
-        "c": .cLike, "h": .cLike, "cc": .cLike, "cpp": .cLike, "cxx": .cLike,
-        "cs": .cLike, "java": .cLike, "kt": .cLike, "go": .cLike, "rs": .cLike,
-        "swift": .swift, "m": .cLike, "mm": .cLike,
-        "js": .scripting, "jsx": .scripting, "ts": .scripting, "tsx": .scripting,
-        "py": .scripting, "rb": .scripting, "pl": .scripting, "php": .scripting,
-        "sh": .scripting, "bash": .scripting, "zsh": .scripting, "fish": .scripting,
-        "html": .markup, "htm": .markup, "xml": .markup, "xib": .markup, "storyboard": .markup,
-        "json": .data, "jsonc": .data, "yaml": .data, "yml": .data, "toml": .data,
-        "css": .stylesheet, "scss": .stylesheet, "sass": .stylesheet, "less": .stylesheet,
-        "md": .markdown, "markdown": .markdown, "rst": .markdown,
-        "sql": .sql
-    ]
-
-    static func language(for path: String?) -> FileViewerSyntaxLanguage {
-        guard let path else { return .plainText }
-        let name = URL(fileURLWithPath: path).lastPathComponent.lowercased()
-        if let language = names[name] { return language }
-        let ext = URL(fileURLWithPath: name).pathExtension.lowercased()
-        return extensions[ext] ?? .plainText
-    }
-}
-
 enum FileViewerWhitespace {
     static func text(_ text: String, glyph: Bool) -> String {
         var result = ""
@@ -1746,17 +1742,22 @@ enum FileViewerWhitespace {
 
 @MainActor enum DiffSyntaxHighlighter {
     private static var font: NSFont { AppSettingsStore.shared.codeFont }
-    private static let keywordExpression = try! NSRegularExpression(
-        pattern: #"\b(?:using|namespace|internal|sealed|class|public|private|protected|readonly|static|void|return|new|if|else|for|while|async|await|var|let)\b"#
-    )
-    private static let stringExpression = try! NSRegularExpression(pattern: #"\"(?:\\.|[^\"\\])*\""#)
-    private static let commentExpression = try! NSRegularExpression(pattern: #"//.*$"#)
+
+    static func color(for kind: FileViewerSyntaxTokenKind) -> NSColor {
+        switch kind {
+        case .comment: .systemGreen
+        case .string: .systemRed
+        case .keyword: .systemBlue
+        case .number: .systemPurple
+        }
+    }
 
     static func attributedText(
         for line: DiffLine,
         displayText: String,
         enabled: Bool,
-        filePath: String?
+        filePath: String?,
+        openSpan: Int? = nil
     ) -> NSAttributedString {
         let baseColor: NSColor
         switch line.kind {
@@ -1772,25 +1773,29 @@ enum FileViewerWhitespace {
             string: displayText,
             attributes: [.font: font, .foregroundColor: baseColor]
         )
-        let language = FileViewerSyntaxDetector.language(for: filePath)
-        guard enabled, language != .plainText,
+        guard enabled, let mode = FileViewerSyntaxRegistry.mode(for: filePath),
               line.kind == .context || line.kind == .addition || line.kind == .deletion else {
             return result
         }
-
-        let fullRange = NSRange(location: 0, length: (displayText as NSString).length)
-        if language != .markup && language != .markdown && language != .data {
-            keywordExpression.enumerateMatches(in: displayText, range: fullRange) { match, _, _ in
-                if let range = match?.range { result.addAttribute(.foregroundColor, value: NSColor.systemBlue, range: range) }
-            }
-        }
-        stringExpression.enumerateMatches(in: displayText, range: fullRange) { match, _, _ in
-            if let range = match?.range { result.addAttribute(.foregroundColor, value: NSColor.systemRed, range: range) }
-        }
-        commentExpression.enumerateMatches(in: displayText, range: fullRange) { match, _, _ in
-            if let range = match?.range { result.addAttribute(.foregroundColor, value: NSColor.systemGreen, range: range) }
+        let length = (displayText as NSString).length
+        for token in FileViewerSyntaxLexer.tokens(displayText, mode: mode, openSpan: openSpan).tokens where NSMaxRange(token.range) <= length {
+            result.addAttribute(.foregroundColor, value: color(for: token.kind), range: token.range)
         }
         return result
+    }
+
+    static func lineStates(_ lines: [DiffLine], filePath: String?) -> [Int?] {
+        guard let mode = FileViewerSyntaxRegistry.mode(for: filePath) else { return Array(repeating: nil, count: lines.count) }
+        var state: Int?
+        return lines.map { line in
+            guard line.kind == .context || line.kind == .addition || line.kind == .deletion else {
+                state = nil
+                return nil
+            }
+            let start = state
+            state = FileViewerSyntaxLexer.tokens(line.text, mode: mode, openSpan: state).openSpan
+            return start
+        }
     }
 }
 
@@ -1994,6 +1999,7 @@ enum FileViewerNavigationDialogs {
 
 final class RevisionFileContentViewController: NSViewController, NSMenuDelegate {
     var onBlame: (() -> Void)?
+    var exporter: ((URL) async throws -> Void)?
     var onFileHistory: (() -> Void)?
     var canBlame = false
     private let pathLabel = NSTextField(labelWithString: "Select a file")
@@ -2245,6 +2251,12 @@ final class RevisionFileContentViewController: NSViewController, NSMenuDelegate 
         let panel = NSSavePanel()
         panel.nameFieldStringValue = URL(fileURLWithPath: content.path).lastPathComponent
         guard panel.runModal() == .OK, let url = panel.url else { return }
+        if let exporter {
+            Task { @MainActor in
+                do { try await exporter(url) } catch { BrowserCommandCenter.perform(.showStatus(error.localizedDescription)) }
+            }
+            return
+        }
         do {
             try content.data.write(to: url, options: .atomic)
         } catch {
@@ -2292,6 +2304,18 @@ final class GPGInfoViewController: NSViewController {
             message: tag.message,
             appearance: Self.appearance(for: tag.indicator, isTag: true)
         )
+    }
+
+    func showPending() {
+        _ = view
+        commitRow.apply(message: "Loading data...", appearance: nil)
+        tagRow.isHidden = true
+    }
+
+    func show(error message: String) {
+        _ = view
+        commitRow.apply(message: message, appearance: .init(imageName: "CommitSignatureError"))
+        tagRow.isHidden = true
     }
 
     private static func appearance(for indicator: SignatureIndicator, isTag: Bool) -> SignatureMessageView.Appearance? {

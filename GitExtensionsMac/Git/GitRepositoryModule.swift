@@ -124,6 +124,7 @@ package actor RevisionReader {
                                 showStashes: options.showStashes, showGitNotes: options.showGitNotes,
                                 showSessionRefs: options.showSessionRefs),
                             paths: paths, notes: options.loadNotes)
+                        session.outputEncoding = await git.logOutputEncoding(in: directory)
                         let result = try await git.runStreaming(command, in: directory) { event in
                             guard event.stream == .standardOutput else { return }
                             session.receive(event.data)
@@ -166,6 +167,7 @@ private final class RevisionStreamSession: @unchecked Sendable {
     private var lastPublication = ProcessInfo.processInfo.systemUptime
     private let continuation: AsyncThrowingStream<[Commit], Error>.Continuation
     private var input = Data()
+    var outputEncoding: String.Encoding = .utf8
     private var fields: [String] = []
     private var records: [GitLogRecord] = []
     private var commits: [Commit] = []
@@ -201,7 +203,7 @@ private final class RevisionStreamSession: @unchecked Sendable {
         input.append(data)
         do {
             while let separator = input.firstIndex(of: 0) {
-                fields.append(String(decoding: input[..<separator], as: UTF8.self))
+                fields.append(GitLogOutputEncoding.decode(Data(input[..<separator]), encoding: outputEncoding))
                 input.removeSubrange(input.startIndex...separator)
                 if fields.count == fieldCount {
                     let record = try GitOutputParser.parseLogRecord(fields, recordIndex: recordIndex)
@@ -814,6 +816,11 @@ package actor GitRepositoryModule: RepositoryOpeningDataSource {
         return result.standardOutputString.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    func diffContentEncoding(_ options: FileDiffOptions) async throws -> String.Encoding {
+        if options.textEncoding != .automatic { return options.textEncoding.foundationEncoding }
+        return try await configuredFileEncoding()?.foundationEncoding ?? .utf8
+    }
+
     func appearanceDiff(
         file: ChangedFile,
         options: FileDiffOptions,
@@ -822,6 +829,7 @@ package actor GitRepositoryModule: RepositoryOpeningDataSource {
         directory: URL
     ) async throws -> FileDiff? {
         guard !file.isSubmodule else { return nil }
+        let contentEncoding = try await diffContentEncoding(options)
         switch options.appearance {
         case .patch:
             guard options.useGitColoring else { return nil }
@@ -836,7 +844,7 @@ package actor GitRepositoryModule: RepositoryOpeningDataSource {
             arguments.insert("--color=always", at: min(1, arguments.count))
             let result = try await git.run(GitCommand(arguments: GitDiffAppearance.colorConfiguration(configured: configured, reverse: options.reverseGitColoring) + arguments, accessesRemote: false, changesRepositoryState: false), in: directory)
             guard result.succeeded || result.exitStatus == 1 else { throw GitError.commandFailed(arguments: result.arguments, status: result.exitStatus, stderr: result.standardErrorString) }
-            return GitDiffAppearance.parseColoredPatch(result.standardOutput, file: file)
+            return GitDiffAppearance.parseColoredPatch(result.standardOutput, file: file, contentEncoding: contentEncoding)
         case .difftastic:
             guard await isDifftasticEnabled() else { return nil }
             let target = try await difftastic()
@@ -871,7 +879,7 @@ package actor GitRepositoryModule: RepositoryOpeningDataSource {
             guard result.succeeded || result.exitStatus == 1 else {
                 throw GitError.commandFailed(arguments: result.arguments, status: result.exitStatus, stderr: result.standardErrorString)
             }
-            return GitDiffAppearance.parseWordDiff(result.standardOutput, file: file)
+            return GitDiffAppearance.parseWordDiff(result.standardOutput, file: file, contentEncoding: contentEncoding)
         }
     }
 
@@ -935,7 +943,7 @@ package actor GitRepositoryModule: RepositoryOpeningDataSource {
             acceptedStatuses: acceptedStatuses
         )
 
-        let parsed = GitOutputParser.parseUnifiedDiff(output.standardOutput, files: [file])
+        let parsed = GitOutputParser.parseUnifiedDiff(output.standardOutput, files: [file], contentEncoding: try await diffContentEncoding(options))
         let diff = parsed[file.id] ?? parsed.values.first
         if let diff { diffCache[cacheKey] = diff }
         return diff
@@ -993,6 +1001,8 @@ package actor GitRepositoryModule: RepositoryOpeningDataSource {
             }
         } else if file.gitObjectType == "commit" {
             data = Data("Submodule commit \(file.gitObjectID?.string ?? "unknown")\n".utf8)
+        } else if let objectID = file.gitObjectID, FileContentDecoder.hasImageExtension(file.path) {
+            data = try await materializedBlob(objectID.string, in: repository.rootURL)
         } else if let objectID = file.gitObjectID {
             data = try await checked(
                 GitCommand(arguments: ["cat-file", "blob", objectID.string], accessesRemote: false, changesRepositoryState: false),
@@ -1060,7 +1070,7 @@ package actor GitRepositoryModule: RepositoryOpeningDataSource {
                 ],
                 accessesRemote: false,
                 changesRepositoryState: false
-            ),
+            ).logMetadata(),
             directory: repository.rootURL
         )
         return try GitOutputParser.parseStashes(output.standardOutput)

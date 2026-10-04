@@ -33,7 +33,8 @@ private enum RevisionGraphLayoutTests {
     @MainActor
     static func main() {
         let application = NSApplication.shared
-
+        let activity = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .latencyCritical], reason: "Deterministic UI tests")
+        defer { ProcessInfo.processInfo.endActivity(activity) }
 
         AvatarService.shared.store = AvatarImageStore(transport: { request in
             (Data(), HTTPURLResponse(url: request.url!, statusCode: 404, httpVersion: nil, headerFields: nil)!)
@@ -55,6 +56,11 @@ private enum RevisionGraphLayoutTests {
 
     @MainActor
     static func run() async {
+        if CommandLine.arguments.contains("--backend-parity-only") {
+            do { try await BackendParityTests.run() }
+            catch { fatalError("BackendParityTests failed: \(error)") }
+            return
+        }
         if CommandLine.arguments.contains("--cli-only") {
             do { try await CommandLineTests.run() }
             catch { fatalError("CommandLineTests failed: \(error)") }
@@ -414,6 +420,7 @@ private enum RevisionGraphLayoutTests {
             try await BuildServerAdapterTests.run()
             try await BuiltInPluginTests.run()
             try await CommandLineTests.run()
+            try await BackendParityTests.run()
             try await RevisionGridTests.run()
             try await BrowserTests.run()
             try await AppShellTests.run()

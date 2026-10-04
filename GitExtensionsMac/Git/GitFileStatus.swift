@@ -80,6 +80,8 @@ package protocol RepositoryFileStatusDataSource: Sendable {
 
     func loadFileData(path: String, at revision: RevisionID) async throws -> Data
 
+    func exportFile(path: String, at revision: RevisionID, to url: URL) async throws
+
     func resetFiles(to revision: RevisionID, items: [ChangedFile], resetAndDelete: Bool) async throws -> String
 
     func setSkipWorktree(_ paths: [String], _ value: Bool) async throws
@@ -92,6 +94,8 @@ package protocol RepositoryFileStatusDataSource: Sendable {
     func cherryPickChanges(group: FileStatusGroup, file: ChangedFile) async throws -> FileStatusApplyResult
 
     func applyLinePatch(_ kind: FileStatusLinePatchKind, file: ChangedFile, diff: FileDiff, lineIDs: Set<String>) async throws -> FileStatusApplyResult
+
+    func workingTreeDiscoveryFiles(ignored: Bool, assumeUnchanged: Bool, skipWorktree: Bool) async throws -> [ChangedFile]
 
     func isDifftasticEnabled() async -> Bool
 
@@ -222,7 +226,7 @@ package enum FileStatusCommands {
     }
 
     package static func combinedDiff(_ merge: ObjectID, path: String, options: FileDiffOptions) -> GitCommand {
-        GitCommand(arguments: ["diff-tree", "--cc", "--no-commit-id"] + options.gitArguments + [merge.string, "--", path],
+        GitCommand(arguments: ["diff-tree"] + options.combinedDiffArguments + ["--no-commit-id"] + options.gitArguments + [merge.string, "--", path],
                    accessesRemote: false, changesRepositoryState: false)
     }
 
@@ -308,6 +312,7 @@ package enum FileStatusCommands {
             if type == "?" || type == "!" {
                 var file = changedFile(path: String(line.dropFirst(2)), oldPath: nil, status: "A", staged: .workTree)
                 file.isTracked = false
+                file.isIgnored = type == "!"
                 result.append(file)
                 continue
             }

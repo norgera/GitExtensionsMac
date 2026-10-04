@@ -861,6 +861,7 @@ enum ChangedFileContextMenuBuilder {
     private static func toolEntry(_ id: String, _ title: String, tools: [String], enabled: Bool) -> ContextMenuEntry {
         guard !tools.isEmpty else { return command(id, title, enabled: enabled) }
         return .submenu(id: id + ".tools", title: title, isEnabled: enabled,
-                        children: [command(id, "Default difftool")] + tools.map { command(id + ".tool:" + $0, $0) })
+                        children: [command(id, "Default difftool")] + tools.map { command(id + ".tool:" + $0, $0) }
+                            + [.separator, command("file.difftool.disableTools", "Disable")])
     }
 }

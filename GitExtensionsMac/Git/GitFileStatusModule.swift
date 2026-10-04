@@ -5,6 +5,14 @@ import GitExtensionsCore
 
 extension FileStatusCommands {
 
+    package static func hasFilesWhichMayBeDeleted(_ files: [ChangedFile], root: URL) -> Bool {
+        func exists(_ path: String) -> Bool { FileManager.default.fileExists(atPath: root.appendingPathComponent(path).path) }
+        return files.contains { file in
+            guard !(file.changeType == .modified && file.isTracked) else { return false }
+            return exists(file.path) || file.oldPath.map(exists) == true
+        }
+    }
+
     package static func validateMove(oldName: String, newName: String) -> Bool {
         !oldName.trimmingCharacters(in: .whitespaces).isEmpty && !newName.trimmingCharacters(in: .whitespaces).isEmpty && oldName != newName
     }
@@ -135,7 +143,9 @@ extension GitRepositoryModule: RepositoryFileStatusDataSource {
             guard result.succeeded else {
                 return .text("\(result.standardErrorString)\nGit command (exit code: \(result.exitStatus)): git \(result.arguments.joined(separator: " "))\n")
             }
-            return .diff(FileDiff(id: file.id, fileID: file.id, lines: FileStatusCommands.parseGrepFile(result.standardOutputString)))
+            let encoding = try await diffContentEncoding(options)
+            let text = encoding == .utf8 ? result.standardOutputString : (String(data: result.standardOutput, encoding: encoding) ?? result.standardOutputString)
+            return .diff(FileDiff(id: file.id, fileID: file.id, lines: FileStatusCommands.parseGrepFile(text), contentEncoding: encoding))
         }
         var seen = Set<String>()
         let paths = [file.oldPath, file.path].compactMap { $0 }.filter { seen.insert($0).inserted }
@@ -167,7 +177,7 @@ extension GitRepositoryModule: RepositoryFileStatusDataSource {
         guard output.succeeded || output.exitStatus == 1 else {
             throw GitError.commandFailed(arguments: output.arguments, status: output.exitStatus, stderr: output.standardErrorString)
         }
-        let parsed = GitOutputParser.parseUnifiedDiff(output.standardOutput, files: [file])
+        let parsed = GitOutputParser.parseUnifiedDiff(output.standardOutput, files: [file], contentEncoding: try await diffContentEncoding(options))
         return .diff(parsed[file.id] ?? parsed.values.first)
     }
 
@@ -182,6 +192,35 @@ extension GitRepositoryModule: RepositoryFileStatusDataSource {
             return try await runChecked(["show", ":\(path)"], changes: false).standardOutput
         case .object(let id):
             return try await runChecked(["show", "\(id.string):\(path)"], changes: false).standardOutput
+        }
+    }
+
+    package func workingTreeDiscoveryFiles(ignored: Bool, assumeUnchanged: Bool, skipWorktree: Bool) async throws -> [ChangedFile] {
+        var files: [ChangedFile] = []
+        if ignored {
+            let result = try await run(FileStatusCommands.status(showUntracked: true, showIgnored: true))
+            files += FileStatusCommands.parseStatus(result.standardOutputString).filter(\.isIgnored)
+        }
+        if assumeUnchanged || skipWorktree {
+            let listing = try await run(FileStatusCommands.listFilesVerbose)
+            for var file in FileStatusCommands.parseListFilesVerbose(listing.standardOutputString, skipWorktree: skipWorktree, assumeUnchanged: assumeUnchanged) {
+                file.staged = .workTree
+                file.id = "workTree:\(file.isAssumeUnchanged ? "assume" : "skip"):\(file.path)"
+                files.append(file)
+            }
+        }
+        return files
+    }
+
+    package func exportFile(path: String, at revision: RevisionID, to url: URL) async throws {
+        let root = try fileStatusRoot()
+        switch revision {
+        case .workingDirectory:
+            try await loadFileData(path: path, at: revision).write(to: url)
+        case .index:
+            try await exportBlob(":\(path)", to: url, in: root)
+        case .object(let id):
+            try await exportBlob("\(id.string):\(path)", to: url, in: root)
         }
     }
 

@@ -290,7 +290,9 @@ final class CommitDetailViewController: NSViewController, NSTextViewDelegate {
         }
         if !linksInfo.isEmpty { sections.append(attributed(linksInfo, font: font)) }
         if let branches {
-            let sorted = CommitInfoPresentation.sortBranches(branches, currentBranch: currentBranch)
+            let sorted = CommitInfoPresentation.sortBranches(branches, currentBranch: currentBranch,
+                                                             prioritizedBranches: AppSettingsStore.shared.repositoryTreePreferences.prioritizedBranchNames,
+                                                             prioritizedRemotes: AppSettingsStore.shared.repositoryTreePreferences.prioritizedRemoteNames)
             sections.append(attributed(CommitInfoPresentation.branchesInfo(sorted, preferences: preferences, limit: !showAllBranches), font: font))
         }
         if let order = tagOrder, let tags {

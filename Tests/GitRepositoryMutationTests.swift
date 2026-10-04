@@ -2363,6 +2363,8 @@ enum GitRepositoryMutationTests {
             "--no-edit",
             "topic", "release-tag"
         ], "merge command: argument order matches Git Extensions")
+        try require(try GitMergeCommandBuilder.arguments(for: RepositoryMergeRequest(targets: ["topic"]), messageFile: nil)
+                    == ["merge", "--ff", "--no-edit", "topic"], "merge command: allowed fast-forward is explicit")
 
         do {
             _ = try GitMergeCommandBuilder.arguments(

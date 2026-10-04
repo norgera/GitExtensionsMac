@@ -175,6 +175,7 @@ private final class PullDialogViewController: NSViewController, NSWindowDelegate
         root.addSubview(footer)
         let helpWidth = help.widthAnchor.constraint(equalToConstant: isHelpExpanded ? 307 : 80)
         helpWidthConstraint = helpWidth
+        if AppSettingsStore.shared.preferences.dontShowHelpImages { help.isHidden = true; helpWidth.constant = 0 }
         NSLayoutConstraint.activate([
             help.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 14),
             help.topAnchor.constraint(equalTo: root.topAnchor, constant: 12),
@@ -603,7 +604,8 @@ private final class PullDialogViewController: NSViewController, NSWindowDelegate
                 statusLabel.stringValue = result.message
                 var runAfterScripts = result.outcome == .completed
                 if case .conflicts = result.outcome {
-                    if await WorkflowManagementDialogs.resolveConflicts(source: source, window: window, scriptHooks: scriptHooks) {
+                    if await MutationDialogs.confirmResolveUnresolvedConflicts(window: window),
+                       await WorkflowManagementDialogs.resolveConflicts(source: source, window: window, scriptHooks: scriptHooks) {
                         runAfterScripts = true
                         onRepositoryChanged(result.selectedCommitID)
                     }
@@ -838,13 +840,14 @@ private final class PullDialogViewController: NSViewController, NSWindowDelegate
             let alert = NSAlert()
             alert.messageText = "Apply the automatic stash?"
             alert.informativeText = "The Pull completed successfully. Reapply the changes saved before Pull?"
-            alert.addButton(withTitle: "Apply stash"); alert.addButton(withTitle: "Keep stash")
+            alert.addButton(withTitle: "Apply stash"); alert.addButton(withTitle: "Keep stash"); alert.addButton(withTitle: "Cancel")
             alert.showsSuppressionButton = true
             alert.suppressionButton?.title = "Do not ask again"
-            shouldPop = await begin(alert) == .alertFirstButtonReturn
-            if alert.suppressionButton?.state == .on {
+            let answer = StashReapplyAnswer(await begin(alert))
+            shouldPop = answer.shouldApply
+            if let remembered = answer.rememberedChoice(remember: alert.suppressionButton?.state == .on) {
                 var preferences = settings.pullPreferences
-                preferences.autoPopStash = shouldPop ? .always : .never
+                preferences.autoPopStash = remembered ? .always : .never
                 settings.savePullPreferences(preferences)
             }
         }
@@ -855,6 +858,7 @@ private final class PullDialogViewController: NSViewController, NSWindowDelegate
             statusLabel.stringValue = result.message
             if case .conflicts = result.outcome,
                let window = view.window,
+               await MutationDialogs.confirmResolveUnresolvedConflicts(window: window),
                await WorkflowManagementDialogs.resolveConflicts(source: source, window: window, scriptHooks: scriptHooks) {
                 onRepositoryChanged(result.selectedCommitID)
             }

@@ -84,11 +84,13 @@ package enum FileContentDecoder {
         encoding.foundationEncoding
     }
 
-    private static func isImage(_ data: Data, path: String) -> Bool {
+    package static func hasImageExtension(_ path: String) -> Bool {
         let lower = path.lowercased()
-        let supportedExtension = [".png", ".jpg", ".jpeg", ".gif", ".tif", ".tiff", ".bmp", ".ico", ".webp"]
-            .contains { lower.hasSuffix($0) }
-        guard supportedExtension else { return false }
+        return [".png", ".jpg", ".jpeg", ".gif", ".tif", ".tiff", ".bmp", ".ico", ".webp"].contains { lower.hasSuffix($0) }
+    }
+
+    private static func isImage(_ data: Data, path: String) -> Bool {
+        guard hasImageExtension(path) else { return false }
         return data.starts(with: [0x89, 0x50, 0x4E, 0x47])
             || data.starts(with: [0xFF, 0xD8, 0xFF])
             || data.starts(with: Array("GIF8".utf8))

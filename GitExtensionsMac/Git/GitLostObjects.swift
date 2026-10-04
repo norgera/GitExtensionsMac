@@ -80,7 +80,7 @@ package enum LostObjectsCommands {
 
     package static func commitsMetadata(_ ids: [ObjectID]) -> GitCommand {
         GitCommand(arguments: ["show", "--quiet", "--pretty=format:%H\u{1F}%aN\u{1F}%s\u{1F}%ct\u{1F}%P"] + ids.map(\.string),
-                   accessesRemote: false, changesRepositoryState: false)
+                   accessesRemote: false, changesRepositoryState: false).logMetadata()
     }
     package static func catFile(_ id: ObjectID) -> GitCommand {
         GitCommand(arguments: ["cat-file", "-p", id.string], accessesRemote: false, changesRepositoryState: false)
@@ -311,18 +311,26 @@ extension GitRepositoryModule: RepositoryLostObjectsDataSource {
     }
 
     package func saveBlob(_ id: ObjectID, to url: URL) async throws {
-        let root = try lostObjectsRoot()
-        let blob = try await git.run(GitCommand(arguments: ["cat-file", "blob", id.string], accessesRemote: false, changesRepositoryState: false), in: root)
+        try await exportBlob(id.string, to: url, in: try lostObjectsRoot())
+    }
+
+    package static let lfsPointerPrefix = Data("version https://git-lfs.github.com/spec/v".utf8)
+
+    package func materializedBlob(_ specifier: String, in root: URL) async throws -> Data {
+        let blob = try await git.run(GitCommand(arguments: ["cat-file", "blob", specifier], accessesRemote: false, changesRepositoryState: false), in: root)
         guard blob.succeeded else {
             throw GitError.commandFailed(arguments: blob.arguments, status: blob.exitStatus, stderr: blob.standardErrorString)
         }
-        var data = blob.standardOutput
+        let data = blob.standardOutput
+        guard data.starts(with: Self.lfsPointerPrefix),
+              let smudged = try? await git.run(GitCommand(arguments: ["lfs", "smudge"], accessesRemote: true, changesRepositoryState: false),
+                                               in: root, standardInput: data, environment: [:]),
+              smudged.succeeded, smudged.standardErrorString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return data }
+        return smudged.standardOutput
+    }
 
-        if data.starts(with: Data("version https://git-lfs.github.com/spec/v".utf8)),
-           let smudged = try? await git.run(GitCommand(arguments: ["lfs", "smudge"], accessesRemote: true, changesRepositoryState: false), in: root, standardInput: data),
-           smudged.succeeded, smudged.standardErrorString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            data = smudged.standardOutput
-        }
+    package func exportBlob(_ specifier: String, to url: URL, in root: URL) async throws {
+        var data = try await materializedBlob(specifier, in: root)
         let autocrlf = try await git.run(GitCommand(arguments: ["config", "--get", "core.autocrlf"], accessesRemote: false, changesRepositoryState: false), in: root)
         if autocrlf.standardOutputString.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "true" {
             let attributes = try await git.run(GitCommand(arguments: ["check-attr", "-z", "diff", "text", "crlf", "eol", "--", url.path],

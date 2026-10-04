@@ -1008,7 +1008,7 @@ final class ChangedFilesViewController: NSViewController, NSOutlineViewDelegate,
                     Self.imageName(for: itemsByNodeFileID[file.id]?.file ?? file, isGrep: group.isGrep)
                 }, title: { file in
                     let original = self.itemsByNodeFileID[file.id]?.file ?? file
-                    return original.oldPath.map { "\(original.path) (\($0))" } ?? original.path
+                    return AppSettingsStore.shared.preferences.truncatePathMethod.title(path: original.path, oldPath: original.oldPath)
                 })
                 if grouping != .path, children.count == 1, !children[0].children.isEmpty, children[0].file == nil {
                     children = children[0].children
@@ -1159,11 +1159,9 @@ final class ChangedFilesViewController: NSViewController, NSOutlineViewDelegate,
         if file.isRangeDiff { return true }
         if file.diffStatus != .unknown, !diffStatusFilter.contains(file.diffStatus) { return false }
         guard let filter else { return true }
-        func matches(_ value: String) -> Bool {
-            let name = value.hasSuffix("/") ? String(value.dropLast()) : value
-            return filter.firstMatch(in: name, range: NSRange(name.startIndex..., in: name)) != nil
+        return AppSettingsStore.shared.preferences.truncatePathMethod.filterKeys(path: file.path, oldPath: file.oldPath).contains { name in
+            filter.firstMatch(in: name, range: NSRange(name.startIndex..., in: name)) != nil
         }
-        return matches(file.path) || file.oldPath.map(matches) == true
     }
 
 
@@ -1453,6 +1451,12 @@ final class ChangedFilesViewController: NSViewController, NSOutlineViewDelegate,
         case "tree.expandAll": outlineView.selectedRowIndexes.compactMap { outlineView.item(atRow: $0) }.forEach { outlineView.expandItem($0, expandChildren: true) }; return
         case "tree.collapseRootFolders": collapseRootFolders(); return
         case "file.copyPaths": copyPaths(); return
+        case "file.difftool.disableTools":
+            var viewer = AppSettingsStore.shared.fileViewerPreferences
+            viewer.showAvailableDiffTools = false
+            AppSettingsStore.shared.saveFileViewerPreferences(viewer)
+            diffTools = []
+            return
         case "file.find": findFile(); return
         case "file.findCommit": showGrepDialog(text: selectedText()); return
         case "file.showFindCommit":

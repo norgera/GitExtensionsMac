@@ -246,6 +246,15 @@ enum CommitInfoPresentation {
     static let prioritizedRemoteNames = "origin|upstream"
 
 
+    static func priorityIndex(_ key: String, patterns: String) -> Int? {
+        let regexes = patterns.split(separator: ";").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        for (index, pattern) in regexes.enumerated() {
+            guard let regex = try? NSRegularExpression(pattern: "^(\(pattern))$") else { continue }
+            if regex.firstMatch(in: key, range: NSRange(key.startIndex..., in: key)) != nil { return index }
+        }
+        return nil
+    }
+
     static func sortBranches(_ branches: [String], currentBranch: String,
                              prioritizedBranches: String = prioritizedBranchNames,
                              prioritizedRemotes: String = prioritizedRemoteNames) -> [String] {

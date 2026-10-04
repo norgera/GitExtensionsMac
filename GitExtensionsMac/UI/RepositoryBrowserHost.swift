@@ -176,6 +176,10 @@ final class ApplicationHostViewController: NSViewController {
                request.path(file).resolvingSymlinksInPath() == candidate.resolvingSymlinksInPath(),
                let parent = try await CommandLineRepository.superproject(of: candidate, git: git) { location = parent }
             if location == nil && request.opensDashboardWithoutRepository { return }
+            if !request.needsRepository, let candidate = location,
+               (try? await GitRepositoryModule(repositoryURL: candidate, git: git).loadRepositoryState()) == nil {
+                location = nil
+            }
             if request.needsRepository || [.fileeditor, .settings].contains(request.verb) && location != nil {
                 guard let location else { throw CLIError.notValidRepository }
                 let module = GitRepositoryModule(repositoryURL: location, git: git)

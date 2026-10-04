@@ -11,11 +11,18 @@ package struct GitCommand: Sendable, Equatable {
     package let arguments: [String]
     package let accessesRemote: Bool
     package let changesRepositoryState: Bool
+    package var decodesLogOutput = false
 
     package init(arguments: [String], accessesRemote: Bool, changesRepositoryState: Bool) {
         self.arguments = arguments
         self.accessesRemote = accessesRemote
         self.changesRepositoryState = changesRepositoryState
+    }
+
+    package func logMetadata() -> GitCommand {
+        var command = self
+        command.decodesLogOutput = true
+        return command
     }
 
     package var executionClass: ExecutionClass { accessesRemote ? .remote : .local }
@@ -104,7 +111,44 @@ package protocol GitCommandRunning: Sendable {
     ) async throws -> GitCommandResult
 }
 
+package enum GitLogOutputEncoding {
+    package static let configPattern = "^i18n\\.(logoutputencoding|commitencoding)$"
+
+    package static func resolve(fromGetRegexp output: String) -> String.Encoding {
+        var values: [String: String] = [:]
+        for line in output.split(whereSeparator: \.isNewline) {
+            let parts = line.split(separator: " ", maxSplits: 1)
+            guard parts.count == 2 else { continue }
+            values[parts[0].lowercased()] = String(parts[1]).trimmingCharacters(in: .whitespaces)
+        }
+        guard let name = values["i18n.logoutputencoding"] ?? values["i18n.commitencoding"], !name.isEmpty else { return .utf8 }
+        return encoding(named: name) ?? .utf8
+    }
+
+    package static func encoding(named name: String) -> String.Encoding? {
+        let cf = CFStringConvertIANACharSetNameToEncoding(name.lowercased() as CFString)
+        guard cf != kCFStringEncodingInvalidId else { return nil }
+        return String.Encoding(rawValue: CFStringConvertEncodingToNSStringEncoding(cf))
+    }
+
+    package static func decode(_ data: Data, encoding: String.Encoding) -> String {
+        guard encoding != .utf8, let text = String(data: data, encoding: encoding) else { return String(decoding: data, as: UTF8.self) }
+        return text
+    }
+
+    package static func transcode(_ data: Data, from encoding: String.Encoding) -> Data {
+        guard encoding != .utf8, let text = String(data: data, encoding: encoding) else { return data }
+        return Data(text.utf8)
+    }
+}
+
 package extension GitCommandRunning {
+    func logOutputEncoding(in directory: URL) async -> String.Encoding {
+        guard let result = try? await run(arguments: ["config", "--get-regexp", GitLogOutputEncoding.configPattern],
+                                          in: directory, standardInput: nil, environment: [:]) else { return .utf8 }
+        return GitLogOutputEncoding.resolve(fromGetRegexp: String(decoding: result.standardOutput, as: UTF8.self))
+    }
+
     func run(
         _ command: GitCommand,
         in directory: URL,
@@ -121,9 +165,12 @@ package extension GitCommandRunning {
                 environment: environment
             ) }
             CommandLog.shared.finish(logID, result: result)
+            let output = command.decodesLogOutput
+                ? GitLogOutputEncoding.transcode(result.standardOutput, from: await logOutputEncoding(in: directory))
+                : result.standardOutput
             return GitCommandResult(
                 arguments: result.arguments,
-                standardOutput: result.standardOutput,
+                standardOutput: output,
                 standardError: result.standardError,
                 exitStatus: result.exitStatus,
                 executionClass: command.executionClass
