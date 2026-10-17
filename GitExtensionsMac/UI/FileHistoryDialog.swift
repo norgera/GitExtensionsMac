@@ -16,8 +16,8 @@ final class FileHistoryWindowController: NSWindowController, NSWindowDelegate {
         let window = FileHistoryWindow(contentViewController: controller)
         window.title = "File History - \(file)"
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
-        window.setContentSize(NSSize(width: 1000, height: 720))
-        window.minSize = NSSize(width: 550, height: 350)
+        window.setContentSize(NSSize(width: 748, height: 444))
+        window.minSize = NSSize(width: 299, height: 198)
         window.setFrameAutosaveName("GitExtensionsMac.FileHistory")
         window.isReleasedWhenClosed = false
         super.init(window: window)
@@ -38,8 +38,31 @@ private final class FileHistoryWindow: NSWindow {
     override func cancelOperation(_ sender: Any?) { performClose(sender) }
 }
 
+private final class FileHistoryIconTab: NSTabViewItem {
+    override func sizeOfLabel(_ computeMin: Bool) -> NSSize {
+        var size = super.sizeOfLabel(computeMin)
+        if image != nil { size.width += 20; size.height = max(size.height, 16) }
+        return size
+    }
+    override func drawLabel(_ shouldTruncateLabel: Bool, in rect: NSRect) {
+        guard let image else { super.drawLabel(shouldTruncateLabel, in: rect); return }
+        image.draw(in: NSRect(x: rect.minX, y: rect.midY - 8, width: 16, height: 16), from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+        super.drawLabel(shouldTruncateLabel, in: NSRect(x: rect.minX + 20, y: rect.minY, width: max(0, rect.width - 20), height: rect.height))
+    }
+}
+
 private final class FileHistoryTabs: NSTabViewController {
     var onChange: (() -> Void)?
+    override func viewDidLayout() {
+        super.viewDidLayout()
+        guard let control = tabView.subviews.compactMap({ $0 as? NSSegmentedControl }).first,
+              control.segmentCount == tabViewItems.count else { return }
+        for (index, item) in tabViewItems.enumerated() where control.image(forSegment: index) !== item.image {
+            control.setImage(item.image, forSegment: index)
+            control.setImageScaling(.scaleProportionallyDown, forSegment: index)
+            control.setWidth(0, forSegment: index)
+        }
+    }
     override func tabView(_ tabView: NSTabView, didSelect tabViewItem: NSTabViewItem?) {
         super.tabView(tabView, didSelect: tabViewItem)
         onChange?()
@@ -51,13 +74,14 @@ final class FileHistoryViewController: NSViewController, NSMenuDelegate {
     var onLinePatch: ((FileStatusLinePatchKind, ChangedFile, FileDiff, Set<String>) -> Void)?
     let grid = RevisionGridViewController()
     let info = CommitDetailViewController()
-    let commitDiff = RevisionDiffViewController(mode: .diff)
+    let commitDiff = RevisionDiffViewController(mode: .diff, groupsByRevision: false)
     let diff = DiffContentViewController()
     let fileView = RevisionFileContentViewController()
     let blame = BlameViewController()
     let blameInfo = CommitDetailViewController()
     private let tabs = FileHistoryTabs()
     private let filters = RevisionFilterToolbar()
+    private let toolbarOverflow = ToolStripOverflow()
     private let status = NSTextField(labelWithString: "")
     private let source: any RepositoryBrowsingDataSource
     private let history: any RepositoryFileHistoryDataSource
@@ -88,7 +112,9 @@ final class FileHistoryViewController: NSViewController, NSMenuDelegate {
     private var isSubmodule = false
     var onShowChanges: ((ObjectID) -> Void)?
     var onFileStatusCommand: ((FileStatusListCommand) -> Void)?
-    private let optionsButton = NSPopUpButton(frame: .zero, pullsDown: true)
+    private let loadButton = SplitToolbarPopUpButton(frame: .zero, pullsDown: true)
+    private let fullHistoryButton = NSPopUpButton(frame: .zero, pullsDown: true)
+    private let blameOptionsButton = NSPopUpButton(frame: .zero, pullsDown: true)
     private var commandTab: NSTabViewItem!
     private var diffTab: NSTabViewItem!
     private var viewTab: NSTabViewItem!
@@ -108,20 +134,25 @@ final class FileHistoryViewController: NSViewController, NSMenuDelegate {
     deinit { readTask?.cancel(); viewTask?.cancel(); infoTask?.cancel(); buildTask?.cancel() }
 
     override func loadView() {
-        let root = NSView(frame: NSRect(x: 0, y: 0, width: 1000, height: 720))
+        let root = NSView(frame: NSRect(x: 0, y: 0, width: 748, height: 444))
         root.autoresizingMask = [.width, .height]
         let toolbar = NSStackView(); toolbar.spacing = 4
         toolbar.translatesAutoresizingMaskIntoConstraints = false
-        let load = NSButton(title: "Load history", target: self, action: #selector(loadClicked))
-        toolbar.addArrangedSubview(load)
-        optionsButton.addItem(withTitle: "Options")
-        optionsButton.menu?.autoenablesItems = false
-        optionsButton.menu?.delegate = self
-        toolbar.addArrangedSubview(optionsButton)
         filters.grid = grid
         for control in filters.views { toolbar.addArrangedSubview(control) }
+        configureMenuButton(loadButton, title: "Load file history", image: "ReloadRevisions", width: 32)
+        loadButton.onPrimaryClick = { [weak self] in self?.reload() }
+        configureMenuButton(fullHistoryButton, title: "Show Full History", image: "FileHistory", width: 29)
+        configureMenuButton(blameOptionsButton, title: "Blame options", image: "Blame", width: 29)
+        for control in [loadButton, fullHistoryButton, blameOptionsButton] { toolbar.addArrangedSubview(control) }
         let log = NSButton(title: "Command log", target: self, action: #selector(logClicked))
         toolbar.addArrangedSubview(log)
+        toolbar.addArrangedSubview(toolbarOverflow.button)
+        toolbarOverflow.isAvailable = { [weak self] control in
+            guard let self else { return false }
+            return control !== blameOptionsButton || tabs.tabViewItems.contains(blameTab)
+        }
+        toolbarOverflow.attach(to: toolbar, groups: filters.overflowGroups + [[loadButton], [fullHistoryButton], [blameOptionsButton], [log]])
         grid.onSelection = { [weak self] _ in self?.selectionChanged() }
         grid.onRefreshRequested = { [weak self] in self?.reload() }
         grid.onFilterChanged = { [weak self] in self?.filters.filterChanged($0) }
@@ -198,14 +229,15 @@ final class FileHistoryViewController: NSViewController, NSMenuDelegate {
             split.splitView.isVertical = false
 
 
-            split.view.frame = NSRect(x: 0, y: 0, width: 1000, height: 450)
+            split.view.frame = NSRect(x: 0, y: 0, width: 748, height: 300)
             split.addSplitViewItem(NSSplitViewItem(viewController: first))
             split.addSplitViewItem(NSSplitViewItem(viewController: second))
-            split.setRetainedPosition(180)
+            split.setRetainedPosition(160)
             return split
         }
         func tab(_ id: String, _ title: String, _ controller: NSViewController) -> NSTabViewItem {
-            let item = NSTabViewItem(viewController: controller); item.identifier = id; item.label = title
+            let item = FileHistoryIconTab(viewController: controller); item.identifier = id; item.label = title
+            if let image = ["commit": "CommitSummary", "diff": "Diff", "view": "ViewFile", "blame": "Blame"][id] { item.image = AppKitFactory.resourceImage(image, accessibilityDescription: title) }
             return item
         }
         commandTab = tab("commit", "Commit", pane(info, commitDiff))
@@ -220,10 +252,10 @@ final class FileHistoryViewController: NSViewController, NSMenuDelegate {
         tabs.onChange = { [weak self] in if self?.configuringTabs == false { self?.selectionChanged() } }
         let split = RetainingSplitViewController(resizeBehavior: .fixedLeadingPane)
         split.splitView.isVertical = false
-        split.view.frame = NSRect(x: 0, y: 0, width: 1000, height: 664)
+        split.view.frame = NSRect(x: 0, y: 0, width: 748, height: 388)
         split.addSplitViewItem(NSSplitViewItem(viewController: grid))
         split.addSplitViewItem(NSSplitViewItem(viewController: tabs))
-        split.setRetainedPosition(190)
+        split.setRetainedPosition(101)
         addChild(split); split.view.translatesAutoresizingMaskIntoConstraints = false
         status.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(toolbar); root.addSubview(split.view); root.addSubview(status)
@@ -246,7 +278,7 @@ final class FileHistoryViewController: NSViewController, NSMenuDelegate {
         generation += 1; viewGeneration += 1
         readTask?.cancel(); viewTask?.cancel(); infoTask?.cancel(); buildTask?.cancel()
         if let reader { Task { await reader.cancel() } }
-        blame.cancel(); commitDiff.cancelLoads(); watcher.cancel()
+        blame.cancel(); diff.previewPresentation.cancel(); fileView.previewPresentation.cancel(); commitDiff.cancelLoads(); watcher.cancel()
     }
 
     func reload() {
@@ -263,6 +295,7 @@ final class FileHistoryViewController: NSViewController, NSMenuDelegate {
                 let request = try await history.fileHistoryReadRequest()
                 guard !Task.isCancelled, generation == token else { return }
                 reader = request.reader; headID = request.context.headID
+                grid.applyAuthorIdentity(request.identity)
                 repositoryPath = request.identity.currentRepository.path
                 isBare = request.identity.currentRepository.isBare
                 commitDiff.isBareRepository = isBare
@@ -301,7 +334,7 @@ final class FileHistoryViewController: NSViewController, NSMenuDelegate {
     }
 
     private func selectionChanged() {
-        viewTask?.cancel(); infoTask?.cancel(); blame.cancel(); viewGeneration += 1
+        viewTask?.cancel(); infoTask?.cancel(); blame.cancel(); diff.previewPresentation.cancel(); fileView.previewPresentation.cancel(); viewGeneration += 1
         shownItem = nil
         let token = viewGeneration
         let selected = grid.selectedRevisionIDsBySelectionOrder.compactMap { id in revisions.first { $0.id == id } }
@@ -318,10 +351,11 @@ final class FileHistoryViewController: NSViewController, NSMenuDelegate {
                 let available = entry != nil
                 configureTabs(commit: commit, available: available, folder: folder, submodule: entry?.gitObjectType == "commit")
                 isSubmodule = entry?.gitObjectType == "commit"
+                blameOptionsButton.isHidden = isSubmodule || folder || !available
                 fileView.canBlame = available && !commit.isArtificial && entry?.gitObjectType != "commit"
                 if fileView.canBlame { diff.supportedFileCommands.insert("file.blame") }
                 else { diff.supportedFileCommands.remove("file.blame") }
-                let children = commit.objectID.map { parent in revisions.filter { $0.parentIDs.contains(parent) }.compactMap(\.objectID) } ?? []
+                let children = CommitRelationsResolver.resolve(commit: commit, history: revisions).childIDs
 
 
                 let actual = if let id = commit.objectID, let resolved = source as? any RepositoryBlameDataSource {
@@ -347,9 +381,9 @@ final class FileHistoryViewController: NSViewController, NSMenuDelegate {
                 case "view":
                     if let entry {
                         fileView.applyRevision(commit); fileView.apply(file: entry, selectedPath: path)
-                        let presentation = try await source.loadFilePresentation(for: commit, file: entry, encoding: fileView.selectedEncoding)
+                        let presentation = try await source.prepareFilePresentation(for: commit, file: entry, encoding: fileView.selectedEncoding)
                         guard !Task.isCancelled, token == viewGeneration else { return }
-                        fileView.apply(content: presentation, file: entry)
+                        fileView.apply(preview: presentation, file: entry)
                     }
                 case "blame":
                     blameInfo.apply(commit: commit, children: children)
@@ -357,12 +391,9 @@ final class FileHistoryViewController: NSViewController, NSMenuDelegate {
                 case "diff":
                     if let files = source as? any RepositoryFileStatusDataSource {
                         diff.apply(file: changed, diff: nil)
-                        let content = try await files.loadFileStatusDiff(group: group, file: changed, options: diff.diffOptions, grep: GitGrepOptions())
+                        let content = try await files.prepareFileStatusPreview(group: group, file: changed, options: diff.diffOptions, grep: GitGrepOptions())
                         guard !Task.isCancelled, token == viewGeneration else { return }
-                        switch content {
-                        case .diff(let result): diff.apply(file: changed, diff: result)
-                        case .text(let text): diff.apply(file: changed, diff: RevisionDiffViewController.textDiff(text, id: path))
-                        }
+                        diff.apply(preview: content, file: changed)
                     }
                 default: break
                 }
@@ -399,34 +430,71 @@ final class FileHistoryViewController: NSViewController, NSMenuDelegate {
         }
     }
 
-    func menuNeedsUpdate(_ menu: NSMenu) { buildOptions(menu) }
+    private func configureMenuButton(_ button: NSPopUpButton, title: String, image: String, width: CGFloat) {
+        button.addItem(withTitle: title)
+        button.item(at: 0)?.image = AppKitFactory.resourceImage(image, accessibilityDescription: title)
+        button.imagePosition = .imageOnly
+        button.toolTip = title
+        button.setAccessibilityLabel(title)
+        button.controlSize = .small
+        button.bezelStyle = .texturedRounded
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.widthAnchor.constraint(equalToConstant: width).isActive = true
+        button.menu?.autoenablesItems = false
+        button.menu?.delegate = self
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        if menu === loadButton.menu { buildLoadOptions(menu) }
+        else if menu === fullHistoryButton.menu { buildHistoryOptions(menu) }
+        else if menu === blameOptionsButton.menu { buildBlameOptions(menu) }
+    }
+
+    private func startOptions(_ menu: NSMenu, title: String) {
+        menu.removeAllItems()
+        menu.autoenablesItems = false
+        menu.addItem(withTitle: title, action: nil, keyEquivalent: "")
+    }
+
     private func add(_ title: String, id: String, to menu: NSMenu, enabled: Bool = true, checked: Bool? = nil) {
         let item = NSMenuItem(title: title, action: #selector(menuAction(_:)), keyEquivalent: "")
         item.target = self; item.identifier = .init(id); item.isEnabled = enabled
+        if let image = ["file.difftool": "Diff", "file.save": "SaveAs", "revert": "RevertCommit", "cherryPick": "CherryPick"][id] { AppKitFactory.setMenuImage(image, for: item) }
         if let checked { item.state = checked ? .on : .off }
         if id == "file.difftool" || id == "file.difftool.selectedToLocal", let chord = ApplicationHotkeys.shared.chord(for: id) {
             item.keyEquivalent = chord.key; item.keyEquivalentModifierMask = NSEvent.ModifierFlags(rawValue: chord.modifiers)
         }
         menu.addItem(item)
     }
-    private func buildOptions(_ menu: NSMenu) {
-        menu.removeAllItems()
+    private func buildLoadOptions(_ menu: NSMenu) {
+        startOptions(menu, title: "Load file history")
         let p = AppSettingsStore.shared.revisionGridPreferences
-        add("Options", id: "caption", to: menu, enabled: false)
         add("Load history on show", id: "loadHistory", to: menu, checked: p.loadFileHistoryOnShow)
-        if !isSubmodule { add("Load blame on show", id: "loadBlame", to: menu, checked: p.loadBlameOnShow) }
-        menu.addItem(.separator())
+        add("Load blame on show", id: "loadBlame", to: menu, checked: p.loadBlameOnShow && tabs.tabViewItems.contains(blameTab))
+    }
+
+    private func buildHistoryOptions(_ menu: NSMenu) {
+        startOptions(menu, title: "Show Full History")
+        let p = AppSettingsStore.shared.revisionGridPreferences
         add("Show full history", id: "full", to: menu, checked: p.fullHistoryInFileHistory)
         add("Simplify merges", id: "simplify", to: menu, enabled: p.fullHistoryInFileHistory, checked: p.simplifyMergesInFileHistory)
-        add("Detect and follow renames", id: "follow", to: menu, checked: p.followRenamesInFileHistory)
-        add("Detect and follow - exact renames and copies only", id: "exact", to: menu, enabled: p.followRenamesInFileHistory, checked: p.followRenamesInFileHistoryExactOnly)
-        menu.addItem(.separator())
-        guard !isSubmodule else { return }
+    }
+
+    private func buildBlameOptions(_ menu: NSMenu) {
+        startOptions(menu, title: "Blame options")
         let b = AppSettingsStore.shared.blamePreferences
-        for (id, label, value) in [("ignoreWhitespace", "Ignore whitespace", b.ignoreWhitespace), ("detectCopyInFile", "Detect move and copy in this file", b.detectCopyInFile),
-            ("detectCopyInAll", "Detect move and copy in all files", b.detectCopyInAll), ("displayAuthorFirst", "Display author first", b.displayAuthorFirst),
-            ("showAuthor", "Show author", b.showAuthor), ("showAuthorDate", "Show author date", b.showAuthorDate), ("showAuthorTime", "Show author time", b.showAuthorTime),
-            ("showLineNumbers", "Show line numbers", b.showLineNumbers), ("showOriginalFilePath", "Show original file path", b.showOriginalFilePath), ("showAuthorAvatar", "Show author avatar", b.showAuthorAvatar)] {
+        add("Blame settings:", id: "blame.caption.settings", to: menu, enabled: false)
+        for (id, label, value) in [("ignoreWhitespace", "Ignore whitespace", b.ignoreWhitespace),
+            ("detectCopyInFile", "Detect move and copy in this file", b.detectCopyInFile),
+            ("detectCopyInAll", "Detect move and copy in all files", b.detectCopyInAll)] {
+            add(label, id: "blame." + id, to: menu, checked: value)
+        }
+        menu.addItem(.separator())
+        add("Display result settings:", id: "blame.caption.display", to: menu, enabled: false)
+        for (id, label, value) in [("displayAuthorFirst", "Display author first", b.displayAuthorFirst),
+            ("showAuthorAvatar", "Show author avatar", b.showAuthorAvatar), ("showAuthor", "Show author", b.showAuthor),
+            ("showAuthorDate", "Show author date", b.showAuthorDate), ("showAuthorTime", "Show author time", b.showAuthorTime),
+            ("showLineNumbers", "Show line numbers", b.showLineNumbers), ("showOriginalFilePath", "Show original file path", b.showOriginalFilePath)] {
             add(label, id: "blame." + id, to: menu, enabled: id != "showAuthorTime" || b.showAuthorDate, checked: value)
         }
     }
@@ -436,10 +504,16 @@ final class FileHistoryViewController: NSViewController, NSMenuDelegate {
         menu.removeAllItems()
         let real = selected.first?.isArtificial == false
         let single = selected.count == 1
-        let copy = NSMenuItem(title: "Copy to clipboard", action: nil, keyEquivalent: "")
-        let copyMenu = NSMenu(); copyMenu.autoenablesItems = false
-        for (id, text) in [("hash", "Commit hash"), ("message", "Commit message"), ("author", "Author"), ("date", "Date")] { add(text, id: "revision.copy." + id, to: copyMenu, enabled: real) }
-        copy.submenu = copyMenu; copy.isEnabled = real; menu.addItem(copy)
+        populatePlaceholderMenu(menu, with: [RevisionContextMenuBuilder.copyMenu(selected)])
+        let copy = menu.items.first!
+        copy.isEnabled = real && !selected.isEmpty
+        if let submenu = copy.submenu {
+            for entry in submenu.items where entry.isEnabled {
+                entry.target = self
+                entry.action = #selector(menuAction(_:))
+            }
+        }
+        AppKitFactory.applyRevisionCopyImages(to: menu)
         menu.addItem(.separator())
         let canDiff = (1...2).contains(selected.count) && shownItem != nil
         add("Open with difftool", id: "file.difftool", to: menu, enabled: canDiff)
@@ -466,9 +540,10 @@ final class FileHistoryViewController: NSViewController, NSMenuDelegate {
         add("Cherry pick commit", id: "cherryPick", to: sub, enabled: single && real && !isBare)
         manipulate.submenu = sub; manipulate.isEnabled = single && real && !isBare; menu.addItem(manipulate)
         menu.addItem(.separator())
-        let options = NSMenuItem(title: "History / Blame options", action: nil, keyEquivalent: "")
-        let settings = NSMenu(); settings.autoenablesItems = false; buildOptions(settings)
-        options.submenu = settings; menu.addItem(options)
+        let p = AppSettingsStore.shared.revisionGridPreferences
+        add("Detect and follow renames", id: "follow", to: menu, checked: p.followRenamesInFileHistory)
+        add("Detect and follow - exact renames and copies only", id: "exact", to: menu, enabled: p.followRenamesInFileHistory, checked: p.followRenamesInFileHistoryExactOnly)
+        menu.addItem(.separator())
         for (title, commands) in [("Navigate", RevisionGridMenuModel.navigate(grid.menuState)), ("View", RevisionGridMenuModel.view(grid.menuState))] {
             let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
             let submenu = NSMenu(); RevisionGridMenuModel.fill(submenu, commands, target: self, action: #selector(gridAction(_:)))

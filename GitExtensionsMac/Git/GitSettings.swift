@@ -102,7 +102,7 @@ package enum GitSettingsTools {
     package static func suggestedCommand(tool: String, path: String, merge: Bool) -> String? {
         let name = tool.lowercased()
         guard names.contains(name), !path.contains("\0"), !path.contains("\n") else { return nil }
-        let executable = path.isEmpty ? ["araxis": "compare", "bc": "bcompare", "vscode": "code", "semanticmerge": "semanticmergetool"][name] ?? name : path
+        let executable = path.isEmpty ? Self.executable(name) : path
         let arguments: String
         switch (name, merge) {
         case ("vscode", false): arguments = #"--new-window --wait --diff "$LOCAL" "$REMOTE""#
@@ -204,5 +204,67 @@ extension GitRepositoryModule: RepositorySettingsDataSource {
     package func saveGitSetting(_ key: String, value: String?, scope: GitSettingsScope) async throws {
         guard let repository = resolvedRepository else { throw RepositoryDataSourceError.unavailable }
         try await GitSettingsConfiguration.save(key, value: value, scope: scope, in: repository.rootURL, git: git)
+        if key == "diff.tool" || key.hasPrefix("difftool.") || key.hasPrefix("mergetool.") { diffToolDiscoveryTask = nil }
+    }
+}
+
+package struct GitSettingsToolConfiguration: Equatable, Sendable {
+    package let tool: String
+    package var path: String
+    package var command: String
+    package static func load(tool: String, merge: Bool, values: [String: [String]],
+                             locate: (String) -> String? = locateExecutable) -> Self {
+        guard !tool.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return .init(tool: tool, path: "", command: "") }
+        let prefix = merge ? "mergetool" : "difftool"
+        func value(_ key: String) -> String? {
+            guard let value = values[key]?.last, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+            return value
+        }
+        let known = GitSettingsTools.names.contains(tool.lowercased())
+        let executable = GitSettingsTools.executable(tool)
+        let fallback = known ? value("mergetool.\(tool).path")?.trimmingCharacters(in: CharacterSet(charactersIn: "\"")) : nil
+        let defaultPath = fallback ?? locate(executable) ?? (known ? executable : "")
+        let path = value("\(prefix).\(tool).path") ?? defaultPath
+        let command = value("\(prefix).\(tool).cmd") ?? GitSettingsTools.suggestedCommand(tool: tool, path: defaultPath, merge: merge) ?? ""
+        return .init(tool: tool, path: path, command: path.isEmpty ? "" : command)
+    }
+    package func edits(merge: Bool) -> [String: String] {
+        let root = merge ? "merge.guitool" : "diff.guitool"
+        guard !tool.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [root: ""] }
+        let prefix = merge ? "mergetool" : "difftool"
+        return [root: tool, "\(prefix).\(tool).path": path, "\(prefix).\(tool).cmd": command]
+    }
+    package static func locateExecutable(_ executable: String) -> String? {
+        let tool = GitSettingsTools.names.first { GitSettingsTools.executable($0).caseInsensitiveCompare(executable) == .orderedSame }
+        return MergeToolInvocation.resolveExecutable(executable, workingDirectory: FileManager.default.temporaryDirectory,
+            searchPaths: (ProcessInfo.processInfo.environment["PATH"] ?? "").components(separatedBy: ":")
+                + (tool.map { GitSettingsTools.applicationSearchPaths(tool: $0) } ?? []))
+    }
+}
+
+extension GitSettingsTools {
+    package static func executable(_ tool: String) -> String {
+        ["araxis": "compare", "bc": "bcompare", "vscode": "code", "semanticmerge": "semanticmergetool"][tool.lowercased()] ?? tool
+    }
+    package static func applicationSearchPaths(tool: String, roots: [URL] = [URL(fileURLWithPath: "/Applications"), FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications")]) -> [String] {
+        let names: [String]
+        switch tool.lowercased() {
+        case "araxis": names = ["Araxis Merge", "Merge"]
+        case "bc": names = ["Beyond Compare"]
+        case "diffmerge": names = ["DiffMerge"]
+        case "kdiff3": names = ["kdiff3", "KDiff3"]
+        case "meld": names = ["Meld"]
+        case "p4merge": names = ["p4merge", "P4Merge"]
+        case "semanticmerge": names = ["SemanticMerge"]
+        case "smerge": names = ["Sublime Merge"]
+        case "vscode": names = ["Visual Studio Code"]
+        default: return []
+        }
+        let directories = ["Contents/MacOS", "Contents/Resources/app/bin", "Contents/Resources/bin", "Contents/SharedSupport/bin", "Contents/Utilities"]
+        return roots.flatMap { root in names.flatMap { name in directories.map { root.appendingPathComponent(name + ".app").appendingPathComponent($0).path } } }
+    }
+    package static let credentialHelpers = ["oauth", "store", "cache"]
+    package static func editors(configured: String) -> [String] {
+        [configured, "vi", "subl --new-window --wait", "code --new-window --wait", "zed --wait"].filter { !$0.isEmpty }
     }
 }

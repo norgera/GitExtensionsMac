@@ -7,7 +7,7 @@ import GitExtensionsCore
 enum CommitInfoPresentation {
 
     enum Link: Equatable {
-        case commit(ObjectID)
+        case commit(RevisionID)
         case branch(String)
         case tag(String)
         case showAll(String)
@@ -15,7 +15,7 @@ enum CommitInfoPresentation {
 
         var url: URL {
             switch self {
-            case .commit(let id): Self.internalURL("gotocommit", id.string)
+            case .commit(let id): Self.internalURL("gotocommit", id.description)
             case .branch(let name): Self.internalURL("gotobranch", name)
             case .tag(let name): Self.internalURL("gototag", name)
             case .showAll(let what): Self.internalURL("showall", what)
@@ -40,8 +40,13 @@ enum CommitInfoPresentation {
             let data = String(url.path.dropFirst())
             switch url.host {
             case "gotocommit":
-                guard let id = try? ObjectID.parse(data) else { return nil }
-                self = .commit(id)
+                switch data {
+                case RevisionID.index.description: self = .commit(.index)
+                case RevisionID.workingDirectory.description: self = .commit(.workingDirectory)
+                default:
+                    guard let id = try? ObjectID.parse(data) else { return nil }
+                    self = .commit(.object(id))
+                }
             case "gotobranch": self = .branch(data)
             case "gototag": self = .tag(data)
             case "showall": self = .showAll(data)
@@ -64,7 +69,7 @@ enum CommitInfoPresentation {
 
 
 
-    static func header(_ commit: Commit, children: [ObjectID], now: Date = Date()) -> [HeaderRow] {
+    static func header(_ commit: Commit, children: [RevisionID], now: Date = Date()) -> [HeaderRow] {
         let author = user(commit.authorName, commit.authorEmail)
         let committer = user(commit.committerName, commit.committerEmail)
         let authorIsCommitter = author == committer
@@ -82,7 +87,7 @@ enum CommitInfoPresentation {
         }
         if !children.isEmpty { rows.append(HeaderRow(label: children.count == 1 ? "Child" : "Children", value: links(children))) }
         if !commit.parentIDs.isEmpty {
-            rows.append(HeaderRow(label: commit.parentIDs.count == 1 ? "Parent" : "Parents", value: links(commit.parentIDs)))
+            rows.append(HeaderRow(label: commit.parentIDs.count == 1 ? "Parent" : "Parents", value: links(commit.parentIDs.map(RevisionID.object))))
         }
         return rows
     }
@@ -106,9 +111,17 @@ enum CommitInfoPresentation {
         URL(string: "mailto:\(email)").map(Link.external)
     }
 
-    private static func links(_ ids: [ObjectID]) -> [Run] {
+    private static func links(_ ids: [RevisionID]) -> [Run] {
         ids.enumerated().flatMap { index, id in
-            (index > 0 ? [Run(" ")] : []) + [Run(String(id.string.prefix(10)), link: .commit(id))]
+            (index > 0 ? [Run(" ")] : []) + [Run(linkText(id), link: .commit(id))]
+        }
+    }
+
+    private static func linkText(_ id: RevisionID) -> String {
+        switch id {
+        case .object(let objectID): String(objectID.string.prefix(10))
+        case .workingDirectory: "Working directory"
+        case .index: "Commit index"
         }
     }
 

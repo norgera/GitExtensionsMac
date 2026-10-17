@@ -47,6 +47,7 @@ final class RecoverLostObjectsWindowController: NSWindowController, NSWindowDele
     private let diffViewer = DiffContentViewController()
     private let fileViewer = RevisionFileContentViewController()
     private let previewContainer = NSView()
+    private let previewSplit = NSSplitView()
 
     private(set) var lostObjects: [LostObject] = []
 
@@ -72,6 +73,8 @@ final class RecoverLostObjectsWindowController: NSWindowController, NSWindowDele
         super.init(window: window)
         window.delegate = self
         window.contentView = makeContent()
+        window.contentView?.layoutSubtreeIfNeeded()
+        previewSplit.setPosition(700, ofDividerAt: 0)
         showCommitsAndTags.state = .on
         noReflogs.state = .on
     }
@@ -118,13 +121,20 @@ final class RecoverLostObjectsWindowController: NSWindowController, NSWindowDele
         bottomHugging = top
 
 
-        let columns: [(String, String, CGFloat)] = [("check", "", 22), ("date", "Date", 150), ("type", "Type", 110), ("subject", "Subject", 200),
-                                                   ("author", "Author", 150), ("hash", "Hash", 120), ("parent", "Parent(s) hashs", 120)]
+        let columns: [(String, String, CGFloat)] = [("check", "", 22), ("date", "Date", 56), ("type", "Type", 58), ("subject", "Subject", 200),
+                                                   ("author", "Author", 150), ("hash", "Hash", 60), ("parent", "Parent(s) hashs", 60)]
         for (id, title, width) in columns {
             let column = NSTableColumn(identifier: .init(id))
             column.title = title
+            if id == "parent" {
+                column.headerCell = LostObjectsParentHeaderCell(textCell: title)
+                column.headerCell.usesSingleLineMode = false
+                column.headerCell.wraps = true
+                column.headerCell.lineBreakMode = .byWordWrapping
+            }
             column.width = width
             column.minWidth = id == "check" ? 22 : 25
+            column.resizingMask = id == "subject" ? [.autoresizingMask, .userResizingMask] : .userResizingMask
             if ["date", "type", "subject", "author", "hash"].contains(id) {
                 column.sortDescriptorPrototype = NSSortDescriptor(key: id, ascending: id != "date")
             }
@@ -132,6 +142,10 @@ final class RecoverLostObjectsWindowController: NSWindowController, NSWindowDele
         }
         table.dataSource = self
         table.delegate = self
+        table.style = .plain
+        table.intercellSpacing = .zero
+        table.headerView?.frame.size.height = 36
+        table.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
         table.allowsMultipleSelection = false
         table.allowsColumnReordering = true
         table.usesAlternatingRowBackgroundColors = true
@@ -162,14 +176,10 @@ final class RecoverLostObjectsWindowController: NSWindowController, NSWindowDele
                 view.bottomAnchor.constraint(equalTo: previewContainer.bottomAnchor)
             ])
 
-            let trailing = view.trailingAnchor.constraint(equalTo: previewContainer.trailingAnchor)
-            trailing.priority = .init(200)
-            trailing.isActive = true
+            view.trailingAnchor.constraint(equalTo: previewContainer.trailingAnchor).isActive = true
         }
-        previewContainer.wantsLayer = true
-        previewContainer.layer?.masksToBounds = true
         fileViewer.view.isHidden = true
-        let split = NSSplitView()
+        let split = previewSplit
         split.isVertical = true
         split.dividerStyle = .thin
         split.addArrangedSubview(scroll)
@@ -282,6 +292,8 @@ final class RecoverLostObjectsWindowController: NSWindowController, NSWindowDele
             table.tableColumn(withIdentifier: .init(id))?.isHidden = !showCommits
         }
         table.reloadData()
+        AppKitFactory.autosizeColumns(table, ["date", "type"], includeHeader: true)
+        table.sizeToFit()
         if !displayed.isEmpty { table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false) } else { clearPreview() }
         if showOther { detectBlobTypes() }
     }
@@ -300,6 +312,8 @@ final class RecoverLostObjectsWindowController: NSWindowController, NSWindowDele
                 for index in displayed.indices where displayed[index].objectID == blob.objectID { displayed[index].rawType += suffix }
             }
             table.reloadData(forRowIndexes: IndexSet(integersIn: 0..<displayed.count), columnIndexes: IndexSet(integersIn: 0..<table.numberOfColumns))
+            AppKitFactory.autosizeColumns(table, ["type"], includeHeader: true)
+            table.sizeToFit()
 
             if let column = table.tableColumn(withIdentifier: .init("type")) {
                 let font = NSFont.systemFont(ofSize: NSFont.systemFontSize)
@@ -378,7 +392,7 @@ final class RecoverLostObjectsWindowController: NSWindowController, NSWindowDele
     private static let dateFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateStyle = .short
-        formatter.timeStyle = .medium
+        formatter.timeStyle = .short
         return formatter
     }()
 
@@ -387,6 +401,8 @@ final class RecoverLostObjectsWindowController: NSWindowController, NSWindowDele
         let object = displayed[row]
         if column == "check" {
             let box = NSButton(checkboxWithTitle: "", target: self, action: #selector(checkToggled(_:)))
+            box.imagePosition = .imageOnly
+            box.controlSize = .small
             box.state = checked.contains(object.objectID) ? .on : .off
             box.tag = row
             box.setAccessibilityIdentifier("RecoverLostObjects.Check.\(row)")
@@ -399,7 +415,7 @@ final class RecoverLostObjectsWindowController: NSWindowController, NSWindowDele
         case "subject": text = object.subject ?? ""
         case "author": text = object.author ?? ""
         case "hash": text = object.objectID.string
-        case "parent": text = object.parent?.string ?? ""
+        case "parent": text = object.parent?.string ?? String(repeating: "0", count: object.objectID.string.count)
         default: text = ""
         }
         let field = NSTextField(labelWithString: text)
@@ -478,6 +494,7 @@ final class RecoverLostObjectsWindowController: NSWindowController, NSWindowDele
             menuItem.target = self
             menuItem.isEnabled = enabled
             menuItem.identifier = .init("lostObjects.\(id)")
+            if let image = ["view": "ViewFile", "createTag": "TagCreate", "createBranch": "BranchCreate", "copyHash": "CopyToClipboard", "copyParent": "CopyToClipboard", "saveAs": "SaveAs"][id] { AppKitFactory.setMenuImage(image, for: menuItem) }
             menu.addItem(menuItem)
         }
         add("View", #selector(viewClicked), id: "view")
@@ -503,14 +520,13 @@ final class RecoverLostObjectsWindowController: NSWindowController, NSWindowDele
         Task { @MainActor [weak self] in
             guard let self, let data = try? await source.showObject(item.objectID), !data.isEmpty else { return }
             let text = String(decoding: data, as: UTF8.self)
-            let controller = ReadOnlyTextWindowController(title: "View", text: text) { [weak self] closed in
+            let filename = item.objectType == .commit || item.objectType == .tag ? "commit.patch"
+                : item.objectType == .blob ? LostObjectsCommands.guessFileName(data, id: item.objectID) : "file.txt"
+            let controller = ReadOnlyTextWindowController(title: "View", text: text, filename: filename) { [weak self] closed in
                 self?.viewWindows.removeAll { $0 === closed }
             }
             viewWindows.append(controller)
-            if let window, let viewWindow = controller.window {
-                viewWindow.setFrameOrigin(NSPoint(x: window.frame.midX - viewWindow.frame.width / 2, y: window.frame.midY - viewWindow.frame.height / 2))
-            }
-            controller.showWindow(nil)
+            if let viewWindow = controller.window { await OwnedModalWindow.runAsync(viewWindow, owner: window) }
         }
     }
 
@@ -653,6 +669,25 @@ private final class CapturedResult: @unchecked Sendable {
 }
 
 
+private final class LostObjectsParentHeaderCell: NSTableHeaderCell {
+    override func titleRect(forBounds rect: NSRect) -> NSRect { rect.insetBy(dx: 3, dy: 2) }
+
+    override func draw(withFrame cellFrame: NSRect, in controlView: NSView) {
+        let backgroundCell = NSTableHeaderCell(textCell: "")
+        backgroundCell.isHighlighted = isHighlighted
+        backgroundCell.state = state
+        backgroundCell.draw(withFrame: cellFrame, in: controlView)
+        drawInterior(withFrame: titleRect(forBounds: cellFrame), in: controlView)
+    }
+
+    override func drawInterior(withFrame cellFrame: NSRect, in controlView: NSView) {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineBreakMode = .byWordWrapping
+        let attributes: [NSAttributedString.Key: Any] = [.font: font ?? NSFont.systemFont(ofSize: NSFont.smallSystemFontSize), .foregroundColor: NSColor.headerTextColor, .paragraphStyle: paragraph]
+        (stringValue as NSString).draw(with: cellFrame, options: [.usesLineFragmentOrigin, .usesFontLeading], attributes: attributes)
+    }
+}
+
 final class LostObjectsTableView: NSTableView {
     var onReturn: (() -> Void)?
 
@@ -670,25 +705,54 @@ final class LostObjectsTableView: NSTableView {
 
 @MainActor
 final class ReadOnlyTextWindowController: NSWindowController, NSWindowDelegate {
-    let editor = EditableFileTextView()
+    let viewer = DiffContentViewController()
+    let sourceText: String
+    private var contentDisplayed = false
     private let onClose: (NSWindowController) -> Void
 
-    init(title: String, text: String, onClose: @escaping (NSWindowController) -> Void) {
+    init(title: String, text: String, filename: String, onClose: @escaping (NSWindowController) -> Void) {
         self.onClose = onClose
+        sourceText = text
         let window = RepositoryFileEditorWindow(contentRect: NSRect(x: 0, y: 0, width: 733, height: 571),
                                                 styleMask: [.titled, .closable, .resizable, .miniaturizable], backing: .buffered, defer: false)
         window.title = title
         window.isReleasedWhenClosed = false
         super.init(window: window)
         window.delegate = self
-        editor.text = text
-        editor.textView.isEditable = false
-        editor.textView.onEscape = { [weak window] in window?.performClose(nil); return true }
-        window.contentView = editor
-        window.initialFirstResponder = editor.textView
+        window.onCancel = { [weak window] in window?.performClose(nil) }
+        let isPatch = filename.lowercased().hasSuffix(".patch") || filename.lowercased().hasSuffix(".diff")
+        viewer.toolbarMode = isPatch ? .fixedDiff : .text
+        viewer.showsLocalToolbar = true
+        viewer.supportedFileCommands = []
+        window.contentViewController = viewer
+        window.setContentSize(NSSize(width: 733, height: 571))
+        let file = ChangedFile(id: filename, path: filename, oldPath: nil, changeType: .modified, additions: 0, deletions: 0)
+        let load: @Sendable () async throws -> FileStatusContent = {
+            try Task.checkCancellation()
+            return .diff(Self.makeDiff(text: text, filename: filename, isPatch: isPatch))
+        }
+        let preview: FilePreview<FileStatusContent> = text.utf16.count > FilePreview<FileStatusContent>.threshold
+            ? .deferred(length: text.utf16.count, load: load)
+            : .ready(.diff(Self.makeDiff(text: text, filename: filename, isPatch: isPatch)))
+        viewer.apply(preview: preview, file: file) { [weak self] _ in self?.contentDisplayed = true }
+        viewer.onOptionsChanged = { [weak self] _ in
+            guard let self, contentDisplayed else { return }
+            viewer.apply(preview: .ready(.diff(Self.makeDiff(text: text, filename: filename, isPatch: isPatch))), file: file)
+        }
     }
 
     required init?(coder: NSCoder) { nil }
 
-    func windowWillClose(_ notification: Notification) { onClose(self) }
+    nonisolated private static func makeDiff(text: String, filename: String, isPatch: Bool) -> FileDiff {
+        let diff: FileDiff
+        if isPatch {
+            diff = FileDiff(id: filename, fileID: filename, lines: FixedPatchLines.lines(text))
+        } else {
+            let content = FileContentDecoder.decode(Data(text.utf8), path: filename, requestedEncoding: .automatic)
+            diff = RevisionDiffViewController.textDiff(content.kind == .binary ? content.text : text, id: filename)
+        }
+        return diff
+    }
+
+    func windowWillClose(_ notification: Notification) { viewer.previewPresentation.cancel(); onClose(self) }
 }

@@ -35,7 +35,7 @@ enum CheckoutBranchDialogs {
     }
 
     static func checkoutRevision(
-        commit: Commit,
+        commit: Commit?,
         revisions: [Commit],
         source: any RepositoryCheckoutBranchDataSource,
         updateSubmodules: Bool,
@@ -562,17 +562,17 @@ private final class CheckoutBranchViewController: BranchFormViewController<Check
 }
 
 @MainActor
-private final class CheckoutRevisionViewController: BranchFormViewController<RepositoryCheckoutRequest>, NSComboBoxDelegate {
+private final class CheckoutRevisionViewController: BranchFormViewController<RepositoryCheckoutRequest> {
     private let revisions: [Commit]
     private let source: any RepositoryCheckoutBranchDataSource
     private let updateSubmodules: Bool
-    private let revision = NSComboBox()
+    private let revision: CommitPickerSmallControl
     private let force = NSButton(checkboxWithTitle: "Force (reset local changes)", target: nil, action: nil)
     private let checkout = NSButton(title: "Checkout", target: nil, action: nil)
     private let validation = NSTextField(labelWithString: "")
 
     init(
-        commit: Commit,
+        commit: Commit?,
         revisions: [Commit],
         source: any RepositoryCheckoutBranchDataSource,
         updateSubmodules: Bool
@@ -580,19 +580,14 @@ private final class CheckoutRevisionViewController: BranchFormViewController<Rep
         self.revisions = revisions
         self.source = source
         self.updateSubmodules = updateSubmodules
+        revision = CommitPickerSmallControl(source: source as? any RepositoryRevisionComparingDataSource, revisions: revisions, selected: commit)
         super.init(nibName: nil, bundle: nil)
-        revision.stringValue = "\(commit.shortID)  \(commit.subject)"
     }
 
     required init?(coder: NSCoder) { nil }
 
     override func loadView() {
         let root = NSView()
-        revision.addItems(withObjectValues: revisions.filter { !$0.isArtificial }.map {
-            "\($0.shortID)  \($0.subject)"
-        })
-        revision.completes = true
-        revision.delegate = self
         revision.widthAnchor.constraint(greaterThanOrEqualToConstant: 280).isActive = true
         checkout.target = self
         checkout.action = #selector(accept)
@@ -622,20 +617,22 @@ private final class CheckoutRevisionViewController: BranchFormViewController<Rep
     override func viewDidAppear() {
         super.viewDidAppear()
         configurePanel()
-        panel?.makeFirstResponder(revision)
-        revision.selectText(nil)
+        panel?.makeFirstResponder(revision.field)
+        revision.field.selectText(nil)
     }
-
-    func controlTextDidChange(_ obj: Notification) { validateForm() }
-    func comboBoxSelectionDidChange(_ notification: Notification) { validateForm() }
 
     @objc private func accept() {
         validateForm()
         guard checkout.isEnabled else { return }
-        let selected = selectedRevision
         checkout.isEnabled = false
         Task { @MainActor [weak self] in
             guard let self else { return }
+            await revision.validateInput()
+            guard let selected = revision.selectedCommit?.objectID?.string else {
+                await MutationDialogs.showValidationError("Select 1 revision to checkout.", caption: "Checkout", window: panel)
+                checkout.isEnabled = true
+                return
+            }
             do {
                 guard try await source.isValidRevision(selected) else {
                     validation.stringValue = "Select an existing revision."
@@ -659,15 +656,11 @@ private final class CheckoutRevisionViewController: BranchFormViewController<Rep
         validation.stringValue = ""
     }
 
-    private var selectedRevision: String {
-        let value = revision.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        let prefix = value.split(separator: " ", maxSplits: 1).first.map(String.init) ?? value
-        return revisions.first { $0.shortID == prefix || $0.id.description == prefix }?.objectID?.string ?? prefix
-    }
+
 }
 
 @MainActor
-private final class CreateBranchViewController: BranchFormViewController<RepositoryCreateBranchRequest>, NSComboBoxDelegate {
+private final class CreateBranchViewController: BranchFormViewController<RepositoryCreateBranchRequest>, NSTextFieldDelegate {
     private let context: RepositoryBranchContext
     private let revisions: [Commit]
     private let sourceCapability: any RepositoryCheckoutBranchDataSource
@@ -678,7 +671,7 @@ private final class CreateBranchViewController: BranchFormViewController<Reposit
     private let userCanChangeRevision: Bool
     private let couldBeOrphan: Bool
     private let name: NSTextField
-    private let source = NSComboBox()
+    private let source: CommitPickerSmallControl
     private let sourceCaption = NSTextField(labelWithString: "Create branch at this revision:")
     private let checkout = NSButton(checkboxWithTitle: "Checkout after create", target: nil, action: nil)
     private let orphan = NSButton(checkboxWithTitle: "Create orphan", target: nil, action: nil)
@@ -692,17 +685,16 @@ private final class CreateBranchViewController: BranchFormViewController<Reposit
         initialCheckoutAfterCreation = checkoutAfterCreation
         self.userCanChangeRevision = userCanChangeRevision
         self.couldBeOrphan = couldBeOrphan
-        name = NSTextField(string: suggestedPrefix ?? Self.suggestedName(from: sourceRevision))
+        let initial = sourceRevision?.isArtificial == false ? sourceRevision : revisions.first { $0.objectID == context.headID }
+        self.source = CommitPickerSmallControl(source: source as? any RepositoryRevisionComparingDataSource, revisions: revisions, selected: initial)
+        name = NSTextField(string: suggestedPrefix ?? Self.suggestedName(from: initial))
         super.init(nibName: nil, bundle: nil)
     }
     required init?(coder: NSCoder) { nil }
 
     override func loadView() {
         let root = NSView()
-        source.addItems(withObjectValues: revisions.filter { !$0.isArtificial }.map { "\($0.shortID)  \($0.subject)" })
-        source.stringValue = initialRevision.map { "\($0.shortID)  \($0.subject)" } ?? "HEAD"
-        source.completes = true
-        source.delegate = self
+        source.onSelectionChanged = { [weak self] commit in self?.summary.apply(commit) }
         source.isEnabled = userCanChangeRevision
         source.widthAnchor.constraint(greaterThanOrEqualToConstant: 360).isActive = true
         checkout.state = (initialCheckoutAfterCreation ?? true) ? .on : .off
@@ -745,6 +737,9 @@ private final class CreateBranchViewController: BranchFormViewController<Reposit
         buttons.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
         view = root
         updateSummary()
+        if source.selectedCommit == nil, let head = context.headID, !isUnbornRepository {
+            Task { [weak self] in await self?.source.setSelectedCommitHash(head.string) }
+        }
         validateForm()
     }
     override func viewDidAppear() { super.viewDidAppear(); configurePanel(); panel?.makeFirstResponder(name); name.selectText(nil) }
@@ -767,7 +762,7 @@ private final class CreateBranchViewController: BranchFormViewController<Reposit
         validateForm()
         var branchName = name.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !branchName.isEmpty else {
-            validation.stringValue = "Enter a branch name."
+            Task { @MainActor [weak self] in await MutationDialogs.showValidationError("Enter branch name.", caption: "Create branch", window: self?.panel) }
             return
         }
         let preferences = AppSettingsStore.shared.checkoutBranchPreferences
@@ -790,6 +785,12 @@ private final class CreateBranchViewController: BranchFormViewController<Reposit
                     create.isEnabled = true
                     return
                 }
+                if orphan.state != .on { await source.validateInput() }
+                if orphan.state != .on && source.selectedCommit?.objectID == nil {
+                    await MutationDialogs.showValidationError("Select 1 revision to create the branch on.", caption: "Create branch", window: panel)
+                    create.isEnabled = true
+                    return
+                }
                 if let revision = selectedRevision,
                    !(try await sourceCapability.isValidRevision(revision)) {
                     validation.stringValue = "Select an existing revision."
@@ -809,27 +810,9 @@ private final class CreateBranchViewController: BranchFormViewController<Reposit
             }
         }
     }
-    func controlTextDidChange(_ obj: Notification) {
-        if let field = obj.object as? NSTextField, field === name {
-            validateForm()
-        } else {
-            updateSummary()
-        }
-    }
-    func comboBoxSelectionDidChange(_ notification: Notification) { updateSummary() }
-    private var selectedRevision: String? {
-        if !userCanChangeRevision { return initialRevision?.objectID?.string }
-        let prefix = source.stringValue.split(separator: " ", maxSplits: 1).first.map(String.init) ?? source.stringValue
-        if prefix == "HEAD" || prefix.isEmpty { return nil }
-        return revisions.first { $0.shortID == prefix || $0.id.description == prefix }?.objectID?.string ?? prefix
-    }
-    private func updateSummary() {
-        let selected = selectedRevision
-        let commit = revisions.first { $0.objectID?.string == selected || $0.shortID == selected }
-            ?? (initialRevision?.objectID?.string == selected ? initialRevision : nil)
-            ?? (!isUnbornRepository ? revisions.first(where: \.isHEAD) : nil)
-        summary.apply(commit)
-    }
+    func controlTextDidChange(_ obj: Notification) { validateForm() }
+    private var selectedRevision: String? { orphan.state == .on ? nil : source.selectedCommit?.objectID?.string }
+    private func updateSummary() { summary.apply(source.selectedCommit) }
     private static func suggestedName(from commit: Commit?) -> String {
         commit?.references.first(where: {
             $0.kind == .currentBranch || $0.kind == .localBranch || $0.kind == .remoteBranch || $0.kind == .tag
@@ -960,7 +943,7 @@ private final class DeleteBranchViewController: BranchFormViewController<[String
 }
 
 @MainActor
-private final class MultipleBranchSelectionViewController:
+final class MultipleBranchSelectionViewController:
     NSViewController,
     NSTableViewDataSource,
     NSTableViewDelegate,

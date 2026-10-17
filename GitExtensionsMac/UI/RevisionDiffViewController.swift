@@ -17,12 +17,14 @@ final class RevisionDiffViewController: RetainingSplitViewController {
     var fileStatusSource: (any RepositoryFileStatusDataSource)?
     var blameSource: (any RepositoryBlameDataSource)? { didSet { blameController.source = blameSource; filesController.canBlame = blameSource != nil } }
     var blameContext: BlameViewController.Context? { didSet { blameController.context = blameContext } }
-    var onBlameInFileTree: ((String, Int?) -> Void)?
+    var onBlameInFileTree: ((String, Int?) -> Void)? {
+        didSet { filesController.hasFileTreeBlameHandoff = onBlameInFileTree != nil }
+    }
     var onFileHistory: ((String, RevisionID?) -> Void)? {
         didSet { filesController.canFileHistory = onFileHistory != nil }
     }
 
-    var contentProvider: (@Sendable (Commit, RepositoryFileEntry, RepositoryTextEncoding) async throws -> RepositoryFileContent)?
+    var contentProvider: (@Sendable (Commit, RepositoryFileEntry, RepositoryTextEncoding) async throws -> FilePreview<RepositoryFileContent>)?
     var treeEntriesProvider: (@Sendable (Commit) async throws -> [RepositoryFileEntry])?
     var describe: @Sendable (ObjectID) -> String = { $0.shortString }
     var isBareRepository = false { didSet { filesController.isBareRepository = isBareRepository } }
@@ -35,8 +37,8 @@ final class RevisionDiffViewController: RetainingSplitViewController {
     var fallbackFollowedFile: String? {
         didSet { lastExplicitlySelectedPath = nil }
     }
-    private static let collapsedFilePaneThickness: CGFloat = 1
-    private static let collapsedDiffPaneThickness: CGFloat = 1
+    private static let collapsedFilePaneThickness: CGFloat = RepositoryBrowserViewController.splitterPanelMinSize
+    private static let collapsedDiffPaneThickness: CGFloat = RepositoryBrowserViewController.splitterPanelMinSize
 
     let filesController: ChangedFilesViewController
     private let fileListSplit = RetainingSplitViewController(resizeBehavior: .fixedTrailingPane)
@@ -54,6 +56,7 @@ final class RevisionDiffViewController: RetainingSplitViewController {
     private var revisions: [Commit] = []
     private var headID: ObjectID?
     private var shownItem: FileStatusListItem?
+    private var previewGeneration = 0
     private var shownDiff: FileDiff?
     private var diffTask: Task<Void, Never>?
     private var setDiffsTask: Task<Void, Never>?
@@ -61,15 +64,17 @@ final class RevisionDiffViewController: RetainingSplitViewController {
     private var lastExplicitlySelectedPath: String?
     private var isImplicitSelection = false
     private var didSetInitialDivider = false
+    var restoredFileListWidth: ((CGFloat) -> CGFloat?)?
 
     var scriptFileContext: [String: [String]] {
         ["SelectedRelativePaths": filesController.currentlySelectedFiles().map(\.path),
          "LineNumber": [String(filesController.isBlameShown ? blameController.currentFileLine : diffController.scriptLineNumber)], "ColumnNumber": ["1"]]
     }
 
-    init(mode: FileStatusListMode = .diff) {
+    init(mode: FileStatusListMode = .diff, groupsByRevision: Bool = true) {
         self.mode = mode
         filesController = ChangedFilesViewController(mode: mode)
+        filesController.groupsByRevision = groupsByRevision
         super.init(resizeBehavior: .fixedLeadingPane)
     }
 
@@ -162,6 +167,14 @@ final class RevisionDiffViewController: RetainingSplitViewController {
         diffController.linePatchingSupported = { [weak self] in self?.onLinePatch != nil && (self?.supportLinePatching ?? false) }
         diffController.onLinePatch = { [weak self] kind, file, diff, ids in self?.onLinePatch?(kind, file, diff, ids) }
         updateContinuousNavigation()
+        diffController.loadNextSearchFile = { [weak self] direction in
+            guard let self else { return nil }
+            return await loadNextSearchFile(direction, search: diffController.searchState)
+        }
+        fileContentController.loadNextSearchFile = { [weak self] direction in
+            guard let self else { return nil }
+            return await loadNextSearchFile(direction, search: fileContentController.searchState)
+        }
         diffController.onOptionsChanged = { [weak self] _ in self?.showSelected() }
         diffController.onFileCommand = { [weak self] identifier, _ in
             guard let self, let shownItem else { return }
@@ -181,6 +194,16 @@ final class RevisionDiffViewController: RetainingSplitViewController {
         }
     }
 
+    private func loadNextSearchFile(_ direction: FileViewerSearchState.Direction, search: FileViewerSearchState) async -> String? {
+        guard filesController.selectNextSearchFile(forward: direction == .next), let item = shownItem else { return nil }
+        let token = previewGeneration
+        await diffTask?.value
+        guard !Task.isCancelled, token == previewGeneration, shownItem == item else { return nil }
+        let activeSearch = fileContentController.view.isHidden ? diffController.searchState : fileContentController.searchState
+        if activeSearch !== search { search.setText(activeSearch.text) }
+        return item.group.id + "|" + item.file.id
+    }
+
     private func updateContinuousNavigation() {
         diffController.onScrollBoundary = supportsContinuousFileNavigation ? { [weak self] forward in
             guard let self else { return }
@@ -193,7 +216,7 @@ final class RevisionDiffViewController: RetainingSplitViewController {
         super.viewDidLayout()
         guard !didSetInitialDivider, splitView.bounds.width >= 650 else { return }
         didSetInitialDivider = true
-        setRetainedPosition(300)
+        setRetainedPosition(restoredFileListWidth?(primaryLength) ?? 300)
     }
 
 
@@ -280,6 +303,8 @@ final class RevisionDiffViewController: RetainingSplitViewController {
     func focusFileList() { filesController.focusList() }
 
     func cancelLoads() {
+        diffController.previewPresentation.cancel()
+        fileContentController.previewPresentation.cancel()
         diffTask?.cancel()
         setDiffsTask?.cancel()
         blameController.cancel()
@@ -329,6 +354,9 @@ final class RevisionDiffViewController: RetainingSplitViewController {
 
 
     private func showSelected() {
+        previewGeneration += 1
+        diffController.previewPresentation.cancel()
+        fileContentController.previewPresentation.cancel()
         diffTask?.cancel()
         diffController.supportedFileCommands.remove("file.blame")
         fileContentController.canBlame = false
@@ -377,6 +405,10 @@ final class RevisionDiffViewController: RetainingSplitViewController {
             showFileView(item)
             return
         }
+        if !displayOnly, effectiveContentProvider != nil, Self.viewsAsFileContent(item), revisions.contains(where: { $0.id == item.second }) {
+            showFileView(item)
+            return
+        }
         showDiffViewer()
         diffController.apply(file: item.file, diff: nil)
         guard let source = fileStatusSource else { return }
@@ -384,15 +416,12 @@ final class RevisionDiffViewController: RetainingSplitViewController {
         let grep = AppSettingsStore.shared.fileStatusListPreferences.grepOptions
         diffTask = Task { @MainActor [weak self] in
             do {
-                let content = try await source.loadFileStatusDiff(group: item.group, file: item.file, options: options, grep: grep)
+                let content = try await source.prepareFileStatusPreview(group: item.group, file: item.file, options: options, grep: grep)
                 guard let self, !Task.isCancelled, shownItem == item else { return }
-                switch content {
-                case .diff(let diff):
+                diffController.apply(preview: content, file: item.file) { [weak self] diff in
+                    guard let self, shownItem == item else { return }
                     shownDiff = diff
-                    diffController.apply(file: item.file, diff: diff ?? FileDiff(id: item.file.id, fileID: item.file.id, lines: []))
                     if scrollNextFileToBottom { diffController.scrollToBottom(); scrollNextFileToBottom = false }
-                case .text(let text):
-                    diffController.apply(file: item.file, diff: Self.textDiff(text, id: item.file.id))
                 }
             } catch is CancellationError {
                 return
@@ -403,6 +432,29 @@ final class RevisionDiffViewController: RetainingSplitViewController {
         }
     }
 
+
+    private var effectiveContentProvider: (@Sendable (Commit, RepositoryFileEntry, RepositoryTextEncoding) async throws -> FilePreview<RepositoryFileContent>)? {
+        if let contentProvider { return contentProvider }
+        guard let source = fileStatusSource as? any RepositoryBrowsingDataSource else { return nil }
+        return { commit, file, encoding in try await source.prepareFilePresentation(for: commit, file: file, encoding: encoding) }
+    }
+
+    var isShowingFileContent: Bool { !fileContentController.view.isHidden }
+    var displayedFileContentText: String { fileContentController.textView.string }
+    var displayedDiffText: String { diffController.searchState.text }
+
+    private var effectiveTreeEntriesProvider: (@Sendable (Commit) async throws -> [RepositoryFileEntry])? {
+        if let treeEntriesProvider { return treeEntriesProvider }
+        guard let source = fileStatusSource as? any RepositoryBrowsingDataSource else { return nil }
+        return { commit in try await source.loadRepositoryFiles(for: commit) }
+    }
+
+    static func viewsAsFileContent(_ item: FileStatusListItem) -> Bool {
+        let file = item.file
+        guard !file.isSubmodule, !file.isStatusOnly, !file.isRangeDiff, !item.group.isGrep else { return false }
+        let isImage = [".bmp", ".gif", ".ico", ".jpg", ".jpeg", ".png", ".tif", ".tiff"].contains { file.path.lowercased().hasSuffix($0) }
+        return file.changeType == .added || !file.isTracked || item.group.first == nil || (file.changeType != .deleted && isImage)
+    }
 
     static func folderDescription(_ folder: String, items: [FileStatusListItem]) -> String {
         var path = folder
@@ -416,12 +468,14 @@ final class RevisionDiffViewController: RetainingSplitViewController {
         return lines.joined(separator: "\n")
     }
 
-    static func textDiff(_ text: String, id: String) -> FileDiff {
+    nonisolated static func textDiff(_ text: String, id: String) -> FileDiff {
 
         let lines = text.components(separatedBy: "\n").enumerated().map {
             DiffLine(id: String($0.offset), oldLineNumber: nil, newLineNumber: nil, kind: .context, text: $0.element)
         }
-        return FileDiff(id: id, fileID: id, lines: lines)
+        var diff = FileDiff(id: id, fileID: id, lines: lines)
+        diff.isTextOnly = true
+        return diff
     }
 
     private func showText(_ text: String, title: String) {
@@ -432,6 +486,7 @@ final class RevisionDiffViewController: RetainingSplitViewController {
     }
 
     private func showDiffViewer() {
+        fileContentController.previewPresentation.cancel()
         blameController.cancel()
         blameController.view.isHidden = true
         diffController.view.isHidden = false
@@ -440,11 +495,12 @@ final class RevisionDiffViewController: RetainingSplitViewController {
 
 
     private func showFileView(_ item: FileStatusListItem) {
+        diffController.previewPresentation.cancel()
         blameController.cancel()
         blameController.view.isHidden = true
         diffController.view.isHidden = true
         fileContentController.view.isHidden = false
-        guard let commit = revisions.first(where: { $0.id == item.second }), let contentProvider else { return }
+        guard let commit = revisions.first(where: { $0.id == item.second }), let contentProvider = effectiveContentProvider else { return }
         let path = item.file.path
         if let source = fileStatusSource {
             let revision = item.second
@@ -455,7 +511,7 @@ final class RevisionDiffViewController: RetainingSplitViewController {
         fileContentController.applyRevision(commit)
         fileContentController.apply(file: nil, selectedPath: path)
         let encoding = fileContentController.selectedEncoding
-        let treeEntriesProvider = treeEntriesProvider
+        let treeEntriesProvider = effectiveTreeEntriesProvider
         let cached = treeEntries?.commit == commit.id ? treeEntries?.entries : nil
         diffTask = Task { @MainActor [weak self] in
             do {
@@ -470,7 +526,7 @@ final class RevisionDiffViewController: RetainingSplitViewController {
                 fileContentController.apply(file: entry, selectedPath: path)
                 let loaded = try await contentProvider(commit, entry, encoding)
                 guard !Task.isCancelled, shownItem == item else { return }
-                fileContentController.apply(content: loaded, file: entry)
+                fileContentController.apply(preview: loaded, file: entry)
             } catch is CancellationError {
                 return
             } catch {
@@ -529,6 +585,7 @@ final class ChangedFileCellView: NSTableCellView {
         text.lineBreakMode = .byTruncatingMiddle
         text.translatesAutoresizingMaskIntoConstraints = false
         statusImage.translatesAutoresizingMaskIntoConstraints = false
+        statusImage.imageScaling = .scaleProportionallyDown
         textField = text
         imageView = statusImage
         addSubview(statusImage)
@@ -546,16 +603,21 @@ final class ChangedFileCellView: NSTableCellView {
 
     required init?(coder: NSCoder) { nil }
 
-    func apply(node: ChangedFileNode, submodule: FileStatusSubmodule? = nil) {
+    func apply(node: ChangedFileNode, submodule: FileStatusSubmodule? = nil, usesFileTypeIcon: Bool = false) {
         textField?.stringValue = node.title + (submodule?.countSuffix ?? "")
         textField?.font = AppSettingsStore.shared.applicationFont(size: 11)
         textField?.lineBreakMode = node.file == nil ? .byTruncatingMiddle : AppSettingsStore.shared.preferences.truncatePathMethod.lineBreakMode
-        toolTip = submodule.map { "From: \($0.first?.string ?? "—")\nTo: \($0.second?.string ?? "—")\($0.isDirty ? "\nDirty working directory" : "")" }
+        toolTip = submodule?.summary.map { SubmoduleDiffPresentation.text($0, limitOutput: true) }
         if let file = node.file {
             let icon = submodule.flatMap { Self.submoduleImage($0, file: file) } ?? node.imageName
-            statusImage.image = AppKitFactory.resourceImage(icon, accessibilityDescription: file.changeType.description)
+            statusImage.image = usesFileTypeIcon && !file.isSubmodule && !file.isStatusOnly
+                ? FileAssociatedIconProvider.shared.icon(path: file.path)
+                : AppKitFactory.resourceImage(icon, accessibilityDescription: file.changeType.description)
         } else {
-            statusImage.image = AppKitFactory.resourceImage(node.imageName, accessibilityDescription: node.title)
+            statusImage.image = node.folderPath != nil ? FileAssociatedIconProvider.shared.icon(path: node.folderPath!, isDirectory: true)
+                : node.isGroupKey && node.imageName == "File" && node.descendantFiles.first != nil
+                ? FileAssociatedIconProvider.shared.icon(path: node.descendantFiles.first!.path)
+                : AppKitFactory.resourceImage(node.imageName, accessibilityDescription: node.title)
         }
     }
 
@@ -576,7 +638,7 @@ final class ChangedFileCellView: NSTableCellView {
     func apply(file: ChangedFile, title: String? = nil) {
         textField?.stringValue = title ?? file.path
         textField?.font = AppSettingsStore.shared.applicationFont(size: 11)
-        let imageName = ChangedFileStatusPresentation.imageName(for: file.changeType)
+        let imageName = ChangedFilesViewController.imageName(for: file, isGrep: false)
         statusImage.image = AppKitFactory.resourceImage(imageName, accessibilityDescription: file.changeType.description)
     }
 }
@@ -616,7 +678,7 @@ final class ChangedFileNode: NSObject {
     }
 
     static func file(_ file: ChangedFile, title: String, imageName: String? = nil) -> ChangedFileNode {
-        let imageName = imageName ?? ChangedFileStatusPresentation.imageName(for: file.changeType)
+        let imageName = imageName ?? ChangedFilesViewController.imageName(for: file, isGrep: false)
         return ChangedFileNode(id: "file:\(file.id)", title: title, imageName: imageName, file: file)
     }
 
@@ -632,54 +694,19 @@ final class ChangedFileNode: NSObject {
 }
 
 enum ChangedFilePathTreeBuilder {
-    private final class Branch {
-        let name: String
-        let path: String
-        var file: ChangedFile?
-        var children: [String: Branch] = [:]
-
-        init(name: String, path: String) {
-            self.name = name
-            self.path = path
-        }
-    }
-
     static func build(files: [ChangedFile], dense: Bool,
                       imageName: ((ChangedFile) -> String)? = nil) -> [ChangedFileNode] {
-        let root = Branch(name: "", path: "")
-        for file in files {
-            var current = root
-            var path = ""
-            for component in file.path.split(separator: "/").map(String.init) {
-                path = path.isEmpty ? component : "\(path)/\(component)"
-                if current.children[component] == nil {
-                    current.children[component] = Branch(name: component, path: path)
-                }
-                current = current.children[component]!
-            }
-            current.file = file
-        }
-        return sortedChildren(of: root).map { makeNode($0, dense: dense, imageName: imageName) }
+        nodes(FileStatusPaths.build(files, flat: false, dense: dense), imageName: imageName)
     }
 
-    private static func makeNode(_ branch: Branch, dense: Bool, imageName: ((ChangedFile) -> String)?) -> ChangedFileNode {
-        var current = branch
-        var title = branch.name
-        while dense, current.file == nil, current.children.count == 1, let child = current.children.values.first {
-            title += "/\(child.name)"
-            current = child
+    static func nodes(_ source: [FileStatusPathNode], imageName: ((ChangedFile) -> String)?) -> [ChangedFileNode] {
+        source.map { item in
+            if let file = item.file { return ChangedFileNode.file(file, title: item.title, imageName: imageName?(file)) }
+            let node = ChangedFileNode(id: "folder:\(item.path)", title: item.title, imageName: "FolderClosed",
+                                       children: nodes(item.children, imageName: imageName))
+            node.folderPath = item.path
+            return node
         }
-        if let file = current.file {
-            return ChangedFileNode.file(file, title: title, imageName: imageName?(file))
-        }
-        let children = sortedChildren(of: current).map { makeNode($0, dense: dense, imageName: imageName) }
-        let node = ChangedFileNode(id: "folder:\(current.path)", title: title, imageName: "FolderClosed", children: children)
-        node.folderPath = current.path
-        return node
-    }
-
-    private static func sortedChildren(of branch: Branch) -> [Branch] {
-        branch.children.values.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 }
 
@@ -703,37 +730,42 @@ enum ChangedFileListTreeBuilder {
         guard grouping != .path,
               isTreeMode || showsGroupNodesInFlatList,
               !leaves.isEmpty else { return leaves }
-        return groupedNodes(wrapping: leaves, grouping: grouping)
+        return groupedNodes(wrapping: leaves, grouping: grouping, tree: isTreeMode, dense: usesDenseTree, imageName: imageName)
     }
 
     private static func sorted(files: [ChangedFile], grouping: FileStatusGrouping) -> [ChangedFile] {
         files.sorted { left, right in
             let leftKey = groupKey(for: left, grouping: grouping)
             let rightKey = groupKey(for: right, grouping: grouping)
-            let comparison = leftKey.localizedCaseInsensitiveCompare(rightKey)
+            let comparison = grouping == .path ? ComparisonResult.orderedSame : FileStatusPaths.compare(leftKey, rightKey)
             return comparison == .orderedAscending
-                || (comparison == .orderedSame && left.path.localizedCaseInsensitiveCompare(right.path) == .orderedAscending)
+                || (comparison == .orderedSame && FileStatusPaths.precedes(left.path, right.path))
         }
     }
 
-    private static func groupedNodes(wrapping leaves: [ChangedFileNode], grouping: FileStatusGrouping) -> [ChangedFileNode] {
+    private static func groupedNodes(wrapping leaves: [ChangedFileNode], grouping: FileStatusGrouping, tree: Bool, dense: Bool,
+                                     imageName: ((ChangedFile) -> String)?) -> [ChangedFileNode] {
         let groups = Dictionary(grouping: leaves) { node in
             node.file.map { groupKey(for: $0, grouping: grouping) } ?? ""
         }
-        return groups.keys.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }.map { key in
-            let children = (groups[key] ?? []).sorted {
-                $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending
+        let result = groups.keys.sorted { FileStatusPaths.compare($0, $1) == .orderedAscending }.map { key in
+            let sorted = (groups[key] ?? []).sorted {
+                FileStatusPaths.precedes($0.file?.path ?? $0.title, $1.file?.path ?? $1.title)
             }
+            let children = tree ? ChangedFilePathTreeBuilder.build(files: sorted.compactMap(\.file), dense: dense, imageName: imageName) : sorted
+            if children.count == 1 && children[0].children.isEmpty { return children[0] }
             let imageName = grouping == .status ? children.first?.imageName ?? "FileStatusModified" : "File"
             let node = ChangedFileNode(
                 id: "group:\(grouping.rawValue):\(key)",
-                title: "(\(children.count)) \(key)",
+                title: "(\(sorted.count)) \(key)",
                 imageName: imageName,
                 children: children
             )
             node.isGroupKey = true
             return node
         }
+        if result.count == 1 && !result[0].children.isEmpty { return result[0].children }
+        return result
     }
 
     private static func groupKey(for file: ChangedFile, grouping: FileStatusGrouping) -> String {
@@ -750,6 +782,12 @@ enum ChangedFileListTreeBuilder {
 }
 
 final class DiffContentViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate {
+    var showsLocalToolbar = false {
+        didSet { if isViewLoaded { hoverToolbar.isHidden = !showsLocalToolbar } }
+    }
+    var toolbarMode: DiffViewerToolbar.Mode = .diff {
+        didSet { if isViewLoaded { hoverToolbar.configure(for: toolbarMode) } }
+    }
     var onScrollBoundary: ((Bool) -> Void)? { didSet { tableView.onScrollBoundary = onScrollBoundary } }
     func scrollToBottom() {
         guard !presentations.isEmpty else { return }
@@ -769,12 +807,19 @@ final class DiffContentViewController: NSViewController, NSTableViewDataSource, 
     private var linePatchPending = false
     private let tableView = FileViewerTableView()
     private let emptyStateLabel = NSTextField(labelWithString: "")
+    let previewPresentation = FilePreviewPresentation<FileStatusContent>()
     private let hoverToolbar = DiffViewerToolbar(preferences: AppSettingsStore.shared.preferencesForNewFileViewer())
     private var presentations: [DiffLinePresentation] = []
     private var syntaxStates: [Int?] = []
     private var gutterMetrics = DiffGutterMetrics.empty
     private var caretRow = -1
-    private var searchQuery = ""
+    let searchState = FileViewerSearchState()
+    var loadNextSearchFile: ((FileViewerSearchState.Direction) async -> String?)? { didSet { findPanel.loadNext = loadNextSearchFile } }
+    private var searchOffsets: [Int] = []
+    private lazy var findPanel = FileViewerFindPanel(state: searchState, caret: { [weak self] in
+        guard let self else { return 0 }
+        return searchState.currentMatch.map(NSMaxRange) ?? (searchOffsets.indices.contains(caretRow) ? searchOffsets[caretRow] : 0)
+    }, changed: { [weak self] in self?.applySearch() })
     private var preferences = AppSettingsStore.shared.preferencesForNewFileViewer()
     private var currentFile: ChangedFile?
     private var currentDiff: FileDiff?
@@ -797,8 +842,11 @@ final class DiffContentViewController: NSViewController, NSTableViewDataSource, 
     override func loadView() {
         let root = DiffTrackingView()
         root.onPointerPresenceChanged = { [weak self] isPresent in
-            self?.hoverToolbar.isHidden = !isPresent
+            guard let self else { return }
+            hoverToolbar.isHidden = !(showsLocalToolbar || isPresent)
         }
+        hoverToolbar.configure(for: toolbarMode)
+        hoverToolbar.isHidden = !showsLocalToolbar
         hoverToolbar.onAction = { [weak self] action, state in
             self?.performToolbarAction(action, state: state)
         }
@@ -809,14 +857,11 @@ final class DiffContentViewController: NSViewController, NSTableViewDataSource, 
             switch shortcut {
             case .find: findText()
             case .findNext, .findPrevious:
-                if shortcut == .findNext, searchQuery.isEmpty, supportedFileCommands.contains("file.difftool") {
+                if shortcut == .findNext, searchState.query.isEmpty, supportedFileCommands.contains("file.difftool") {
                     openWithDifftool()
-                } else if let row = FileViewerNavigationDialogs.matchingRow(lines: presentations.map(\.line), query: searchQuery, after: caretRow, forward: shortcut == .findNext) {
-                    caretRow = row
-                    highlightOccurrences(of: searchQuery, row: row)
-                    tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
-                    tableView.scrollRowToVisible(row)
-                } else { NSSound.beep() }
+                } else {
+                    findPanel.perform(shortcut == .findNext ? .next : .previous, viaKeyboard: true)
+                }
             case .goToLine: goToLine()
             case .replace: return false
             case .wordDiff: return toggleAppearance(.gitWordDiff)
@@ -842,6 +887,7 @@ final class DiffContentViewController: NSViewController, NSTableViewDataSource, 
         tableView.backgroundColor = ApplicationColors.color("EditorBackground", fallback: .textBackgroundColor)
         tableView.delegate = self
         tableView.dataSource = self
+        tableView.onCopy = { [weak self] in self?.copySelection() }
         tableView.allowsMultipleSelection = true
         tableView.selectionHighlightStyle = .none
 
@@ -863,6 +909,7 @@ final class DiffContentViewController: NSViewController, NSTableViewDataSource, 
         emptyStateLabel.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(emptyStateLabel)
         hoverToolbar.install(in: root)
+        previewPresentation.install(in: root)
         NSLayoutConstraint.activate([
             scroll.topAnchor.constraint(equalTo: root.topAnchor),
             scroll.leadingAnchor.constraint(equalTo: root.leadingAnchor),
@@ -874,14 +921,44 @@ final class DiffContentViewController: NSViewController, NSTableViewDataSource, 
         view = root
     }
 
-    func apply(file: ChangedFile, diff: FileDiff?) {
+    func apply(preview: FilePreview<FileStatusContent>, file: ChangedFile, displayed: ((FileDiff?) -> Void)? = nil) {
+        apply(file: file, diff: FileDiff(id: file.id, fileID: file.id, lines: []))
+        emptyStateLabel.isHidden = true
+        previewPresentation.present(preview, display: { [weak self] content in
+            guard let self else { return }
+            let diff: FileDiff?
+            switch content {
+            case .diff(let value): diff = value
+            case .text(let text): diff = RevisionDiffViewController.textDiff(text, id: file.id)
+            }
+            apply(file: file, diff: diff ?? FileDiff(id: file.id, fileID: file.id, lines: []), confirmed: true)
+            displayed?(diff)
+        }, failure: { [weak self] in self?.apply(error: $0, file: file) })
+    }
+
+    func apply(file: ChangedFile, diff: FileDiff?, confirmed: Bool = false) {
+        if !confirmed, let diff {
+            let length = diff.lines.reduce(0) { $0 + $1.text.utf16.count + ($1.diffPrefix?.utf16.count ?? 0) + 1 }
+            if length > FilePreview<FileStatusContent>.threshold {
+                apply(preview: .deferred(length: length, load: { .diff(diff) }), file: file)
+                return
+            }
+        }
+        previewPresentation.cancel()
         linePatchPending = false
         currentFile = file
         currentDiff = diff
+        hoverToolbar.apply(preferences: preferences, resolvedEncoding: diff?.contentEncoding)
         hoverToolbar.toolTip = "\(file.path) — \(file.changeType.description), +\(file.additions) −\(file.deletions)"
         let lines = diff?.lines ?? []
         presentations = DiffLinePresentation.build(from: lines, appearance: diff?.appearance ?? .patch)
         syntaxStates = DiffSyntaxHighlighter.lineStates(lines, filePath: file.path)
+        var offset = 0
+        searchOffsets = lines.map { line in
+            defer { offset += line.text.utf16.count + 1 }
+            return offset
+        }
+        searchState.setText(lines.map(\.text).joined(separator: "\n"))
         occurrences.row = -1
         occurrences.column = -1
         emptyStateLabel.stringValue = diff == nil ? "Loading diff…" : (lines.isEmpty ? "No differences to display." : "")
@@ -951,7 +1028,7 @@ final class DiffContentViewController: NSViewController, NSTableViewDataSource, 
 
     private func persistPreferences(reloadDiff: Bool) {
         AppSettingsStore.shared.updateFileViewerPreferences(preferences)
-        hoverToolbar.apply(preferences: preferences)
+        hoverToolbar.apply(preferences: preferences, resolvedEncoding: currentDiff?.contentEncoding)
         if reloadDiff { onOptionsChanged?(preferences.diffOptions) }
     }
 
@@ -959,7 +1036,7 @@ final class DiffContentViewController: NSViewController, NSTableViewDataSource, 
         let updated = AppSettingsStore.shared.fileViewerPreferences
         let reload = updated.diffOptions != preferences.diffOptions
         preferences = updated
-        hoverToolbar.apply(preferences: preferences)
+        hoverToolbar.apply(preferences: preferences, resolvedEncoding: currentDiff?.contentEncoding)
         reloadRenderedLines()
         if reload { onOptionsChanged?(preferences.diffOptions) }
     }
@@ -1013,7 +1090,9 @@ final class DiffContentViewController: NSViewController, NSTableViewDataSource, 
             filePath: currentFile?.path,
             appearance: currentDiff?.appearance ?? .patch,
             highlightTerm: occurrences.term,
-            openSpan: syntaxStates.indices.contains(row) ? syntaxStates[row] : nil
+            openSpan: syntaxStates.indices.contains(row) ? syntaxStates[row] : nil,
+            searchRanges: searchRanges(row: row, active: false),
+            activeSearchRanges: searchRanges(row: row, active: true)
         )
         return cell
     }
@@ -1030,6 +1109,7 @@ final class DiffContentViewController: NSViewController, NSTableViewDataSource, 
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.autoenablesItems = false
         menu.removeAllItems()
         if canPatchLines {
             let hasLines = !selectedChangeLineIDs.isEmpty
@@ -1041,94 +1121,167 @@ final class DiffContentViewController: NSViewController, NSTableViewDataSource, 
             addMenuItem("Reset selected line(s)", action: #selector(resetSelectedLines), to: menu, enabled: hasLines)
         }
         addMenuItem("Copy", action: #selector(copySelection), to: menu, enabled: !tableView.selectedRowIndexes.isEmpty)
-        if currentDiff?.appearance ?? .patch == .patch {
+        if (currentDiff?.appearance ?? .patch) == .patch && currentDiff?.isTextOnly != true {
             addMenuItem("Copy patch", action: #selector(copyPatch), to: menu, enabled: currentDiff != nil)
-            addMenuItem("Copy old version", action: #selector(copyOldVersion), to: menu, enabled: currentDiff != nil)
             addMenuItem("Copy new version", action: #selector(copyNewVersion), to: menu, enabled: currentDiff != nil)
+            addMenuItem("Copy old version", action: #selector(copyOldVersion), to: menu, enabled: currentDiff != nil)
         }
-        addMenuItem("Select all", action: #selector(selectAllDiffLines), to: menu, enabled: !presentations.isEmpty)
-        if isDiffAppearanceVisible {
-            menu.addItem(diffAppearanceMenuItem())
+        if isDiffView {
+            menu.addItem(.separator())
+            if supportsDiffAppearance {
+                addDisplayOption("Increase the number of lines of context", action: .increaseContext, to: menu)
+                addDisplayOption("Decrease the number of lines of context", action: .decreaseContext, to: menu)
+                addDisplayOption("Show entire file", action: .entireFile, checked: preferences.showsEntireFile, to: menu)
+            }
+            addDisplayOption("Show nonprinting characters", action: .nonPrinting, checked: preferences.showsNonPrintingCharacters, to: menu)
+            if supportsDiffAppearance {
+                addDisplayOption("Show syntax highlighting", action: .syntax, checked: preferences.showsSyntaxHighlighting, to: menu)
+                addDisplayOption("Ignore whitespace changes at end of line", action: .whitespaceEOL, checked: preferences.whitespace != .none, to: menu)
+                if currentDiff?.appearance != .difftastic {
+                    addDisplayOption("Ignore changes in amount of whitespace", action: .whitespaceChanges, checked: [.changes, .all].contains(preferences.whitespace), to: menu)
+                    addDisplayOption("Ignore all whitespace changes", action: .whitespaceAll, checked: preferences.whitespace == .all, to: menu)
+                }
+            }
+            if isDiffAppearanceVisible { menu.addItem(diffAppearanceMenuItem()) }
+            menu.addItem(.separator())
+            addDisplayOption("Treat all files as text", action: .treatAsText, checked: preferences.treatsAllFilesAsText, to: menu)
+            if onScrollBoundary != nil {
+                addDisplayOption("Enable automatic continuous scroll (without Option key)", action: .continuousScroll, checked: AppSettingsStore.shared.preferences.automaticContinuousScroll, to: menu)
+            }
+        } else {
+            addMenuItem("Select all", action: #selector(selectAllDiffLines), to: menu, enabled: !presentations.isEmpty)
         }
-        addMenuItem("Find…", action: #selector(findText), to: menu, enabled: !presentations.isEmpty)
+        addMenuItem("Find…", action: #selector(findText), to: menu, enabled: !presentations.isEmpty || previewPresentation.state == .deferred)
+        addMenuItem("Find next", action: #selector(findNext), to: menu, enabled: !presentations.isEmpty && !searchState.query.isEmpty)
+        addMenuItem("Find previous", action: #selector(findPrevious), to: menu, enabled: !presentations.isEmpty && !searchState.query.isEmpty)
         addMenuItem("Go to line…", action: #selector(goToLine), to: menu, enabled: !presentations.isEmpty)
-        menu.addItem(.separator())
-        addMenuItem("Open working directory file", action: #selector(openFile), to: menu, enabled: currentFile?.changeType != .deleted && supportedFileCommands.contains("file.open.local"))
-        addMenuItem("Open containing folder", action: #selector(showInFinder), to: menu, enabled: currentFile != nil && supportedFileCommands.contains("file.showFinder"))
-        addMenuItem("Open with difftool", action: #selector(openWithDifftool), to: menu, enabled: currentFile != nil && supportedFileCommands.contains("file.difftool"))
-
-        let mutationTitle: String?
-        switch selectionScope {
-        case .workingTree: mutationTitle = "Stage selected hunk"
-        case .index: mutationTitle = "Unstage selected hunk"
-        case .revision: mutationTitle = nil
+        if !isDiffView {
+            menu.addItem(.separator())
+            addMenuItem("Open working directory file", action: #selector(openFile), to: menu, enabled: currentFile?.changeType != .deleted && supportedFileCommands.contains("file.open.local"))
+            addMenuItem("Open containing folder", action: #selector(showInFinder), to: menu, enabled: currentFile != nil && supportedFileCommands.contains("file.showFinder"))
+            addMenuItem("Open with difftool", action: #selector(openWithDifftool), to: menu, enabled: currentFile != nil && supportedFileCommands.contains("file.difftool"))
+            menu.addItem(.separator())
+            addMenuItem("Show blame", action: #selector(showBlame), to: menu, enabled: currentFile != nil && supportedFileCommands.contains("file.blame"))
+            addMenuItem("Show file history", action: #selector(showFileHistory), to: menu, enabled: currentFile != nil && supportedFileCommands.contains("file.history"))
         }
-        if let mutationTitle {
-            let item = NSMenuItem(title: mutationTitle, action: #selector(applySelectedHunk(_:)), keyEquivalent: "")
-            item.target = self
-            item.isEnabled = currentHunkLineID() != nil
-            menu.addItem(item)
-        }
+    }
 
-        menu.addItem(.separator())
-        addMenuItem("Show blame", action: #selector(showBlame), to: menu, enabled: currentFile != nil && supportedFileCommands.contains("file.blame"))
-        addMenuItem("Show file history", action: #selector(showFileHistory), to: menu, enabled: currentFile != nil && supportedFileCommands.contains("file.history"))
+    private enum DisplayOption: String {
+        case increaseContext, decreaseContext, entireFile, nonPrinting, syntax, whitespaceEOL, whitespaceChanges, whitespaceAll, treatAsText, continuousScroll
+    }
+
+    private func addDisplayOption(_ title: String, action: DisplayOption, checked: Bool? = nil, to menu: NSMenu) {
+        let item = NSMenuItem(title: title, action: #selector(displayOptionSelected(_:)), keyEquivalent: "")
+        item.target = self
+        item.representedObject = action.rawValue
+        item.identifier = .init("viewer.display." + action.rawValue)
+        if let checked { item.state = checked ? .on : .off }
+        let shortcut: FileViewerShortcut? = switch action {
+        case .increaseContext: .increaseContext
+        case .decreaseContext: .decreaseContext
+        case .entireFile: .entireFile
+        case .syntax: .syntax
+        case .treatAsText: .treatAsText
+        default: nil
+        }
+        if let shortcut { AppKitFactory.setMenuShortcut("viewer." + shortcut.rawValue, for: item) }
+        let image: String? = switch action {
+        case .increaseContext: "NumberOfLinesIncrease"
+        case .decreaseContext: "NumberOfLinesDecrease"
+        case .entireFile: "ShowEntireFile"
+        case .nonPrinting: "ShowWhitespace"
+        case .syntax: "SyntaxHighlighting"
+        case .whitespaceEOL: "WhitespaceIgnoreEol"
+        case .whitespaceChanges: "WhitespaceIgnore"
+        case .whitespaceAll: "WhitespaceIgnoreAll"
+        case .continuousScroll: "UiScrollBar"
+        default: nil
+        }
+        if let image { AppKitFactory.setMenuImage(image, for: item, adaptLightness: [.whitespaceEOL, .whitespaceChanges, .whitespaceAll, .nonPrinting, .syntax, .continuousScroll].contains(action)) }
+        if action == .whitespaceAll { AppKitFactory.setMenuShortcut("viewer.ignoreWhitespace", for: item) }
+        menu.addItem(item)
+    }
+
+    @objc private func displayOptionSelected(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String, let option = DisplayOption(rawValue: raw) else { return }
+        let action: String
+        switch option {
+        case .increaseContext: action = FileViewerShortcut.increaseContext.title
+        case .decreaseContext: action = FileViewerShortcut.decreaseContext.title
+        case .entireFile: action = FileViewerShortcut.entireFile.title
+        case .nonPrinting: action = "Show nonprinting characters"
+        case .syntax: action = FileViewerShortcut.syntax.title
+        case .whitespaceEOL: action = "Ignore whitespace changes at end of line"
+        case .whitespaceChanges: action = "Ignore changes in amount of whitespace"
+        case .whitespaceAll: action = "Ignore all whitespace changes"
+        case .treatAsText: action = FileViewerShortcut.treatAsText.title
+        case .continuousScroll:
+            let store = AppSettingsStore.shared
+            var value = store.preferences
+            value.automaticContinuousScroll.toggle()
+            store.save(value)
+            return
+        }
+        performToolbarAction(action, state: sender.state == .on ? .off : .on)
     }
 
     private func addMenuItem(_ title: String, action: Selector?, to menu: NSMenu, enabled: Bool) {
         let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
         item.target = action == nil ? nil : self
         item.isEnabled = enabled
+        let shortcut: FileViewerShortcut? = switch action {
+        case #selector(stageSelectedLines): .stageLines
+        case #selector(unstageSelectedLines): .unstageLines
+        case #selector(resetSelectedLines): .resetLines
+        case #selector(findText): .find
+        case #selector(findNext): .findNext
+        case #selector(findPrevious): .findPrevious
+        case #selector(goToLine): .goToLine
+        default: nil
+        }
+        if let shortcut { AppKitFactory.setMenuShortcut("viewer." + shortcut.rawValue, for: item) }
+        if action == #selector(copySelection) { item.keyEquivalent = "c"; item.keyEquivalentModifierMask = .command }
+        let image: String? = switch action {
+        case #selector(stageSelectedLines): "Stage"
+        case #selector(unstageSelectedLines): "Unstage"
+        case #selector(resetSelectedLines): "ResetWorkingDirChanges"
+        case #selector(findText): "Preview"
+        default: nil
+        }
+        if let image { AppKitFactory.setMenuImage(image, for: item) }
         menu.addItem(item)
     }
 
-    @objc private func copySelection() {
-        let text = tableView.selectedRowIndexes.compactMap {
-            presentations.indices.contains($0) ? presentations[$0].line.text : nil
-        }.joined(separator: "\n")
-        guard !text.isEmpty else { return }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(text, forType: .string)
-    }
+    @objc private func copySelection() { copy(.selection) }
 
     @objc private func showBlame() { if let currentFile { onFileCommand?("file.blame", currentFile) } }
     @objc private func showFileHistory() { if let currentFile { onFileCommand?("file.history", currentFile) } }
 
-    @objc private func copyPatch() {
-        copyToPasteboard(renderedPatchLines())
-    }
+    @objc private func copyPatch() { copy(.patch) }
+    @objc private func copyOldVersion() { copy(.oldVersion) }
+    @objc private func copyNewVersion() { copy(.newVersion) }
 
-    @objc private func copyOldVersion() {
-        copyToPasteboard(presentations.compactMap { value in
-            switch value.line.kind {
-            case .context, .deletion: value.line.text
-            case .header, .hunk, .addition: nil
-            }
-        }.joined(separator: "\n"))
-    }
-
-    @objc private func copyNewVersion() {
-        copyToPasteboard(presentations.compactMap { value in
-            switch value.line.kind {
-            case .context, .addition: value.line.text
-            case .header, .hunk, .deletion: nil
-            }
-        }.joined(separator: "\n"))
+    private func copy(_ command: FileViewerCopy.Command) {
+        let lines = presentations.map(\.line)
+        let combined = lines.contains { ($0.diffPrefix?.count ?? 0) == 2 }
+        let isDiff = currentDiff?.isTextOnly != true && currentDiff?.appearance != .difftastic
+        let prefixes = combined ? ["  ", "++", "+ ", " +", "--", "- ", " -"] : ["-", "+", " "]
+        let ranges = FileViewerCopy.selectedRanges(lines: lines, rows: tableView.selectedRowIndexes, patch: currentDiff?.appearance == .patch && currentDiff?.isTextOnly != true)
+        let selections: [NSRange?] = ranges.isEmpty ? [nil] : ranges.map(Optional.some)
+        let payloads = selections.compactMap { selected in
+            FileViewerCopy.payload(command, text: renderedPatchLines(), selection: selected,
+                                                   isDiff: isDiff, fullPrefixes: prefixes,
+                                                   normalizeLineEndings: currentDiff?.normalizesCopyLineEndings ?? false)
+        }
+        guard !payloads.isEmpty else { return }
+        copyToPasteboard(payloads.joined())
     }
 
     private func renderedPatchLines() -> String {
-        presentations.map { value in
-            switch value.line.kind {
-            case .addition: "+" + value.line.text
-            case .deletion: "-" + value.line.text
-            case .context: " " + value.line.text
-            case .header, .hunk: value.line.text
-            }
-        }.joined(separator: "\n")
+        presentations.map { currentDiff?.appearance == .patch && currentDiff?.isTextOnly != true ? $0.line.patchText : $0.line.text }.joined(separator: "\n")
     }
 
     private func copyToPasteboard(_ value: String) {
-        guard !value.isEmpty else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(value, forType: .string)
     }
@@ -1138,21 +1291,42 @@ final class DiffContentViewController: NSViewController, NSTableViewDataSource, 
     }
 
     @objc private func findText() {
-        guard let row = FileViewerNavigationDialogs.find(lines: presentations.map(\.line), after: caretRow, query: &searchQuery) else { return }
-        caretRow = row
-        highlightOccurrences(of: searchQuery, row: row)
-        tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
-        tableView.scrollRowToVisible(row)
+        guard !presentations.isEmpty || previewPresentation.state == .deferred else { return }
+        findPanel.present(owner: view.window)
+    }
+
+    @objc private func findNext() { findPanel.perform(.next, viaKeyboard: true) }
+    @objc private func findPrevious() { findPanel.perform(.previous, viaKeyboard: true) }
+
+    private func applySearch() {
+        if let match = searchState.currentMatch, let row = searchOffsets.lastIndex(where: { $0 <= match.location }) {
+            caretRow = row
+            tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+            tableView.scrollRowToVisible(row)
+        }
+        tableView.reloadData()
+    }
+
+    private func searchRanges(row: Int, active: Bool) -> [NSRange] {
+        let lineRange = NSRange(location: searchOffsets[row], length: presentations[row].line.text.utf16.count)
+        let matches = active ? searchState.currentMatch.map { [$0] } ?? [] : searchState.highlightedRanges
+        return matches.compactMap {
+            let range = NSIntersectionRange($0, lineRange)
+            return range.length > 0 ? NSRange(location: range.location - lineRange.location, length: range.length) : nil
+        }
     }
 
     private func diffAppearanceMenuItem() -> NSMenuItem {
         let item = NSMenuItem(title: "Diff appearance", action: nil, keyEquivalent: "")
+        AppKitFactory.setMenuImage("Diff", for: item)
         let submenu = NSMenu(title: "Diff appearance")
         submenu.autoenablesItems = false
         for (title, appearance) in [("Patch", DiffDisplayAppearance.patch), ("Git word diff", .gitWordDiff), ("Difftastic", .difftastic)] {
             let choice = NSMenuItem(title: title, action: #selector(selectDiffAppearance(_:)), keyEquivalent: "")
             choice.target = self
             choice.representedObject = appearance.rawValue
+            AppKitFactory.setMenuImage(appearance == .patch ? "Diff" : appearance == .gitWordDiff ? "EditColor" : "Difftastic", for: choice, adaptLightness: appearance == .gitWordDiff)
+            if appearance != .patch { AppKitFactory.setMenuShortcut(appearance == .gitWordDiff ? "viewer.wordDiff" : "viewer.difftastic", for: choice) }
             choice.state = preferences.diffAppearance == appearance ? .on : .off
             choice.isEnabled = appearance != .difftastic || difftasticEnabled == true
             if appearance == .difftastic, difftasticEnabled == nil {
@@ -1316,65 +1490,15 @@ struct DiffLinePresentation {
     }
 
     let line: DiffLine
-    let inlineChange: InlineChange?
-
-    static func build(from lines: [DiffLine], appearance: DiffDisplayAppearance = .patch) -> [DiffLinePresentation] {
-        var changes: [Int: InlineChange] = [:]
-        var index = appearance == .patch ? 0 : lines.count
-
-        while index < lines.count {
-            guard lines[index].kind == .deletion else {
-                index += 1
-                continue
-            }
-
-            let deletionStart = index
-            while index < lines.count, lines[index].kind == .deletion { index += 1 }
-            let deletionEnd = index
-            let additionStart = index
-            while index < lines.count, lines[index].kind == .addition { index += 1 }
-            let additionEnd = index
-
-            let pairCount = min(deletionEnd - deletionStart, additionEnd - additionStart)
-            for offset in 0..<pairCount {
-                let deletionIndex = deletionStart + offset
-                let additionIndex = additionStart + offset
-                let pair = inlineChanges(
-                    removed: lines[deletionIndex].text,
-                    added: lines[additionIndex].text
-                )
-                changes[deletionIndex] = pair.removed
-                changes[additionIndex] = pair.added
-            }
-        }
-
-        return lines.enumerated().map { index, line in
-            DiffLinePresentation(line: line, inlineChange: changes[index])
-        }
+    let inlineRanges: DiffInlineRanges?
+    var inlineChange: InlineChange? {
+        guard let range = inlineRanges?.changed.first else { return nil }
+        return InlineChange(location: range.location, length: range.length)
     }
 
-    private static func inlineChanges(
-        removed: String,
-        added: String
-    ) -> (removed: InlineChange, added: InlineChange) {
-        let old = Array(removed.utf16)
-        let new = Array(added.utf16)
-        var prefix = 0
-        while prefix < old.count, prefix < new.count, old[prefix] == new[prefix] {
-            prefix += 1
-        }
-
-        var suffix = 0
-        while suffix < old.count - prefix,
-              suffix < new.count - prefix,
-              old[old.count - suffix - 1] == new[new.count - suffix - 1] {
-            suffix += 1
-        }
-
-        return (
-            InlineChange(location: prefix, length: max(0, old.count - prefix - suffix)),
-            InlineChange(location: prefix, length: max(0, new.count - prefix - suffix))
-        )
+    static func build(from lines: [DiffLine], appearance: DiffDisplayAppearance = .patch) -> [DiffLinePresentation] {
+        let ranges = appearance == .patch ? DiffInlineAnalysis.analyze(lines) : [:]
+        return lines.enumerated().map { DiffLinePresentation(line: $0.element, inlineRanges: ranges[$0.offset]) }
     }
 }
 
@@ -1433,8 +1557,24 @@ enum DiffTextColors {
     }
 
     static func contrastingText(for background: NSColor) -> NSColor {
+        let editor = ApplicationColors.color("EditorBackground", fallback: .textBackgroundColor)
+        return NSColor(name: nil) { appearance in
+            var result = NSColor.labelColor
+            appearance.performAsCurrentDrawingAppearance {
+                result = contrastingText(over: background, editor: editor)
+            }
+            return result
+        }
+    }
+
+    static func contrastingText(over background: NSColor, editor: NSColor) -> NSColor {
         guard let rgb = background.usingColorSpace(.sRGB) else { return .labelColor }
-        let luminance = 0.299 * rgb.redComponent + 0.587 * rgb.greenComponent + 0.114 * rgb.blueComponent
+        let base = editor.usingColorSpace(.sRGB)
+        let alpha = rgb.alphaComponent
+        func composite(_ top: CGFloat, _ bottom: CGFloat?) -> CGFloat { top * alpha + (bottom ?? 1) * (1 - alpha) }
+        let luminance = 0.299 * composite(rgb.redComponent, base?.redComponent)
+            + 0.587 * composite(rgb.greenComponent, base?.greenComponent)
+            + 0.114 * composite(rgb.blueComponent, base?.blueComponent)
         return luminance > 0.5 ? .black : .white
     }
 
@@ -1608,8 +1748,7 @@ final class DiffLineCellView: NSTableCellView {
             }
         }
 
-        if let change = presentation.inlineChange, presentation.line.styles.isEmpty,
-           presentation.line.kind == .addition || presentation.line.kind == .deletion {
+        for change in (presentation.line.styles.isEmpty ? presentation.inlineRanges?.identical ?? [] : []) + (presentation.inlineRanges?.anchors ?? []).map({ NSRange(location: $0, length: 0) }) {
             let string = presentation.line.text as NSString
             let safeLocation = min(max(0, change.location), string.length)
             let safeLength = min(max(0, change.length), string.length - safeLocation)
@@ -1618,9 +1757,9 @@ final class DiffLineCellView: NSTableCellView {
             let changedText = string.substring(with: NSRange(location: safeLocation, length: safeLength))
             let leadingWidth = ceil((leadingText as NSString).size(withAttributes: [.font: font]).width)
             let changedWidth = max(2, ceil((changedText as NSString).size(withAttributes: [.font: font]).width))
-            let emphasis = presentation.line.kind == .addition
-                ? ApplicationColors.color("AnsiTerminalGreenBackBold", fallback: NSColor.systemGreen.withAlphaComponent(0.24))
-                : ApplicationColors.color("AnsiTerminalRedBackBold", fallback: NSColor.systemRed.withAlphaComponent(0.24))
+            let background = ApplicationColors.color("EditorBackground", fallback: .textBackgroundColor)
+            let emphasis = safeLength == 0 ? (presentation.line.kind == .addition ? NSColor.systemRed : NSColor.systemGreen)
+                : (baseColor?.blended(withFraction: 0.75, of: background) ?? background)
             emphasis.setFill()
             NSRect(
                 x: gutterWidth + prefixWidth + leadingWidth,
@@ -1651,7 +1790,9 @@ final class DiffLineCellView: NSTableCellView {
         filePath: String? = nil,
         appearance: DiffDisplayAppearance = .patch,
         highlightTerm: String = "",
-        openSpan: Int? = nil
+        openSpan: Int? = nil,
+        searchRanges: [NSRange] = [],
+        activeSearchRanges: [NSRange] = []
     ) {
         self.presentation = presentation
         self.gutterMetrics = gutterMetrics
@@ -1672,16 +1813,24 @@ final class DiffLineCellView: NSTableCellView {
             openSpan: openSpan
         ))
         DiffTextColors.apply(line.styles, to: attributed)
-        if appearance == .patch, !line.styles.isEmpty, let change = presentation.inlineChange,
-           line.kind == .addition || line.kind == .deletion {
+        for change in presentation.inlineRanges?.identical ?? [] where appearance == .patch && !line.styles.isEmpty {
             let location = min(max(0, change.location), attributed.length)
             let length = min(max(0, change.length), attributed.length - location)
+            let reverse = AppSettingsStore.shared.fileViewerPreferences.reverseGitColoring
             let color = line.kind == .addition
-                ? ApplicationColors.color("AnsiTerminalGreenBackBold", fallback: NSColor.systemGreen.withAlphaComponent(0.24))
-                : ApplicationColors.color("AnsiTerminalRedBackBold", fallback: NSColor.systemRed.withAlphaComponent(0.24))
-            attributed.addAttribute(.backgroundColor, value: color, range: NSRange(location: location, length: length))
+                ? ApplicationColors.color(reverse ? "AnsiTerminalGreenBackNormal" : "AnsiTerminalGreenForeNormal", fallback: .systemGreen)
+                : ApplicationColors.color(reverse ? "AnsiTerminalRedBackNormal" : "AnsiTerminalRedForeNormal", fallback: .systemRed)
+            let dimmed = color.blended(withFraction: reverse ? 0.75 : 0.5, of: ApplicationColors.color("EditorBackground", fallback: .textBackgroundColor)) ?? color
+            attributed.addAttribute(reverse ? .backgroundColor : .foregroundColor, value: dimmed, range: NSRange(location: location, length: length))
         }
         FileViewerOccurrences.highlight(highlightTerm, in: attributed)
+        for range in searchRanges where NSMaxRange(range) <= attributed.length {
+            attributed.addAttribute(.backgroundColor, value: NSColor.systemYellow.withAlphaComponent(0.5), range: range)
+        }
+        for range in activeSearchRanges where NSMaxRange(range) <= attributed.length {
+            attributed.addAttribute(.backgroundColor, value: NSColor.systemOrange.withAlphaComponent(0.6), range: range)
+            attributed.addAttribute(.underlineStyle, value: NSUnderlineStyle.single.rawValue, range: range)
+        }
         content.attributedStringValue = attributed
         switch line.kind {
         case .addition:
@@ -1697,6 +1846,7 @@ final class DiffLineCellView: NSTableCellView {
         case .context:
             prefix.stringValue = " "
         }
+        if let value = line.diffPrefix { prefix.stringValue = value }
         if diffAppearance != .patch { prefix.stringValue = "" }
         needsDisplay = true
     }
@@ -1800,9 +1950,14 @@ enum FileViewerWhitespace {
 }
 
 final class DiffViewerToolbar: NSVisualEffectView {
+    enum Mode { case diff, fixedDiff, text }
     var onAction: ((String, NSControl.StateValue) -> Void)?
     private var buttons: [String: NSButton] = [:]
     private let encoding = NSPopUpButton()
+    private var encodingWidth: NSLayoutConstraint!
+    private var mode = Mode.diff
+    private let navigationSeparator = AppKitFactory.separator()
+    private let contextSeparator = AppKitFactory.separator()
 
     convenience init(showsNonPrintingCharacters: Bool, showsSyntaxHighlighting: Bool) {
         var preferences = FileViewerPreferences()
@@ -1844,15 +1999,15 @@ final class DiffViewerToolbar: NSVisualEffectView {
 
         addButton("ArrowDown", "Next change")
         addButton("ArrowUp", "Previous change")
-        stack.addArrangedSubview(AppKitFactory.separator())
+        stack.addArrangedSubview(navigationSeparator)
         addButton("NumberOfLinesIncrease", "Increase the number of lines of context")
         addButton("NumberOfLinesDecrease", "Decrease the number of lines of context")
-        stack.addArrangedSubview(AppKitFactory.separator())
+        stack.addArrangedSubview(contextSeparator)
         addButton("ShowEntireFile", "Show entire file", toggleState: preferences.showsEntireFile ? .on : .off)
         addButton("ShowWhitespace", "Show nonprinting characters", toggleState: preferences.showsNonPrintingCharacters ? .on : .off)
         addButton("SyntaxHighlighting", "Show syntax highlighting", toggleState: preferences.showsSyntaxHighlighting ? .on : .off)
-        addButton("WhitespaceIgnoreEol", "Ignore whitespace changes at end of line", toggleState: preferences.whitespace == .endOfLine ? .on : .off)
-        addButton("WhitespaceIgnore", "Ignore changes in amount of whitespace", toggleState: preferences.whitespace == .changes ? .on : .off)
+        addButton("WhitespaceIgnoreEol", "Ignore whitespace changes at end of line", toggleState: preferences.whitespace != .none ? .on : .off)
+        addButton("WhitespaceIgnore", "Ignore changes in amount of whitespace", toggleState: [.changes, .all].contains(preferences.whitespace) ? .on : .off)
         addButton("WhitespaceIgnoreAll", "Ignore all whitespace changes", toggleState: preferences.whitespace == .all ? .on : .off)
         addButton("File", "Treat all files as text", toggleState: preferences.treatsAllFilesAsText ? .on : .off)
 
@@ -1867,7 +2022,8 @@ final class DiffViewerToolbar: NSVisualEffectView {
         encoding.target = self
         encoding.action = #selector(performPopUpAction(_:))
         encoding.translatesAutoresizingMaskIntoConstraints = false
-        encoding.widthAnchor.constraint(equalToConstant: 110).isActive = true
+        encodingWidth = encoding.widthAnchor.constraint(equalToConstant: 110)
+        encodingWidth.isActive = true
         stack.addArrangedSubview(encoding)
         addButton("Settings", "Settings")
 
@@ -1882,12 +2038,30 @@ final class DiffViewerToolbar: NSVisualEffectView {
 
     required init?(coder: NSCoder) { nil }
 
-    func apply(preferences: FileViewerPreferences) {
+    func configure(for mode: Mode) {
+        self.mode = mode
+        let visible: Set<String> = switch mode {
+        case .diff: Set(buttons.keys)
+        case .fixedDiff: ["Next change", "Previous change", "Show nonprinting characters", "Show syntax highlighting", "Settings"]
+        case .text: ["Show nonprinting characters", "Settings"]
+        }
+        for (name, button) in buttons { button.isHidden = !visible.contains(name) }
+        navigationSeparator.isHidden = mode == .text
+        contextSeparator.isHidden = mode != .diff
+        updateEncodingWidth()
+    }
+
+    private func updateEncodingWidth() {
+        let width = (encoding.title as NSString).size(withAttributes: [.font: encoding.font ?? NSFont.systemFont(ofSize: 11)]).width
+        encodingWidth.constant = mode == .diff ? 110 : max(110, ceil(width) + 32)
+    }
+
+    func apply(preferences: FileViewerPreferences, resolvedEncoding: String.Encoding? = nil) {
         buttons["Show entire file"]?.state = preferences.showsEntireFile ? .on : .off
         buttons["Show nonprinting characters"]?.state = preferences.showsNonPrintingCharacters ? .on : .off
         buttons["Show syntax highlighting"]?.state = preferences.showsSyntaxHighlighting ? .on : .off
-        buttons["Ignore whitespace changes at end of line"]?.state = preferences.whitespace == .endOfLine ? .on : .off
-        buttons["Ignore changes in amount of whitespace"]?.state = preferences.whitespace == .changes ? .on : .off
+        buttons["Ignore whitespace changes at end of line"]?.state = preferences.whitespace != .none ? .on : .off
+        buttons["Ignore changes in amount of whitespace"]?.state = [.changes, .all].contains(preferences.whitespace) ? .on : .off
         buttons["Ignore all whitespace changes"]?.state = preferences.whitespace == .all ? .on : .off
         buttons["Treat all files as text"]?.state = preferences.treatsAllFilesAsText ? .on : .off
         encoding.removeAllItems()
@@ -1896,13 +2070,18 @@ final class DiffViewerToolbar: NSVisualEffectView {
             encoding.lastItem?.representedObject = value.rawValue
         }
         encoding.selectItem(at: encoding.itemArray.firstIndex { ($0.representedObject as? String) == preferences.textEncoding.rawValue } ?? 0)
+        if preferences.textEncoding == .automatic, let resolvedEncoding,
+           let effective = RepositoryTextEncoding.allCases.first(where: { $0 != .automatic && $0.foundationEncoding == resolvedEncoding }) {
+            encoding.selectedItem?.title = effective.title
+        }
+        updateEncodingWidth()
     }
 
     func install(in root: NSView) {
         translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(self)
         let leading = leadingAnchor.constraint(greaterThanOrEqualTo: root.leadingAnchor)
-        leading.priority = .defaultHigh
+        leading.priority = .init(240)
         NSLayoutConstraint.activate([
             topAnchor.constraint(equalTo: root.topAnchor),
             trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -40),
@@ -1952,21 +2131,12 @@ final class DiffTrackingView: NSView {
 }
 
 enum FileViewerNavigationDialogs {
-    static func find(lines: [DiffLine], after caret: Int, query: inout String) -> Int? {
-        let alert = NSAlert()
-        alert.messageText = "Find in file"
-        alert.addButton(withTitle: "Find Next")
-        alert.addButton(withTitle: "Cancel")
-        let field = NSSearchField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
-        field.stringValue = query
-        alert.accessoryView = field
-        guard alert.runModal() == .alertFirstButtonReturn, !field.stringValue.isEmpty else { return nil }
-        query = field.stringValue
-        guard let row = matchingRow(lines: lines, query: field.stringValue, after: caret) else {
-            NSSound.beep()
-            return nil
-        }
-        return row
+    static func maximumLine(in lines: [DiffLine]) -> Int {
+        max(1, lines.flatMap { [$0.oldLineNumber, $0.newLineNumber].compactMap { $0 } }.max() ?? 1)
+    }
+
+    static func row(for line: Int, in lines: [DiffLine]) -> Int {
+        lines.firstIndex { ($0.newLineNumber ?? 0) >= line } ?? 0
     }
 
     static func matchingRow(lines: [DiffLine], query: String, after caret: Int, forward: Bool = true) -> Int? {
@@ -1980,20 +2150,59 @@ enum FileViewerNavigationDialogs {
     }
 
     static func goToLine(lines: [DiffLine]) -> Int? {
+        let maximum = maximumLine(in: lines)
+        guard let line = requestLine(maximum: maximum) else { return nil }
+        return row(for: line, in: lines)
+    }
+
+    static func requestLine(maximum: Int) -> Int? {
+        let input = FileViewerLineNumberInput(maximum: maximum)
         let alert = NSAlert()
         alert.messageText = "Go to line"
-        alert.addButton(withTitle: "Go")
+        alert.addButton(withTitle: "OK")
         alert.addButton(withTitle: "Cancel")
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 160, height: 24))
-        field.placeholderString = "New file line number"
-        alert.accessoryView = field
+        alert.accessoryView = input.view
+        alert.window.initialFirstResponder = input.field
+        input.field.selectText(nil)
         guard alert.runModal() == .alertFirstButtonReturn else { return nil }
-        guard let line = Int(field.stringValue), line > 0,
-              let row = lines.firstIndex(where: { $0.newLineNumber == line || $0.oldLineNumber == line }) else {
-            NSSound.beep()
-            return nil
-        }
-        return row
+        return input.value
+    }
+}
+
+final class FileViewerLineNumberInput: NSObject, NSTextFieldDelegate {
+    let view = NSView(frame: NSRect(x: 0, y: 0, width: 240, height: 52))
+    let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 210, height: 24))
+    let stepper = NSStepper(frame: NSRect(x: 216, y: 0, width: 19, height: 24))
+    let maximum: Int
+
+    init(maximum: Int) {
+        self.maximum = max(1, maximum)
+        super.init()
+        let label = NSTextField(labelWithString: "Line number (1 - \(self.maximum)):")
+        label.frame = NSRect(x: 0, y: 30, width: 240, height: 20)
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        formatter.allowsFloats = false
+        formatter.usesGroupingSeparator = false
+        field.formatter = formatter
+        field.integerValue = 1
+        field.delegate = self
+        stepper.minValue = 1
+        stepper.maxValue = Double(self.maximum)
+        stepper.integerValue = 1
+        stepper.valueWraps = false
+        stepper.target = self
+        stepper.action = #selector(step)
+        for child in [label, field, stepper] { view.addSubview(child) }
+    }
+
+    var value: Int { min(max(field.integerValue, 1), maximum) }
+
+    @objc private func step() { field.integerValue = stepper.integerValue }
+
+    func controlTextDidEndEditing(_ notification: Notification) {
+        field.integerValue = value
+        stepper.integerValue = value
     }
 }
 
@@ -2004,11 +2213,17 @@ final class RevisionFileContentViewController: NSViewController, NSMenuDelegate 
     var canBlame = false
     private let pathLabel = NSTextField(labelWithString: "Select a file")
     private let metadataLabel = NSTextField(labelWithString: "")
-    private let textView = FileViewerTextView()
+    let textView = FileViewerTextView()
+    let searchState = FileViewerSearchState()
+    var loadNextSearchFile: ((FileViewerSearchState.Direction) async -> String?)? { didSet { findPanel.loadNext = loadNextSearchFile } }
+    private lazy var findPanel = FileViewerFindPanel(state: searchState, caret: { [weak self] in
+        self.map { NSMaxRange($0.textView.selectedRange()) } ?? 0
+    }, changed: { [weak self] in self?.applySearch() })
     private let imageView = NSImageView()
     private let encodingButton = NSPopUpButton()
     private var revisionName = ""
     private var content: RepositoryFileContent?
+    let previewPresentation = FilePreviewPresentation<RepositoryFileContent>()
     private var appliedEncoding: RepositoryTextEncoding = .automatic
     var onEncodingChanged: (() -> Void)?
     var selectedEncoding: RepositoryTextEncoding {
@@ -2033,11 +2248,25 @@ final class RevisionFileContentViewController: NSViewController, NSMenuDelegate 
         header.translatesAutoresizingMaskIntoConstraints = false
         pathLabel.font = AppSettingsStore.shared.applicationFont(size: 11, weight: .semibold)
         pathLabel.lineBreakMode = .byTruncatingMiddle
-        pathLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        pathLabel.setContentCompressionResistancePriority(.init(200), for: .horizontal)
         metadataLabel.font = AppSettingsStore.shared.fontPreferences.font(.monospace, fallback: .monospacedDigitSystemFont(ofSize: 10, weight: .regular))
         metadataLabel.textColor = .secondaryLabelColor
+        metadataLabel.lineBreakMode = .byTruncatingTail
+        metadataLabel.setContentCompressionResistancePriority(.init(199), for: .horizontal)
+        encodingButton.setContentCompressionResistancePriority(.init(198), for: .horizontal)
         toolbar.addSubview(header)
 
+        textView.onReadOnlyFind = { [weak self] shortcut in
+            guard let self, content != nil, content?.kind != .image else { return }
+            if shortcut == .find { findText() }
+            else {
+                findPanel.perform(shortcut == .findPrevious ? .previous : .next, viaKeyboard: true)
+            }
+        }
+        textView.onGoToLine = { [weak self] in
+            guard let self, content != nil, content?.kind != .image else { return }
+            goToTextLine()
+        }
         textView.isEditable = false
         textView.isSelectable = true
         textView.isRichText = false
@@ -2062,6 +2291,7 @@ final class RevisionFileContentViewController: NSViewController, NSMenuDelegate 
 
         let scroll = NSScrollView()
         scroll.documentView = textView
+        FileViewerLineNumberRuler.install(on: scroll, textView: textView)
         scroll.hasVerticalScroller = true
         scroll.hasHorizontalScroller = true
         scroll.borderType = .noBorder
@@ -2091,6 +2321,7 @@ final class RevisionFileContentViewController: NSViewController, NSMenuDelegate 
             imageView.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -8),
             imageView.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -8)
         ])
+        previewPresentation.install(in: root)
         view = root
     }
 
@@ -2100,7 +2331,12 @@ final class RevisionFileContentViewController: NSViewController, NSMenuDelegate 
 
     func apply(file: RepositoryFileEntry?, selectedPath: String?) {
         _ = view
+        previewPresentation.cancel()
         content = nil
+        searchState.setText("")
+        imageView.image = nil
+        imageView.isHidden = true
+        textView.enclosingScrollView?.isHidden = false
         guard let file else {
             pathLabel.stringValue = selectedPath ?? "Select a file"
             metadataLabel.stringValue = selectedPath == nil ? "" : "Folder at \(revisionName)"
@@ -2117,15 +2353,42 @@ final class RevisionFileContentViewController: NSViewController, NSMenuDelegate 
         textView.scrollToBeginningOfDocument(nil)
     }
 
+    func apply(preview: FilePreview<RepositoryFileContent>, file: RepositoryFileEntry) {
+        apply(file: file, selectedPath: file.path)
+        textView.string = ""
+        previewPresentation.present(preview, display: { [weak self] in
+            guard let self else { return }
+            apply(content: $0, revisionLabel: revisionName, confirmed: true)
+        }, failure: { [weak self] in self?.apply(error: $0, selectedPath: file.path) })
+    }
+
     func apply(content: RepositoryFileContent, file: RepositoryFileEntry) {
         apply(content: content, revisionLabel: revisionName)
     }
 
-    func apply(content: RepositoryFileContent, revisionLabel: String) {
+    func apply(content: RepositoryFileContent, revisionLabel: String, confirmed: Bool = false) {
         _ = view
+        if !confirmed, content.kind != .image, content.text.utf16.count > FilePreview<RepositoryFileContent>.threshold {
+            imageView.image = nil
+            imageView.isHidden = true
+            textView.enclosingScrollView?.isHidden = false
+            pathLabel.stringValue = content.path
+            metadataLabel.stringValue = "\(content.byteCount) bytes   \(revisionLabel)"
+            textView.string = ""
+            searchState.setText("")
+            self.content = nil
+            previewPresentation.present(.deferred(length: content.text.utf16.count, load: { content }), display: { [weak self] in
+                self?.apply(content: $0, revisionLabel: revisionLabel, confirmed: true)
+            }, failure: { [weak self] in self?.apply(error: $0, selectedPath: content.path) })
+            return
+        }
+        previewPresentation.cancel()
         revisionName = revisionLabel
         self.content = content
+        searchState.setText("")
+        textView.normalizesCopyLineEndings = content.normalizesCopyLineEndings
         appliedEncoding = selectedEncoding
+        reloadEncodingChoices()
         pathLabel.stringValue = content.path
         let encoding = content.encoding?.title ?? (content.kind == .image ? "Image" : "Binary")
         metadataLabel.stringValue = "\(content.byteCount) bytes   \(encoding)   \(revisionName)"
@@ -2139,9 +2402,8 @@ final class RevisionFileContentViewController: NSViewController, NSMenuDelegate 
             imageView.isHidden = true
             textView.enclosingScrollView?.isHidden = false
             let preferences = AppSettingsStore.shared.fileViewerPreferences
-            let displayed = preferences.showsNonPrintingCharacters
-                ? FileViewerWhitespace.text(content.text, glyph: AppSettingsStore.shared.fontPreferences.showEolMarkerAsGlyph)
-                : content.text
+            let displayed = content.text
+            textView.layoutManager?.showsInvisibleCharacters = preferences.showsNonPrintingCharacters
             let line = DiffLine(
                 id: "file-content",
                 oldLineNumber: nil,
@@ -2155,12 +2417,30 @@ final class RevisionFileContentViewController: NSViewController, NSMenuDelegate 
                 enabled: preferences.showsSyntaxHighlighting && content.kind == .text,
                 filePath: content.path
             ))
+            searchState.setText(displayed)
             textView.scrollToBeginningOfDocument(nil)
+        }
+    }
+
+    @objc private func findNext() { findPanel.perform(.next, viaKeyboard: true) }
+    @objc private func findPrevious() { findPanel.perform(.previous, viaKeyboard: true) }
+
+    private func applySearch() {
+        let entire = NSRange(location: 0, length: textView.string.utf16.count)
+        textView.layoutManager?.removeTemporaryAttribute(.backgroundColor, forCharacterRange: entire)
+        for range in searchState.highlightedRanges {
+            textView.layoutManager?.addTemporaryAttribute(.backgroundColor, value: NSColor.systemYellow.withAlphaComponent(0.5), forCharacterRange: range)
+        }
+        if let range = searchState.currentMatch {
+            textView.setSelectedRange(range)
+            textView.scrollRangeToVisible(range)
         }
     }
 
     func apply(error: Error, selectedPath: String) {
         _ = view
+        previewPresentation.cancel()
+        searchState.setText("")
         content = nil
         pathLabel.stringValue = selectedPath
         metadataLabel.stringValue = "Unable to load"
@@ -2171,31 +2451,54 @@ final class RevisionFileContentViewController: NSViewController, NSMenuDelegate 
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
+        menu.autoenablesItems = false
         let copy = NSMenuItem(title: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "")
         copy.target = textView
         copy.isEnabled = textView.selectedRange().length > 0
+        copy.keyEquivalent = "c"
+        copy.keyEquivalentModifierMask = .command
         menu.addItem(copy)
-        let selectAll = NSMenuItem(title: "Select all", action: #selector(NSText.selectAll(_:)), keyEquivalent: "")
-        selectAll.target = textView
-        menu.addItem(selectAll)
+        menu.addItem(.separator())
+        let nonPrinting = NSMenuItem(title: "Show nonprinting characters", action: #selector(toggleNonPrinting), keyEquivalent: "")
+        nonPrinting.target = self
+        nonPrinting.state = AppSettingsStore.shared.fileViewerPreferences.showsNonPrintingCharacters ? .on : .off
+        AppKitFactory.setMenuImage("ShowWhitespace", for: nonPrinting, adaptLightness: true)
+        menu.addItem(nonPrinting)
         let find = NSMenuItem(title: "Find…", action: #selector(findText), keyEquivalent: "f")
         find.keyEquivalentModifierMask = [.command]
         find.target = self
-        find.isEnabled = !textView.string.isEmpty
+        find.isEnabled = (content != nil && content?.kind != .image && !textView.string.isEmpty) || previewPresentation.state == .deferred
         menu.addItem(find)
-        let save = NSMenuItem(title: "Save as…", action: #selector(saveAs), keyEquivalent: "")
-        save.target = self
-        save.isEnabled = content != nil
-        menu.addItem(save)
-        menu.addItem(.separator())
-        let blame = NSMenuItem(title: "Show blame", action: #selector(showBlame), keyEquivalent: "")
-        blame.target = self
-        blame.isEnabled = canBlame && onBlame != nil && content != nil
-        menu.addItem(blame)
-        let history = NSMenuItem(title: "Show file history", action: #selector(showFileHistory), keyEquivalent: "")
-        history.target = self
-        history.isEnabled = onFileHistory != nil && content != nil
-        menu.addItem(history)
+        AppKitFactory.setMenuImage("Preview", for: find)
+        for (title, action) in [("Find next", #selector(findNext)), ("Find previous", #selector(findPrevious))] {
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            item.target = self
+            item.isEnabled = content != nil && content?.kind != .image && !searchState.query.isEmpty
+            let command: FileViewerShortcut = action == #selector(findPrevious) ? .findPrevious : .findNext
+            AppKitFactory.setMenuShortcut("viewer." + command.rawValue, for: item)
+            menu.addItem(item)
+        }
+        let go = NSMenuItem(title: "Go to line…", action: #selector(goToTextLine), keyEquivalent: "")
+        go.target = self
+        go.isEnabled = content != nil && content?.kind != .image
+        AppKitFactory.setMenuShortcut("viewer.goToLine", for: go)
+        menu.addItem(go)
+    }
+
+    @objc private func toggleNonPrinting() {
+        var preferences = AppSettingsStore.shared.fileViewerPreferences
+        preferences.showsNonPrintingCharacters.toggle()
+        AppSettingsStore.shared.updateFileViewerPreferences(preferences)
+        textView.layoutManager?.showsInvisibleCharacters = preferences.showsNonPrintingCharacters
+        textView.needsDisplay = true
+    }
+
+    @objc private func goToTextLine() {
+        let starts = FileViewerTextLines.starts(in: textView.string)
+        guard let line = FileViewerNavigationDialogs.requestLine(maximum: starts.count) else { return }
+        let range = NSRange(location: starts[line - 1], length: 0)
+        textView.setSelectedRange(range)
+        textView.scrollRangeToVisible(range)
     }
 
     private func reloadEncodingChoices() {
@@ -2205,6 +2508,7 @@ final class RevisionFileContentViewController: NSViewController, NSMenuDelegate 
             encodingButton.lastItem?.representedObject = encoding.rawValue
         }
         encodingButton.selectItem(at: encodingButton.itemArray.firstIndex { ($0.representedObject as? String) == selectedEncoding.rawValue } ?? 0)
+        if selectedEncoding == .automatic, let effective = content?.encoding { encodingButton.selectedItem?.title = effective.title }
     }
 
     @objc private func showBlame() { onBlame?() }
@@ -2242,8 +2546,8 @@ final class RevisionFileContentViewController: NSViewController, NSMenuDelegate 
     }
 
     @objc private func findText() {
-        textView.window?.makeFirstResponder(textView)
-        textView.performFindPanelAction(NSMenuItem())
+        guard (content != nil && content?.kind != .image) || previewPresentation.state == .deferred else { return }
+        findPanel.present(owner: view.window, selection: textView.selectedRange())
     }
 
     @objc private func saveAs() {

@@ -296,9 +296,23 @@ final class PluginSelectionTarget: NSObject {
 }
 
 @MainActor
+struct PluginSettingsPageEntry {
+    let plugin: any GitExtensionPlugin
+    let host: GitExtensionPluginHost
+    var id: String { "plugin." + plugin.identifier.uuidString.lowercased() }
+
+    static func pages(_ entries: [(any GitExtensionPlugin, GitExtensionPluginHost)]) -> [Self] {
+        entries.filter { !$0.0.settings.isEmpty }.map { Self(plugin: $0.0, host: $0.1) }
+            .sorted { $0.plugin.name.localizedCaseInsensitiveCompare($1.plugin.name) == .orderedAscending }
+    }
+}
+
+@MainActor
 final class PluginSettingsViewController: NSViewController {
     let settings: [GitExtensionPluginSetting]
     let host: GitExtensionPluginHost
+    private let embedded: Bool
+    private let additionalContent: NSViewController?
     let scope = NSPopUpButton()
     var fields: [(GitExtensionPluginSetting, NSControl)] = []
     let rows = NSStackView()
@@ -308,8 +322,9 @@ final class PluginSettingsViewController: NSViewController {
     var loadedScope: GitExtensionPluginSettingsScope?
     var drafts: [GitExtensionPluginSettingsScope: [String: String?]] = [:]
     var resetScopes: Set<GitExtensionPluginSettingsScope> = []
-    init(settings: [GitExtensionPluginSetting], host: GitExtensionPluginHost) {
-        self.settings = settings; self.host = host
+    init(settings: [GitExtensionPluginSetting], host: GitExtensionPluginHost, embedded: Bool = false, additionalContent: NSViewController? = nil) {
+        self.settings = settings; self.host = host; self.embedded = embedded
+        self.additionalContent = additionalContent
         super.init(nibName: nil, bundle: nil)
     }
     required init?(coder: NSCoder) { nil }
@@ -324,6 +339,11 @@ final class PluginSettingsViewController: NSViewController {
         for item in scope.itemArray { item.representedObject = item.title }
         scope.target = self; scope.action = #selector(reload)
         root.addArrangedSubview(NSTextField(labelWithString: "Settings source:")); root.addArrangedSubview(scope)
+        if let additionalContent {
+            addChild(additionalContent)
+            root.addArrangedSubview(additionalContent.view)
+            additionalContent.view.widthAnchor.constraint(equalTo: root.widthAnchor, constant: -32).isActive = true
+        }
         rows.orientation = .vertical; rows.alignment = .leading; rows.spacing = 8
         root.addArrangedSubview(rows)
         rows.widthAnchor.constraint(equalTo: root.widthAnchor, constant: -32).isActive = true
@@ -332,14 +352,16 @@ final class PluginSettingsViewController: NSViewController {
         let ok = NSButton(title: "OK", target: self, action: #selector(accept)); ok.keyEquivalent = "\r"
         let close = NSButton(title: "Cancel", target: self, action: #selector(closeWindow)); close.keyEquivalent = "\u{1b}"
         let discard = NSButton(title: "Discard", target: self, action: #selector(discardChanges))
-        let buttons = NSStackView(views: [ok, close, discard, apply]); root.addArrangedSubview(buttons)
+        if !embedded {
+            let buttons = NSStackView(views: [ok, close, discard, apply]); root.addArrangedSubview(buttons)
+        }
         reload()
     }
     private var currentScope: GitExtensionPluginSettingsScope {
         .init(rawValue: scope.selectedItem?.representedObject as? String ?? "global") ?? .global
     }
     private func capture() {
-        guard let loadedScope else { return }
+        guard let loadedScope, loadedScope != .effective else { return }
         var values: [String: String?] = [:]
         for (setting, control) in fields {
             let value: String?
@@ -379,17 +401,22 @@ final class PluginSettingsViewController: NSViewController {
                     if let value, let index = values.firstIndex(of: value) { choices.selectItem(at: index + 1) }
                     control = choices
                 case .password: control = NSSecureTextField(string: value == "" ? "<empty string>" : value ?? "")
+                case .number(let minimum, let maximum):
+                    let number = PluginIntegerControl(value: value, defaultValue: setting.defaultValue, minimum: minimum, maximum: maximum)
+                    number.field.setAccessibilityLabel(setting.caption)
+                    number.stepper.setAccessibilityLabel(setting.caption)
+                    control = number
                 default: control = NSTextField(string: value == "" ? "<empty string>" : value ?? "")
                 }
                 (control as? NSTextField)?.placeholderString = "Not set; <empty string> stores empty text"
-                control.isEnabled = !clearing
+                control.isEnabled = !clearing && currentScope != .effective
                 control.widthAnchor.constraint(equalToConstant: 300).isActive = true
                 let label = NSTextField(wrappingLabelWithString: setting.caption)
                 label.widthAnchor.constraint(equalToConstant: 180).isActive = true
                 rows.addArrangedSubview(NSStackView(views: [label, control]))
                 fields.append((setting, control))
             }
-            apply.isEnabled = true; reset.isEnabled = true
+            apply.isEnabled = currentScope != .effective; reset.isEnabled = currentScope != .effective
         } catch { apply.isEnabled = false; NSAlert(error: error).runModal() }
     }
     @objc private func resetValues() {
@@ -400,25 +427,92 @@ final class PluginSettingsViewController: NSViewController {
     @objc private func discardChanges() {
         drafts.removeAll(); resetScopes.removeAll(); loadedScope = nil; reload()
     }
-    private func applyValues() -> Bool {
+    func validateDrafts() throws {
         capture()
-        do {
-            for edits in drafts.values {
-                for (name, value) in edits {
-                    if let value, let setting = settings.first(where: { $0.name == name }) { try setting.validate(value) }
-                }
+        for edits in drafts.values {
+            for (name, value) in edits {
+                if let value, let setting = settings.first(where: { $0.name == name }) { try setting.validate(value) }
             }
-            for scope in [GitExtensionPluginSettingsScope.global, .distributed, .local, .effective] {
-                for (name, value) in drafts[scope] ?? [:] {
-                    if scope == .effective, let setting = settings.first(where: { $0.name == name }),
-                       try (host.setting(name) ?? setting.defaultValue) == value { continue }
-                    try host.setSetting(name, value: value, scope: scope)
-                }
+        }
+    }
+
+    func saveDrafts() throws {
+        try validateDrafts()
+        for scope in [GitExtensionPluginSettingsScope.global, .distributed, .local] {
+            for name in (drafts[scope] ?? [:]).keys.sorted() {
+                try host.setSetting(name, value: drafts[scope]![name]!, scope: scope)
             }
-            host.settingsDidChange(); discardChanges(); return true
-        } catch { NSAlert(error: error).runModal(); return false }
+        }
+        host.settingsDidChange()
+        discardChanges()
+    }
+
+    private func applyValues() -> Bool {
+        do { try saveDrafts(); return true }
+        catch { NSAlert(error: error).runModal(); return false }
     }
     @objc private func closeWindow() { view.window?.close() }
+}
+
+final class PluginIntegerControl: NSControl, NSTextFieldDelegate {
+    let field = NSTextField()
+    let stepper = NSStepper()
+    private let defaultNumber: Int
+    private let minimum: Int
+    private let maximum: Int
+
+    init(value: String?, defaultValue: String, minimum: Int, maximum: Int) {
+        self.minimum = minimum
+        self.maximum = maximum
+        defaultNumber = min(max(Int(defaultValue) ?? minimum, minimum), maximum)
+        super.init(frame: .zero)
+        setAccessibilityElement(false)
+        let formatter = NumberFormatter()
+        formatter.allowsFloats = false
+        formatter.minimum = NSNumber(value: minimum)
+        formatter.maximum = NSNumber(value: maximum)
+        field.formatter = formatter
+        field.delegate = self
+        field.placeholderString = "Not set"
+        field.setAccessibilityIdentifier("Plugin.Integer.Value")
+        stepper.minValue = Double(minimum)
+        stepper.maxValue = Double(maximum)
+        stepper.increment = 1
+        stepper.valueWraps = false
+        stepper.target = self
+        stepper.action = #selector(stepped)
+        stepper.setAccessibilityIdentifier("Plugin.Integer.Stepper")
+        let row = NSStackView(views: [field, stepper])
+        row.alignment = .centerY
+        row.spacing = 6
+        row.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(row)
+        NSLayoutConstraint.activate([
+            row.leadingAnchor.constraint(equalTo: leadingAnchor), row.trailingAnchor.constraint(equalTo: trailingAnchor),
+            row.topAnchor.constraint(equalTo: topAnchor), row.bottomAnchor.constraint(equalTo: bottomAnchor)
+        ])
+        stringValue = value ?? ""
+    }
+
+    required init?(coder: NSCoder) { nil }
+    override func accessibilityChildren() -> [Any]? { NSAccessibility.unignoredChildren(from: [field, stepper]) }
+    override var intrinsicContentSize: NSSize { NSSize(width: 300, height: max(field.intrinsicContentSize.height, stepper.intrinsicContentSize.height)) }
+    override var isEnabled: Bool {
+        get { field.isEnabled }
+        set { field.isEnabled = newValue; stepper.isEnabled = newValue }
+    }
+    override var stringValue: String {
+        get { field.stringValue }
+        set { field.stringValue = newValue; synchronizeStepper() }
+    }
+
+    private func synchronizeStepper() {
+        stepper.integerValue = min(max(Int(field.stringValue) ?? defaultNumber, minimum), maximum)
+    }
+
+    func controlTextDidChange(_ notification: Notification) { synchronizeStepper() }
+    func controlTextDidEndEditing(_ notification: Notification) { synchronizeStepper() }
+    @objc private func stepped() { field.stringValue = String(stepper.integerValue) }
 }
 
 @MainActor

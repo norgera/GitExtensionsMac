@@ -96,9 +96,11 @@ package enum ImpactLog {
             let week = ImpactLog.week(of: nonEmpty[0], firstDayOfWeek: firstDayOfWeek)
             var added = 0
             var deleted = 0
-            while index < lines.count, !lines[index].hasPrefix("--- "), !isCancelled() {
-                let file = lines[index].split(separator: "\t", omittingEmptySubsequences: false)
+            while index < lines.count {
+                let current = lines[index]
                 index += 1
+                guard !current.hasPrefix("--- "), !isCancelled() else { break }
+                let file = current.split(separator: "\t", omittingEmptySubsequences: false)
                 guard file.count >= 2 else { continue }
                 if file[0] != "-", let value = Int(file[0]) { added += value }
                 if file[1] != "-", let value = Int(file[1]) { deleted += value }

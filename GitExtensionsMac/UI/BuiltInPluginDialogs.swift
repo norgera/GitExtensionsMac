@@ -16,7 +16,10 @@ final class BuiltInPluginDialog: NSWindowController, NSWindowDelegate, NSTableVi
     private var branches: [ObsoleteBranch] = []
     private var objects: [LargeGitFile] = []
     private var selected: Set<String> = []
+    private var daysStepper: NSStepper?
+    private weak var deleteInstruction: NSTextField?
     private var notes: [ReleaseNote] = []
+    private let revisionCount = NSTextField(labelWithString: "n/a")
     private var statisticsTabs: NSTabView?
     private var settingsWindow: NSWindowController?
     private var task: Task<Void, Never>?
@@ -35,7 +38,8 @@ final class BuiltInPluginDialog: NSWindowController, NSWindowDelegate, NSTableVi
         case .releaseNotes: 500
         default: 500
         }
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 760, height: height),
+        let width: CGFloat = plugin.kind == .proxy ? 341 : 760
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: width, height: height),
             styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         super.init(window: window)
         window.title = plugin.name; window.isReleasedWhenClosed = false; window.delegate = self
@@ -45,6 +49,11 @@ final class BuiltInPluginDialog: NSWindowController, NSWindowDelegate, NSTableVi
         stack.edgeInsets = NSEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
         window.contentView = stack
         try build()
+        if plugin.kind == .proxy {
+            let size = NSSize(width: width, height: stack.fittingSize.height)
+            window.setContentSize(size)
+            window.contentMinSize = size
+        }
     }
     required init?(coder: NSCoder) { nil }
 
@@ -94,13 +103,25 @@ final class BuiltInPluginDialog: NSWindowController, NSWindowDelegate, NSTableVi
         fields[key] = text; stack.addArrangedSubview(row)
         row.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -24).isActive = true
     }
+    private func mergeIntoPreviousRow(checkKey: String) {
+        guard let row = stack.arrangedSubviews.last as? NSStackView, let check = checks[checkKey] else { return }
+        let label = row.arrangedSubviews.first as? NSTextField
+        check.removeFromSuperview()
+        if let label { row.removeArrangedSubview(label); label.removeFromSuperview() }
+        row.insertArrangedSubview(check, at: 0)
+        check.widthAnchor.constraint(equalToConstant: 255).isActive = true
+    }
+    @objc private func daysStepped(_ sender: NSStepper) {
+        fields["days"]?.stringValue = String(sender.integerValue)
+        inputsChanged()
+    }
     private func check(_ key: String, _ caption: String, value: Bool) {
         let button = NSButton(checkboxWithTitle: caption, target: self, action: #selector(inputsChanged))
         button.state = value ? .on : .off; checks[key] = button; stack.addArrangedSubview(button)
         if key == "unmerged" { button.action = #selector(unmergedChanged) }
     }
-    private func button(_ title: String, _ action: Selector, in row: NSStackView) {
-        let button = NSButton(title: title, target: self, action: action); buttons[title] = button; row.addArrangedSubview(button)
+    private func button(_ title: String, _ action: Selector, in row: NSStackView, key: String? = nil) {
+        let button = NSButton(title: title, target: self, action: action); buttons[key ?? title] = button; row.addArrangedSubview(button)
     }
     private func buildTable(_ columns: [(String, String, CGFloat)]) {
         for (key, title, width) in columns {
@@ -129,70 +150,136 @@ final class BuiltInPluginDialog: NSWindowController, NSWindowDelegate, NSTableVi
         case .createBranches:
             field("remote", "Remote to create tracking branches for", value: "origin")
         case .deleteBranches:
+            let base = try plugin.value("Branch where all branches should be merged in", in: host)
+            let instruction = NSTextField(wrappingLabelWithString: DeleteObsoleteBranchesPresentation.instruction(mergedInto: base))
+            instruction.setAccessibilityIdentifier("DeleteObsoleteBranches.Instruction")
+            stack.addArrangedSubview(instruction)
+            deleteInstruction = instruction
             field("days", "Delete branches older than x days", value: try plugin.value("Delete obsolete branches older than (days)", in: host))
-            field("base", "Delete branches fully merged into branch", value: try plugin.value("Branch where all branches should be merged in", in: host))
-            check("unmerged", "Include unmerged branches", value: try plugin.flag("Delete unmerged branches", in: host))
+            if let row = stack.arrangedSubviews.last as? NSStackView, let days = fields["days"] {
+                days.widthAnchor.constraint(equalToConstant: 120).isActive = true
+                let stepper = NSStepper()
+                stepper.minValue = 0; stepper.maxValue = 100_000; stepper.increment = 1
+                stepper.integerValue = Int(days.stringValue) ?? 0
+                stepper.target = self; stepper.action = #selector(daysStepped(_:))
+                stepper.setAccessibilityIdentifier("DeleteObsoleteBranches.DaysStepper")
+                row.addArrangedSubview(stepper)
+                row.addArrangedSubview(NSView())
+                daysStepper = stepper
+            }
+            field("base", "Delete branches fully merged into branch", value: base)
             check("remoteMode", "Delete remote branches from", value: try plugin.flag("Delete obsolete branches from remote", in: host))
-            field("remote", "Remote", value: try plugin.value("Remote name obsoleted branches should be deleted from", in: host))
+            field("remote", "", value: try plugin.value("Remote name obsoleted branches should be deleted from", in: host))
+            mergeIntoPreviousRow(checkKey: "remoteMode")
             check("regexMode", "Use regex to filter branches", value: try plugin.flag("Use regex to filter branches to delete", in: host))
-            field("pattern", "Regular expression", value: try plugin.value("Regex to filter branches to delete", in: host))
+            field("pattern", "", value: try plugin.value("Regex to filter branches to delete", in: host))
+            mergeIntoPreviousRow(checkKey: "regexMode")
             check("ignoreCase", "Case insensitive", value: try plugin.flag("Is regex filter case insensitive?", in: host))
             check("invert", "Does not match", value: try plugin.flag("Search branches that does not match regex", in: host))
+            check("unmerged", "Include unmerged branches", value: try plugin.flag("Delete unmerged branches", in: host))
+            let search = NSStackView(); search.orientation = .horizontal
+            button("Search branches", #selector(run), in: search); stack.addArrangedSubview(search)
             buildTable([("delete", "Delete", 45), ("name", "Name", 180), ("date", "Last activity", 135), ("author", "Last author", 120), ("message", "Last message", 230)])
         case .largeFiles:
             stack.addArrangedSubview(NSTextField(wrappingLabelWithString: "Reset local changes before deleting files. Choose files to delete. Force push is required after rewriting history."))
-            buildTable([("delete", "Delete", 45), ("id", "SHA", 90), ("path", "Path", 200), ("size", "Size (Mb)", 80),
-                ("compressed", "Compressed size (Mb)", 130), ("count", "Commit count", 95), ("date", "Last commit date", 135)])
+            buildTable([("id", "SHA", 290), ("path", "Path", 200), ("size", "Size", 80),
+                ("compressed", "Compressed size", 110), ("count", "Commit count", 95), ("date", "Last commit date", 135), ("delete", "Delete", 45)])
         case .releaseNotes:
-            field("from", "Commit expression From (excluding)", value: "")
-            field("to", "Commit expression To (including)", value: "HEAD")
-            field("arguments", "git log arguments", value: BuiltInPluginCommands.releaseArguments)
-            stack.addArrangedSubview(NSTextField(labelWithString: "{0} = from; {1} = to. Most recent revisions are listed on top."))
+            field("from", "Commit expression \"From\" (excluding):", value: "")
+            (stack.arrangedSubviews.last as? NSStackView)?.addArrangedSubview(NSTextField(labelWithString: "(Commit expressions can be commit hashes,\nbranch names, tag names)"))
+            field("to", "Commit expression \"To\" (including):", value: "HEAD")
+            field("arguments", "git log arguments:", value: BuiltInPluginCommands.releaseArguments)
+            (stack.arrangedSubviews.last as? NSStackView)?.addArrangedSubview(NSTextField(labelWithString: "{0} = from; {1} = to"))
+            let generateRow = NSStackView(); generateRow.orientation = .horizontal
+            button("Generate", #selector(run), in: generateRow); stack.addArrangedSubview(generateRow)
+            let header = NSStackView(views: [NSTextField(labelWithString: "Revisions count = "), revisionCount, NSTextField(labelWithString: "Sorting: Most recent revisions are listed on top.")])
+            header.spacing = 2
+            revisionCount.setAccessibilityIdentifier("ReleaseNotes.RevisionCount")
             buildOutput()
-            let copy = NSStackView(); copy.orientation = .horizontal
-            for title in ["Original output", "Text table (tabs)", "Text table (spaces)", "HTML table"] {
-                button(title, #selector(copyNotes(_:)), in: copy); buttons[title]?.isEnabled = false
+            let resultScroll = stack.arrangedSubviews.last!
+            resultScroll.removeFromSuperview()
+            let copyRows = NSStackView(); copyRows.orientation = .vertical; copyRows.alignment = .leading
+            for (key, title, note) in ReleaseNotesPresentation.copyActions {
+                let row = NSStackView(); row.orientation = .horizontal
+                button(title, #selector(copyNotes(_:)), in: row, key: key)
+                buttons[key]?.identifier = NSUserInterfaceItemIdentifier(key); buttons[key]?.isEnabled = false
+                buttons[key]?.widthAnchor.constraint(equalToConstant: 160).isActive = true
+                let description = NSTextField(wrappingLabelWithString: note); description.preferredMaxLayoutWidth = 260; description.setContentCompressionResistancePriority(.required, for: .vertical)
+                row.addArrangedSubview(description); copyRows.addArrangedSubview(row)
             }
-            stack.addArrangedSubview(copy)
+            let copyGroup = AppKitFactory.titledBox("Copy to clipboard", copyRows)
+            let body = NSStackView(views: [resultScroll, copyGroup]); body.alignment = .top
+            let resultContent = NSStackView(views: [header, body]); resultContent.orientation = .vertical; resultContent.alignment = .leading
+            let resultGroup = AppKitFactory.titledBox("Result", resultContent)
+            resultGroup.setAccessibilityIdentifier("ReleaseNotes.Result")
+            stack.addArrangedSubview(resultGroup)
+            resultGroup.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -24).isActive = true
+            resultScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 160).isActive = true
+            body.widthAnchor.constraint(equalTo: resultContent.widthAnchor).isActive = true
         case .proxy:
-            field("effective", "Current effective http.proxy", value: "")
-            field("globalProxy", "Global http.proxy", value: "")
-            fields["effective"]?.isEditable = false
-            fields["globalProxy"]?.isEditable = false
-            check("global", "Apply globally", value: false)
+            let values = [NSTextField(string: ""), NSTextField(string: "")]
+            for (key, value) in zip(["effective", "globalProxy"], values) {
+                value.isEditable = false
+                value.isSelectable = true
+                value.setContentHuggingPriority(.defaultLow, for: .horizontal)
+                value.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+                value.widthAnchor.constraint(greaterThanOrEqualToConstant: 180).isActive = true
+                fields[key] = value
+            }
+            let scope = NSButton(checkboxWithTitle: "Apply globally", target: self, action: #selector(inputsChanged))
+            scope.state = .on
+            checks["global"] = scope
+            let labels = [NSTextField(labelWithString: "Local http.proxy:"), NSTextField(labelWithString: "Global http.proxy:")]
+            let grid = NSGridView(views: [[labels[0], values[0]],
+                                         [labels[1], values[1]],
+                                         [NSView(), scope]])
+            grid.columnSpacing = 6
+            grid.rowSpacing = 6
+            grid.column(at: 0).xPlacement = .trailing
+            grid.column(at: 0).width = labels.map { $0.fittingSize.width }.max() ?? 0
+            grid.column(at: 1).xPlacement = .fill
+            grid.yPlacement = .center
+            stack.addArrangedSubview(grid)
+            grid.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -24).isActive = true
         case .statistics:
             let tabs = NSTabView(); statisticsTabs = tabs; stack.addArrangedSubview(tabs)
             tabs.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -24).isActive = true
             tabs.heightAnchor.constraint(greaterThanOrEqualToConstant: 300).isActive = true
         case .gource:
-            field("directory", "Working directory", value: host.repositoryURL?.path ?? "")
             field("executable", "Path to Gource", value: try plugin.value("Path to Gource", in: host))
+            button("Browse", #selector(browseExecutable), in: stack.arrangedSubviews.last as! NSStackView, key: "BrowseGource")
+            field("directory", "Repository", value: host.repositoryURL?.path ?? "")
+            button("Browse", #selector(browseDirectory), in: stack.arrangedSubviews.last as! NSStackView, key: "BrowseRepository")
             field("arguments", "Arguments", value: try plugin.value("Arguments", in: host))
-            let browse = NSStackView(); browse.orientation = .horizontal
-            button("Browse Gource…", #selector(browseExecutable), in: browse)
-            button("Browse directory…", #selector(browseDirectory), in: browse)
-            button("Gource project", #selector(gourceProject), in: browse)
-            button("Help", #selector(gourceHelp), in: browse); stack.addArrangedSubview(browse)
+            let links = NSStackView(); links.orientation = .horizontal
+            button("Gource project", #selector(gourceProject), in: links)
+            button("Gource command line", #selector(gourceHelp), in: links); stack.addArrangedSubview(links)
             stack.addArrangedSubview(NSTextField(wrappingLabelWithString: "Install the native macOS Gource binary and select it above. $(AVATARS) uses the shared avatar provider and its privacy settings."))
         case .backgroundFetch, .compileSubmodules, .impact: break
         }
-        stack.addArrangedSubview(status)
+        if plugin.kind != .proxy { stack.addArrangedSubview(status) }
         let actions = NSStackView(); actions.orientation = .horizontal; actions.spacing = 8
         if plugin.kind == .deleteBranches { button("Settings…", #selector(showSettings), in: actions) }
         switch plugin.kind {
         case .createBranches: button("Create local tracking branches", #selector(run), in: actions)
         case .deleteBranches:
-            button("Search branches", #selector(run), in: actions)
             button("Select all", #selector(toggleAllCandidates), in: actions); button("Delete", #selector(deleteSelected), in: actions)
         case .largeFiles: button("Select all", #selector(toggleAllCandidates), in: actions); button("Delete", #selector(deleteSelected), in: actions)
-        case .releaseNotes: button("Generate", #selector(run), in: actions)
         case .proxy: button("Set proxy", #selector(run), in: actions); button("Unset proxy", #selector(unsetProxy), in: actions)
-        case .gource: button("Run", #selector(run), in: actions)
+        case .gource: button("Start", #selector(run), in: actions)
         default: break
         }
         button("Close", #selector(closeDialog), in: actions); buttons["Close"]?.keyEquivalent = "\u{1b}"
         stack.addArrangedSubview(actions)
-        let primary = buttons["Create local tracking branches"] ?? buttons["Generate"] ?? buttons["Run"]
+        if plugin.kind == .proxy {
+            let spacer = NSView()
+            spacer.setContentHuggingPriority(.init(1), for: .horizontal)
+            actions.insertArrangedSubview(spacer, at: 0)
+            actions.distribution = .fill
+            for button in buttons.values { button.setContentHuggingPriority(.required, for: .horizontal) }
+            actions.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -24).isActive = true
+        }
+        let primary = buttons["Create local tracking branches"] ?? buttons["Generate"] ?? buttons["Start"]
         primary?.keyEquivalent = "\r"
         inputsChanged()
     }
@@ -206,12 +293,10 @@ final class BuiltInPluginDialog: NSWindowController, NSWindowDelegate, NSTableVi
             task?.cancel(); generation += 1; busy = false
             buttons.values.forEach { $0.isEnabled = true }
         }
-        fields["remote"]?.isEnabled = checks["remoteMode"] == nil || enabled("remoteMode")
-        fields["pattern"]?.isEnabled = enabled("regexMode")
-        checks["ignoreCase"]?.isEnabled = enabled("regexMode"); checks["invert"]?.isEnabled = enabled("regexMode")
-        fields["base"]?.isEnabled = !enabled("unmerged")
         if plugin.kind == .deleteBranches, !busy {
-            branches.removeAll(); selected.removeAll(); table.reloadData(); status.stringValue = "Press Search branches to reload the list."
+            branches.removeAll(); selected.removeAll(); table.reloadData(); status.stringValue = "Press 'Search branches' to search for branches to delete."
+            deleteInstruction?.stringValue = DeleteObsoleteBranchesPresentation.instruction(mergedInto: text("base"))
+            if let days = Int(text("days")) { daysStepper?.integerValue = days }
         }
         updateDeleteButton()
     }
@@ -226,7 +311,7 @@ final class BuiltInPluginDialog: NSWindowController, NSWindowDelegate, NSTableVi
     }
     private func enabled(_ key: String) -> Bool { checks[key]?.state == .on }
     private func text(_ key: String) -> String { fields[key]?.stringValue ?? "" }
-    private func updateDeleteButton() { buttons["Delete"]?.isEnabled = !busy && !selected.isEmpty }
+    private func updateDeleteButton() { buttons["Delete"]?.isEnabled = !busy }
     private func perform(_ operation: @escaping @MainActor () async throws -> Void) {
         task?.cancel(); generation += 1; let currentGeneration = generation
         busy = true; status.stringValue = "Loading…"
@@ -288,12 +373,20 @@ final class BuiltInPluginDialog: NSWindowController, NSWindowDelegate, NSTableVi
                 }
                 try Task.checkCancellation(); objects = values; table.reloadData(); selectionStatus()
             case .releaseNotes:
+                output.string = ""
+                for (key, message) in [("from", "'From' commit must be specified"), ("to", "'To' commit must be specified")]
+                where text(key).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    status.stringValue = ""
+                    await MutationDialogs.showValidationError(message, caption: "Invalid input", window: window)
+                    window?.makeFirstResponder(fields[key])
+                    return
+                }
                 let command = try BuiltInPluginCommands.releaseNotes(from: text("from"), to: text("to"), arguments: text("arguments"))
                 let result = try await source().executePluginCommand(command, standardInput: nil)
                 try Task.checkCancellation()
                 output.string = result.standardOutputString; notes = BuiltInPluginCommands.parseReleaseNotes(output.string)
-                for title in ["Original output", "Text table (tabs)", "Text table (spaces)", "HTML table"] { buttons[title]?.isEnabled = !notes.isEmpty }
-                status.stringValue = "Revisions count = \(notes.count)"
+                for (key, _, _) in ReleaseNotesPresentation.copyActions { buttons[key]?.isEnabled = !notes.isEmpty }
+                revisionCount.stringValue = String(notes.count)
                 if !result.succeeded { throw PluginError.invalid(result.standardErrorString) }
             case .proxy: try await setProxy(remove: false, initial: false)
             case .statistics:
@@ -306,28 +399,43 @@ final class BuiltInPluginDialog: NSWindowController, NSWindowDelegate, NSTableVi
         }
     }
 
-    private func selectionStatus() { status.stringValue = "\(selected.count) / \(plugin.kind == .largeFiles ? objects.count : branches.count) selected" }
+    private func selectionStatus() {
+        status.stringValue = plugin.kind == .largeFiles ? "\(selected.count) / \(objects.count) selected" : DeleteObsoleteBranchesPresentation.selection(selected: selected.count, total: branches.count)
+    }
     @objc private func toggleAllCandidates() {
         let ids = plugin.kind == .largeFiles ? objects.map { $0.id.string } : branches.map(\.name)
         selected = selected.count == ids.count ? [] : Set(ids); table.reloadData(); selectionStatus(); updateDeleteButton()
     }
     @objc private func deleteSelected() {
-        guard !selected.isEmpty else { return }
-        let alert = NSAlert(); alert.alertStyle = .warning
-        alert.messageText = plugin.kind == .largeFiles ? "Permanently delete selected files from all history?" : "Are you sure to delete \(selected.count) selected branches?"
-        alert.informativeText = plugin.kind == .largeFiles ? "This rewrites all refs, expires reflogs and prunes objects. This cannot be undone. Remote history requires a force push." : "The selected branches will be deleted."
-        alert.addButton(withTitle: "Cancel"); alert.addButton(withTitle: "Delete")
-        guard alert.runModal() == .alertSecondButtonReturn else { return }
-        if plugin.kind == .deleteBranches, enabled("remoteMode") {
-            let danger = NSAlert(); danger.alertStyle = .critical; danger.messageText = "DANGEROUS ACTION!"
-            danger.informativeText = "These branches will be deleted from the remote server. This cannot be undone."
-            danger.addButton(withTitle: "Cancel"); danger.addButton(withTitle: "Delete from remote")
-            guard danger.runModal() == .alertSecondButtonReturn else { return }
+        if selected.isEmpty, plugin.kind == .deleteBranches {
+            let alert = NSAlert(); alert.alertStyle = .critical
+            alert.messageText = "Select branches to delete using checkboxes in 'Delete' column."
+            alert.runModal()
+            return
+        }
+        if plugin.kind == .largeFiles {
+            let confirm = NSAlert(); confirm.alertStyle = .warning
+            confirm.messageText = "Are you sure to delete the selected files?"
+            confirm.addButton(withTitle: "Yes"); confirm.addButton(withTitle: "No")
+            guard confirm.runModal() == .alertFirstButtonReturn else { close(); return }
+        } else {
+            let alert = NSAlert(); alert.alertStyle = .warning
+            alert.messageText = DeleteObsoleteBranchesPresentation.confirmation(count: selected.count)
+            alert.addButton(withTitle: "Yes"); alert.addButton(withTitle: "No")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
+        let remoteName = text("remote")
+        if plugin.kind == .deleteBranches, enabled("remoteMode"), selected.contains(where: { $0.hasPrefix(remoteName + "/") }) {
+            let danger = NSAlert(); danger.alertStyle = .warning
+            danger.messageText = DeleteObsoleteBranchesPresentation.dangerousAction(remote: remoteName)
+            danger.addButton(withTitle: "Yes"); danger.addButton(withTitle: "No")
+            guard danger.runModal() == .alertFirstButtonReturn else { return }
         }
         let ids = selected
         perform { [self] in
             if plugin.kind == .largeFiles {
                 let paths = objects.filter { ids.contains($0.id.string) }.map(\.path)
+                guard !paths.isEmpty else { close(); return }
                 let result: BuiltInMutationOutcome
                 do { result = try await source().removeLargeFiles(paths) }
                 catch let error as BuiltInMutationError {
@@ -390,36 +498,45 @@ final class BuiltInPluginDialog: NSWindowController, NSWindowDelegate, NSTableVi
     @objc private func copyNotes(_ button: NSButton) {
         let header = "Commit log from '\(text("from"))' to '\(text("to"))' (most recent changes are listed on top):"
         let content: String
-        if button.title == "Original output" { content = output.string }
-        else if button.title == "HTML table" {
+        let key = button.identifier?.rawValue ?? ""
+        if key == "copyOriginal" { content = output.string }
+        else if key == "copyHTML" {
             func escape(_ text: String) -> String { text.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;").replacingOccurrences(of: ">", with: "&gt;").replacingOccurrences(of: "\"", with: "&quot;") }
             content = "<p>" + escape(header) + "</p><table>\r\n" + notes.map { "<tr>\r\n<td>\($0.commit)</td>\r\n<td>\($0.message.map(escape).joined(separator: "<br/>"))</td>\r\n</tr>\r\n" }.joined() + "</table>"
         } else {
-            let tabs = button.title == "Text table (tabs)"
+            let tabs = key == "copyTabs"
             content = header + "\n" + notes.map { $0.commit + (tabs ? "\t" : " ") + $0.message.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }.joined(separator: tabs ? "\n\t" : "\n        ") + "\n" }.joined()
         }
         NSPasteboard.general.clearContents(); NSPasteboard.general.setString(content, forType: .string)
-        if button.title == "HTML table" { NSPasteboard.general.setString(content, forType: .html) }
+        if key == "copyHTML" { NSPasteboard.general.setString(content, forType: .html) }
     }
 
     private func showStatistics(_ values: CodeStatistics) {
         guard let tabs = statisticsTabs else { return }
         for item in tabs.tabViewItems { tabs.removeTabViewItem(item) }
-        let pages: [(String, [(String, Int)])] = [
-            ("Commits per contributor", values.contributors),
-            ("Lines of code per language", values.byExtension.sorted { $0.value > $1.value }.map { ($0.key, $0.value) }),
-            ("Lines of code per type", [("Blank lines", values.blank), ("Comment lines", values.comments), ("Lines of code", values.code), ("Designer lines", values.designer)]),
-            ("Lines of test code", [("Test code", values.test), ("Production code", values.code - values.test)])]
-        for (title, entries) in pages {
-            let row = NSStackView(); row.orientation = .horizontal; row.spacing = 12
-            let pie = BuiltInStatisticsChart(values: entries); row.addArrangedSubview(pie)
-            pie.widthAnchor.constraint(equalToConstant: 280).isActive = true; pie.heightAnchor.constraint(equalToConstant: 280).isActive = true
-            let total = entries.reduce(0) { $0 + $1.1 }
-            let text = NSTextField(wrappingLabelWithString: "\(total) \(title)\n\n" + entries.map {
-                "\($0.1) \($0.0) (" + String(format: "%.1f%%", total > 0 ? Double($0.1) * 100 / Double(total) : 0) + ")"
-            }.joined(separator: "\n"))
-            row.addArrangedSubview(text)
-            let item = NSTabViewItem(identifier: title); item.label = title; item.view = row; tabs.addTabViewItem(item)
+        var splits: [(NSSplitView, NSSplitView)] = []
+        for page in StatisticsPresentation.pages(values) {
+            let total = NSTextField(labelWithString: page.heading)
+            total.font = AppSettingsStore.shared.applicationFont(size: NSFont.systemFontSize, weight: .bold)
+            let legend = NSTextView(); legend.isEditable = false; legend.isSelectable = true; legend.drawsBackground = false
+            legend.string = page.lines.joined(separator: "\n")
+            let legendScroll = NSScrollView(); legendScroll.documentView = legend; legendScroll.hasVerticalScroller = true; legendScroll.drawsBackground = false
+            legend.autoresizingMask = [.width]; legend.textContainer?.widthTracksTextView = true
+            let pie = BuiltInStatisticsChart(values: page.slices)
+            let inner = NSSplitView(); inner.isVertical = true; inner.dividerStyle = .thin
+            inner.addArrangedSubview(legendScroll); inner.addArrangedSubview(pie)
+            inner.setAccessibilityIdentifier("Statistics.ChartSplit")
+            let outer = NSSplitView(); outer.isVertical = false; outer.dividerStyle = .thin
+            outer.addArrangedSubview(total); outer.addArrangedSubview(inner)
+            outer.setAccessibilityIdentifier("Statistics.TotalSplit")
+            splits.append((outer, inner))
+            let item = NSTabViewItem(identifier: page.title); item.label = page.title; item.view = outer; tabs.addTabViewItem(item)
+        }
+        DispatchQueue.main.async {
+            for (outer, inner) in splits {
+                outer.layoutSubtreeIfNeeded(); outer.setPosition(29, ofDividerAt: 0)
+                inner.layoutSubtreeIfNeeded(); inner.setPosition(286, ofDividerAt: 0)
+            }
         }
     }
     @objc private func browseExecutable() {
@@ -428,13 +545,18 @@ final class BuiltInPluginDialog: NSWindowController, NSWindowDelegate, NSTableVi
     }
     @objc private func browseDirectory() {
         let panel = NSOpenPanel(); panel.canChooseDirectories = true; panel.canChooseFiles = false
+        panel.directoryURL = GourcePresentation.folderPickerDirectory(fields["directory"]?.stringValue ?? "")
         if panel.runModal() == .OK { fields["directory"]?.stringValue = panel.url?.path ?? "" }
     }
     @objc private func gourceProject() { NSWorkspace.shared.open(URL(string: "https://github.com/acaudwell/Gource")!) }
     @objc private func gourceHelp() { NSWorkspace.shared.open(URL(string: "https://github.com/acaudwell/Gource/blob/master/README")!) }
     private func launchGource() async throws {
-        let executable = URL(fileURLWithPath: (text("executable") as NSString).expandingTildeInPath)
-        guard FileManager.default.isExecutableFile(atPath: executable.path) else { throw PluginError.invalid("Select an installed native Gource executable.") }
+        let path = (text("executable") as NSString).expandingTildeInPath
+        var isDirectory: ObjCBool = false
+        guard !path.trimmingCharacters(in: .whitespaces).isEmpty, FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), !isDirectory.boolValue else {
+            throw PluginError.invalid("Cannot find Gource.\nPlease download Gource and set the correct path.")
+        }
+        let executable = URL(fileURLWithPath: path)
         var arguments = text("arguments")
         if arguments.contains("$(AVATARS)") {
             let directory = FileManager.default.temporaryDirectory.appendingPathComponent("GitExtensionsMac-Gource-" + UUID().uuidString)
@@ -493,7 +615,7 @@ final class BuiltInPluginDialog: NSWindowController, NSWindowDelegate, NSTableVi
         if plugin.kind == .largeFiles {
             let file = objects[row]
             switch key {
-            case "id": value = file.id.shortString
+            case "id": value = file.id.string
             case "path": value = file.path
             case "size": value = String(format: "%.2f", Double(file.size) / 1_048_576)
             case "compressed": value = file.compressedSize.map { String(format: "%.2f", Double($0) / 1_048_576) } ?? "Unknown"
@@ -552,6 +674,56 @@ final class BuiltInPluginDialog: NSWindowController, NSWindowDelegate, NSTableVi
 }
 
 @MainActor
+enum StatisticsPresentation {
+    struct Page: Equatable {
+        let title: String
+        let heading: String
+        let lines: [String]
+        let values: [Int]
+        var slices: [(String, Int)] { Array(zip(lines, values)) }
+        static func == (lhs: Page, rhs: Page) -> Bool { lhs.title == rhs.title && lhs.heading == rhs.heading && lhs.lines == rhs.lines && lhs.values == rhs.values }
+    }
+
+    static func pages(_ values: CodeStatistics) -> [Page] {
+        let production = values.code - values.test
+        let extensions = values.byExtension.sorted { $0.value > $1.value }
+        return [
+            Page(title: "Commits per contributor", heading: "\(number(values.contributors.reduce(0) { $0 + $1.1 })) Commits",
+                 lines: values.contributors.map { "\(number($0.1)) \($0.0)" }, values: values.contributors.map(\.1)),
+            Page(title: "Lines of code per language", heading: "\(number(values.code)) Lines of code",
+                 lines: extensions.map { "\(number($0.value)) Lines of code in \($0.key) files (\(percent($0.value, values.code)))" }, values: extensions.map(\.value)),
+            Page(title: "Lines of code per type", heading: "\(number(values.code)) Lines of code",
+                 lines: ["\(number(values.blank)) Blank lines (\(percent(values.blank, values.total)))",
+                         "\(number(values.comments)) Comment lines (\(percent(values.comments, values.total)))",
+                         "\(number(values.code)) Lines of code (\(percent(values.code, values.total)))",
+                         "\(number(values.designer)) Lines in designer files (\(percent(values.designer, values.total)))"],
+                 values: [values.blank, values.comments, values.code, values.designer]),
+            Page(title: "Lines of test code", heading: "\(number(values.test)) Lines of test code",
+                 lines: ["\(number(values.test)) Lines of test code (\(percent(values.test, values.code)))",
+                         "\(number(production)) Lines of production code (\(percent(production, values.code)))"],
+                 values: [values.test, production])
+        ]
+    }
+
+    static func number(_ value: Int) -> String {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        formatter.maximumFractionDigits = 0
+        return formatter.string(from: NSNumber(value: value)) ?? String(value)
+    }
+
+    static func percent(_ value: Int, _ total: Int) -> String {
+        let ratio = Double(value) / Double(total)
+        if ratio.isNaN { return "NaN" }
+        if ratio.isInfinite { return ratio > 0 ? "∞" : "-∞" }
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .percent
+        formatter.minimumFractionDigits = 1
+        formatter.maximumFractionDigits = 1
+        return formatter.string(from: NSNumber(value: ratio)) ?? String(format: "%.1f%%", ratio * 100)
+    }
+}
+
 final class BuiltInStatisticsChart: NSView {
     let values: [(String, Int)]
     private var slices: [(NSBezierPath, String)] = []
@@ -574,8 +746,32 @@ final class BuiltInStatisticsChart: NSView {
             let path = NSBezierPath(); path.move(to: NSPoint(x: bounds.midX, y: bounds.midY))
             path.appendArc(withCenter: NSPoint(x: bounds.midX, y: bounds.midY), radius: min(bounds.width, bounds.height) / 2 - 10, startAngle: angle, endAngle: end)
             path.close(); NSColor(calibratedHue: CGFloat(index % 13) / 13, saturation: 0.65, brightness: 0.85, alpha: 1).setFill(); path.fill()
-            slices.append((path, "\(value.1) \(value.0) (" + String(format: "%.1f%%", Double(value.1) * 100 / Double(total)) + ")"))
+            slices.append((path, value.0))
             angle = end
         }
     }
+}
+
+enum GourcePresentation {
+    static func folderPickerDirectory(_ path: String) -> URL? {
+        let expanded = (path as NSString).expandingTildeInPath
+        guard !expanded.isEmpty else { return nil }
+        return URL(fileURLWithPath: expanded, isDirectory: true)
+    }
+}
+
+enum DeleteObsoleteBranchesPresentation {
+    static func instruction(mergedInto branch: String) -> String { "Choose branches to delete. Only branches that are fully merged in '\(branch)' will be deleted." }
+    static func confirmation(count: Int) -> String { "Are you sure to delete \(count) selected branches?" }
+    static func dangerousAction(remote: String) -> String { "DANGEROUS ACTION!\nBranches will be deleted on the remote '\(remote)'. This can not be undone.\nAre you sure you want to continue?" }
+    static func selection(selected: Int, total: Int) -> String { "\(selected)/\(total) branches selected." }
+}
+
+enum ReleaseNotesPresentation {
+    static let copyActions: [(String, String, String)] = [
+        ("copyOriginal", "original output", "as is"),
+        ("copyTabs", "as text table (tabs)", "separate columns with tabs"),
+        ("copySpaces", "as text table (spaces)", "separate columns with spaces"),
+        ("copyHTML", "as HTML table", "Clipboard will contain HTML code (plain text) and HTML format\nwhich can be pasted to programs like MS Word or LibreOffice Writer.")
+    ]
 }

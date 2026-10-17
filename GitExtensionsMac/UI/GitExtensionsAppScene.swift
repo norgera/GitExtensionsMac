@@ -27,7 +27,11 @@ package final class GitExtensionsApplicationDelegate: NSObject, NSApplicationDel
 
     package func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
     package func applicationWillTerminate(_ notification: Notification) {
-        if CommandLineSession.active { Darwin.exit(CommandLineSession.exitStatus) }
+        MainActor.assumeIsolated {
+            guard CommandLineSession.active else { return }
+            NotificationCenter.default.post(name: CommandLineSession.willExit, object: nil)
+            Darwin.exit(CommandLineSession.exitStatus)
+        }
     }
 }
 

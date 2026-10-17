@@ -28,6 +28,7 @@ final class RevisionFilterToolbar: NSObject, NSComboBoxDelegate, NSMenuDelegate 
     }
 
     let advancedButton = NSButton()
+    let advancedArrow = NSButton()
     let reflogButton = NSButton()
     let branchesMode = NSPopUpButton(frame: .zero, pullsDown: true)
     let branchCombo = NSComboBox()
@@ -42,6 +43,15 @@ final class RevisionFilterToolbar: NSObject, NSComboBoxDelegate, NSMenuDelegate 
     override init() {
         super.init()
         configure(advancedButton, image: "FunnelPencil", tooltip: "Advanced filter", action: #selector(advancedClicked))
+        advancedArrow.image = NSImage(systemSymbolName: "chevron.down", accessibilityDescription: "Advanced filter options")
+        advancedArrow.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 8, weight: .semibold)
+        advancedArrow.isBordered = false
+        advancedArrow.imagePosition = .imageOnly
+        advancedArrow.toolTip = "Advanced filter"
+        advancedArrow.setAccessibilityIdentifier("AdvancedFilterArrow")
+        advancedArrow.target = self; advancedArrow.action = #selector(advancedArrowClicked)
+        advancedArrow.translatesAutoresizingMaskIntoConstraints = false
+        advancedArrow.widthAnchor.constraint(equalToConstant: 12).isActive = true
         configure(reflogButton, image: "Book", tooltip: "Show reflog references", action: #selector(reflogClicked))
         reflogButton.setButtonType(.pushOnPushOff)
         configure(firstParentButton, image: "ShowOnlyFirstParent", tooltip: "Show only first parent", action: #selector(firstParentClicked))
@@ -51,10 +61,18 @@ final class RevisionFilterToolbar: NSObject, NSComboBoxDelegate, NSMenuDelegate 
         for (title, tooltip) in [("All branches", "Show all branches"), ("Current branch only", "Show current branch only"), ("Filtered branches", "Show filtered branches")] {
             branchesMode.addItem(withTitle: title)
             branchesMode.lastItem?.toolTip = tooltip
-            branchesMode.lastItem?.image = AppKitFactory.resourceImage(title == "Filtered branches" ? "BranchFilter" : "BranchLocal", accessibilityDescription: title)
+            let item = branchesMode.lastItem!
+            AppKitFactory.setMenuImage(title == "All branches" ? "BranchLocal" : "BranchFilter", for: item, adaptLightness: true)
+            AppKitFactory.setMenuShortcut("revision.branches." + ["All branches": "all", "Current branch only": "current", "Filtered branches": "filtered"][title]!, for: item)
         }
         branchesMode.target = self; branchesMode.action = #selector(branchModeChanged)
-        compact(branchesMode, width: 36)
+        branchesMode.controlSize = .small
+        branchesMode.bezelStyle = .texturedRounded
+        branchesMode.imagePosition = .imageLeading
+        branchesMode.translatesAutoresizingMaskIntoConstraints = false
+        branchesMode.setContentCompressionResistancePriority(.required, for: .horizontal)
+        branchesMode.setContentHuggingPriority(.required, for: .horizontal)
+        filterChanged(RevisionGridFilter())
 
         branchType.addItem(withTitle: "Branch type")
         for (title, on) in [("Local", true), ("Remote", false), ("Tag", false)] {
@@ -62,14 +80,14 @@ final class RevisionFilterToolbar: NSObject, NSComboBoxDelegate, NSMenuDelegate 
             branchType.lastItem?.target = self; branchType.lastItem?.action = #selector(toggleCheck(_:))
         }
         branchType.menu?.autoenablesItems = false
-        compact(branchType, width: 29, image: "EditFilter")
+        compact(branchType, width: 29, image: "EditFilter", identifier: "FilterToolbar.BranchType")
 
         filterType.addItem(withTitle: "Filter type")
         for (title, on) in [("Commit message", true), ("Committer", false), ("Author", false), ("Diff contains (SLOW)", false)] {
             filterType.addItem(withTitle: title); filterType.lastItem?.state = on ? .on : .off
             filterType.lastItem?.target = self; filterType.lastItem?.action = #selector(filterTypeChanged(_:))
         }
-        compact(filterType, width: 29, image: "EditFilter")
+        compact(filterType, width: 29, image: "EditFilter", identifier: "FilterToolbar.TextType")
 
         for combo in [branchCombo, revisionCombo] {
             combo.controlSize = .small
@@ -95,19 +113,26 @@ final class RevisionFilterToolbar: NSObject, NSComboBoxDelegate, NSMenuDelegate 
         button.widthAnchor.constraint(equalToConstant: 26).isActive = true
         button.heightAnchor.constraint(equalToConstant: 22).isActive = true
     }
-    private func compact(_ button: NSPopUpButton, width: CGFloat, image: String? = nil) {
+    private func compact(_ button: NSPopUpButton, width: CGFloat, image: String? = nil, identifier: String) {
         button.controlSize = .small; button.bezelStyle = .texturedRounded
+        button.toolTip = button.item(at: 0)?.title
+        button.setAccessibilityIdentifier(identifier)
+        button.imagePosition = .imageOnly
         if let image { button.item(at: 0)?.image = AppKitFactory.resourceImage(image, accessibilityDescription: button.item(at: 0)?.title) }
         button.item(at: 0)?.title = ""
+        button.image = button.item(at: 0)?.image
         button.translatesAutoresizingMaskIntoConstraints = false
-        button.widthAnchor.constraint(equalToConstant: width).isActive = true
+        button.widthAnchor.constraint(greaterThanOrEqualToConstant: width).isActive = true
+        button.heightAnchor.constraint(equalToConstant: 22).isActive = true
+        button.setContentHuggingPriority(.required, for: .horizontal)
+        button.setContentCompressionResistancePriority(.required, for: .horizontal)
     }
 
 
 
     var customizableItems: [(key: String, title: String, views: [NSView])] {
         [
-            ("tsddbtnAdvancedFilter", "Advanced filter", [advancedButton]),
+            ("tsddbtnAdvancedFilter", "Advanced filter", [advancedButton, advancedArrow]),
             ("tsbShowReflog", "Show reflog references", [reflogButton]),
             ("tsddbtnBranchesMode", "Branches", [branchesMode]),
             ("ToolBar_group:Branch filter", "Branch filter", [branchesLabel, branchCombo, branchType]),
@@ -124,8 +149,13 @@ final class RevisionFilterToolbar: NSObject, NSComboBoxDelegate, NSMenuDelegate 
     }()
     private lazy var groupSeparator = AppKitFactory.separator()
     var views: [NSView] {
-        [advancedButton, reflogButton, branchesMode, branchesLabel, branchCombo, branchType, groupSeparator,
+        [advancedButton, advancedArrow, reflogButton, branchesMode, branchesLabel, branchCombo, branchType, groupSeparator,
          filterLabel, revisionCombo, filterType, firstParentButton]
+    }
+
+    var overflowGroups: [[NSView]] {
+        [[advancedButton, advancedArrow], [reflogButton], [branchesMode], [branchesLabel, branchCombo, branchType],
+         [groupSeparator, filterLabel, revisionCombo, filterType], [firstParentButton]]
     }
 
 
@@ -134,16 +164,29 @@ final class RevisionFilterToolbar: NSObject, NSComboBoxDelegate, NSMenuDelegate 
         guard let grid else { return }
         let filter = grid.currentFilter
         guard filter.hasFilter else { showAdvancedFilter(); return }
+        showAdvancedMenu(filter)
+    }
+    @objc private func advancedArrowClicked() {
+        guard let grid else { return }
+        showAdvancedMenu(grid.currentFilter)
+    }
+    func advancedMenu(_ filter: RevisionGridFilter) -> NSMenu {
         let menu = NSMenu()
         let resetPath = NSMenuItem(title: "Reset path filter", action: #selector(resetPathFilter), keyEquivalent: "")
         resetPath.target = self; resetPath.isEnabled = !filter.effectivePathFilter.isEmpty
         let resetAll = NSMenuItem(title: "Reset revision filters", action: #selector(resetAllFilters), keyEquivalent: "")
-        resetAll.target = self
+        resetAll.target = self; resetAll.isEnabled = filter.hasFilter
         let advanced = NSMenuItem(title: "Advanced filter", action: #selector(openAdvancedFilter), keyEquivalent: "")
         advanced.target = self
+        AppKitFactory.setMenuShortcut("revision.filter.resetPath", for: resetPath)
+        AppKitFactory.setMenuShortcut("revision.filter.reset", for: resetAll)
+        AppKitFactory.setMenuShortcut("revision.filter.advanced", for: advanced)
         menu.autoenablesItems = false
         [resetPath, resetAll, .separator(), advanced].forEach(menu.addItem)
-        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: advancedButton.bounds.maxY + 2), in: advancedButton)
+        return menu
+    }
+    private func showAdvancedMenu(_ filter: RevisionGridFilter) {
+        advancedMenu(filter).popUp(positioning: nil, at: NSPoint(x: 0, y: advancedButton.bounds.maxY + 2), in: advancedButton)
     }
     @objc func resetPathFilter() { grid?.setAndApplyPathFilter("") }
     @objc func resetAllFilters() { grid?.resetAllFiltersAndRefresh() }
@@ -251,6 +294,7 @@ final class RevisionFilterToolbar: NSObject, NSComboBoxDelegate, NSMenuDelegate 
         if filter.isShowFilteredBranchesChecked { mode = .filtered; branchCombo.stringValue = filter.effectiveBranchFilter }
         if filter.isShowCurrentBranchOnlyChecked { mode = .current }
         for (index, item) in branchesMode.itemArray.enumerated() where index > 0 { item.state = index == mode.rawValue ? .on : .off }
+        branchesMode.item(at: 0)?.title = branchesMode.item(at: mode.rawValue)?.title ?? ""
         branchesMode.item(at: 0)?.image = branchesMode.item(at: mode.rawValue)?.image
         branchesMode.toolTip = branchesMode.item(at: mode.rawValue)?.toolTip
 
@@ -333,11 +377,13 @@ final class RevisionFilterDialogController: NSViewController {
     override func loadView() {
         for picker in [since, until] {
             picker.datePickerStyle = .textFieldAndStepper
-            picker.datePickerElements = [.yearMonthDay, .hourMinuteSecond]
+            picker.datePickerElements = [.yearMonthDay]
         }
         diffCheck.toolTip = "SLOW"; diff.toolTip = "SLOW"
         limitStepper.minValue = 0; limitStepper.maxValue = 1_000_000; limitStepper.increment = 10_000
         limitStepper.target = self; limitStepper.action = #selector(stepperChanged)
+        limit.widthAnchor.constraint(equalToConstant: 116).isActive = true
+        limit.alignment = .right
         let limitRow = NSStackView(views: [limit, limitStepper])
         let rows: [[NSView]] = [[sinceCheck, since], [untilCheck, until], [authorCheck, author], [committerCheck, committer],
                                 [messageCheck, message], [diffCheck, diff], [NSGridCell.emptyContentView, ignoreCase],
@@ -351,13 +397,22 @@ final class RevisionFilterDialogController: NSViewController {
         let buttons = NSStackView(views: [NSView(), cancel, ok])
         let root = NSStackView(views: [grid, options, buttons])
         root.orientation = .vertical; root.alignment = .leading; root.spacing = 12
-        root.edgeInsets = NSEdgeInsets(top: 16, left: 16, bottom: 16, right: 16)
-        buttons.widthAnchor.constraint(equalTo: root.widthAnchor, constant: -32).isActive = true
+        buttons.widthAnchor.constraint(equalTo: root.widthAnchor).isActive = true
+        grid.widthAnchor.constraint(equalTo: root.widthAnchor).isActive = true
         for control in [sinceCheck, untilCheck, authorCheck, committerCheck, messageCheck, diffCheck, limitCheck, pathCheck,
                         branchCheck, currentBranchOnly, reflog, fullHistory] {
             control.target = self; control.action = #selector(optionChanged(_:))
         }
-        view = root
+        let container = NSView()
+        root.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(root)
+        NSLayoutConstraint.activate([
+            root.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
+            root.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -16),
+            root.topAnchor.constraint(equalTo: container.topAnchor, constant: 16),
+            root.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -16)
+        ])
+        view = container
         load()
     }
 
@@ -459,6 +514,7 @@ final class GoToCommitDialog: NSViewController, NSTextFieldDelegate, NSComboBoxD
     static func present(window: NSWindow, branches: [String], tags: [String], initialExpression: String, completion: @escaping (String?) -> Void) {
         let panel = NSPanel(contentViewController: GoToCommitDialog(branches: branches, tags: tags, initialExpression: initialExpression, completion: completion))
         panel.title = "Go to commit"; panel.styleMask = [.titled, .closable]
+        if let content = panel.contentViewController?.view { content.layoutSubtreeIfNeeded(); panel.setContentSize(content.fittingSize) }
         window.beginSheet(panel)
     }
 
@@ -466,23 +522,36 @@ final class GoToCommitDialog: NSViewController, NSTextFieldDelegate, NSComboBoxD
         expression.delegate = self
         for (combo, names) in [(tags, tagNames), (branches, branchNames)] {
             combo.addItems(withObjectValues: names); combo.delegate = self; combo.completes = true
+            combo.stringValue = names.first ?? ""
         }
-        let help = NSTextField(wrappingLabelWithString: "Commit expression examples:\n- complete commit hash: e. g.: 8eab51fcb9c4538eb74c4dcd4c31ffd693ad25c9\n- partial commit hash (if unique): e. g.: 8eab51fcb9c453\n- tag name\n- branch name")
+        let help = NSTextField(labelWithString: "Commit expression examples:\n- complete commit hash: e. g.: 8eab51fcb9c4538eb74c4dcd4c31ffd693ad25c9\n- partial commit hash (if unique): e. g.: 8eab51fcb9c453\n- tag name\n- branch name")
         let link = NSButton(title: "More see git-rev-parse", target: self, action: #selector(openHelp))
         link.isBordered = false; link.contentTintColor = .linkColor
         let helpBox = NSBox(); helpBox.title = "Help"
-        let helpStack = NSStackView(views: [help, link]); helpStack.orientation = .vertical; helpStack.alignment = .leading
-        helpBox.contentView = helpStack
+        let helpStack = NSStackView(views: [help, link]); helpStack.orientation = .vertical; helpStack.alignment = .leading; helpStack.spacing = 6
+        helpStack.translatesAutoresizingMaskIntoConstraints = false
+        let helpContent = NSView()
+        helpContent.addSubview(helpStack)
+        NSLayoutConstraint.activate([
+            helpStack.leadingAnchor.constraint(equalTo: helpContent.leadingAnchor, constant: 8),
+            helpStack.trailingAnchor.constraint(equalTo: helpContent.trailingAnchor, constant: -8),
+            helpStack.topAnchor.constraint(equalTo: helpContent.topAnchor, constant: 6),
+            helpStack.bottomAnchor.constraint(equalTo: helpContent.bottomAnchor, constant: -6)
+        ])
+        helpBox.contentView = helpContent
         let go = NSButton(title: "Go", target: self, action: #selector(goClicked)); go.keyEquivalent = "\r"
         let cancel = NSButton(title: "Cancel", target: self, action: #selector(cancelClicked)); cancel.keyEquivalent = "\u{1b}"
-        let grid = NSGridView(views: [[NSTextField(labelWithString: "Commit expression:"), expression],
-                                      [NSTextField(labelWithString: "Go to tag:"), tags],
+        expression.widthAnchor.constraint(greaterThanOrEqualToConstant: 330).isActive = true
+        let expressionRow = NSStackView(views: [NSTextField(labelWithString: "Commit expression:"), expression, go])
+        expressionRow.orientation = .horizontal; expressionRow.spacing = 8
+        let grid = NSGridView(views: [[NSTextField(labelWithString: "Go to tag:"), tags],
                                       [NSTextField(labelWithString: "Go to branch:"), branches]])
-        grid.column(at: 1).width = 300
-        let root = NSStackView(views: [grid, helpBox, NSStackView(views: [NSView(), cancel, go])])
+        grid.column(at: 1).width = 330
+        grid.rowSpacing = 8
+        let root = NSStackView(views: [expressionRow, helpBox, grid, NSStackView(views: [NSView(), cancel])])
         root.orientation = .vertical; root.alignment = .leading; root.spacing = 12
         root.edgeInsets = NSEdgeInsets(top: 16, left: 16, bottom: 16, right: 16)
-        helpBox.widthAnchor.constraint(equalTo: grid.widthAnchor).isActive = true
+        helpBox.widthAnchor.constraint(equalTo: expressionRow.widthAnchor).isActive = true
         view = root
     }
     override func viewDidAppear() { super.viewDidAppear(); view.window?.makeFirstResponder(expression); expression.selectText(nil) }
@@ -493,6 +562,7 @@ final class GoToCommitDialog: NSViewController, NSTextFieldDelegate, NSComboBoxD
         guard let combo = notification.object as? NSComboBox, combo.indexOfSelectedItem >= 0 else { return }
         combo.stringValue = combo.itemObjectValue(at: combo.indexOfSelectedItem) as? String ?? ""
         take(combo)
+        if !selected.isEmpty { goClicked() }
     }
     private func take(_ control: NSControl?) {
         if control === expression { selected = expression.stringValue.trimmingCharacters(in: .whitespaces) }
@@ -505,5 +575,119 @@ final class GoToCommitDialog: NSViewController, NSTextFieldDelegate, NSComboBoxD
     private func finish(_ value: String?) {
         if let window = view.window { window.sheetParent?.endSheet(window) }
         completion(value)
+    }
+}
+
+final class ToolStripOverflow: NSObject, NSStackViewDelegate, NSPopoverDelegate {
+    let button = NSButton(title: "»", target: nil, action: nil)
+    private weak var stack: NSStackView?
+    private var groups: [[NSView]] = []
+    private var popover: NSPopover?
+    private var borrowed: [(index: Int, view: NSView, priority: NSStackView.VisibilityPriority)] = []
+    var isAvailable: (NSView) -> Bool = { _ in true }
+
+    override init() {
+        super.init()
+        button.bezelStyle = .recessed
+        button.isBordered = false
+        button.toolTip = "ToolBar Options"
+        button.setAccessibilityLabel("ToolBar Options")
+        button.setAccessibilityIdentifier("ToolStripOverflow")
+        button.target = self
+        button.action = #selector(showOverflow)
+        button.setContentCompressionResistancePriority(.required, for: .horizontal)
+        button.isHidden = true
+    }
+
+    func attach(to stack: NSStackView, groups: [[NSView]]) {
+        self.stack = stack
+        self.groups = groups
+        stack.delegate = self
+        stack.detachesHiddenViews = true
+        stack.setClippingResistancePriority(.defaultLow, for: .horizontal)
+        for (index, group) in groups.enumerated() {
+            let priority = NSStackView.VisibilityPriority(rawValue: Float(900 - index * 50))
+            group.forEach { stack.setVisibilityPriority(priority, for: $0) }
+        }
+    }
+
+    var overflowGroups: [[NSView]] {
+        let detached = stack?.detachedViews ?? []
+        return groups.filter { group in
+            group.contains { view in !(view is NSBox) && isAvailable(view) && detached.contains(view) }
+        }
+    }
+
+    func stackView(_ stackView: NSStackView, willDetach views: [NSView]) {
+        DispatchQueue.main.async { [weak self] in self?.updateButton() }
+    }
+
+    func stackView(_ stackView: NSStackView, didReattach views: [NSView]) {
+        views.filter { !isAvailable($0) }.forEach { $0.isHidden = true }
+        DispatchQueue.main.async { [weak self] in self?.updateButton() }
+    }
+
+    func updateButton() {
+        guard popover == nil else { return }
+        button.isHidden = overflowGroups.isEmpty
+    }
+
+    @objc func showOverflow() {
+        guard let stack else { return }
+        let groups = overflowGroups.map { $0.filter { !($0 is NSBox) && isAvailable($0) } }
+        for view in groups.joined() {
+            guard let index = stack.arrangedSubviews.firstIndex(of: view) else { continue }
+            borrowed.append((index, view, stack.visibilityPriority(for: view)))
+        }
+        groups.joined().forEach { stack.removeArrangedSubview($0); $0.isHidden = false }
+        let rows = groups.map { views -> NSStackView in
+            let row = NSStackView(views: views)
+            row.orientation = .horizontal
+            row.alignment = .centerY
+            row.spacing = 4
+            return row
+        }
+        guard !rows.isEmpty else { return }
+        let content = NSStackView(views: rows)
+        content.orientation = .vertical
+        content.alignment = .leading
+        content.spacing = 4
+        content.edgeInsets = NSEdgeInsets(top: 6, left: 6, bottom: 6, right: 6)
+        rows.forEach { $0.trailingAnchor.constraint(lessThanOrEqualTo: content.trailingAnchor, constant: -32).isActive = true }
+        let container = NSView()
+        content.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(content)
+        NSLayoutConstraint.activate([
+            content.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            content.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            content.topAnchor.constraint(equalTo: container.topAnchor),
+            content.bottomAnchor.constraint(equalTo: container.bottomAnchor)
+        ])
+        let controller = NSViewController()
+        controller.view = container
+        let size = container.fittingSize
+        container.frame = NSRect(origin: .zero, size: size)
+        controller.preferredContentSize = size
+        let popover = NSPopover()
+        popover.contentSize = size
+        popover.behavior = .transient
+        popover.contentViewController = controller
+        popover.delegate = self
+        self.popover = popover
+        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .maxY)
+    }
+
+    func popoverDidClose(_ notification: Notification) {
+        let entries = borrowed.sorted { $0.index < $1.index }
+        borrowed = []
+        popover = nil
+        for entry in entries {
+            entry.view.removeFromSuperview()
+            guard let stack else { continue }
+            stack.insertArrangedSubview(entry.view, at: min(entry.index, stack.arrangedSubviews.count))
+            stack.setVisibilityPriority(entry.priority, for: entry.view)
+        }
+        stack?.needsLayout = true
+        updateButton()
     }
 }

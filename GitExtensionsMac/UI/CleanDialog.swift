@@ -41,12 +41,14 @@ private final class CleanViewController: NSViewController, NSWindowDelegate {
     private let removeDirectories = NSButton(checkboxWithTitle: "Remove untracked directories", target: nil, action: nil)
     private let cleanSubmodules = NSButton(checkboxWithTitle: "Clean submodules recursively", target: nil, action: nil)
     private let includePaths = NSTextView()
+    let includeHint = NSTextField(labelWithString: "(one path per line)")
+    let excludeHint = NSTextField(labelWithString: "(one path per line)")
     private let excludePaths = NSTextView()
     private let includeToggle = NSButton(checkboxWithTitle: "Affect the following directory path(s) only:", target: nil, action: nil)
     private let excludeToggle = NSButton(checkboxWithTitle: "Exclude the following file path(s):", target: nil, action: nil)
     private let output = NSTextView()
-    private let preview = NSButton(title: "Preview", target: nil, action: nil)
-    private let cleanup = NSButton(title: "Cleanup", target: nil, action: nil)
+    private let preview = LeadingImageButton(title: "Preview", target: nil, action: nil)
+    private let cleanup = LeadingImageButton(title: "Cleanup", target: nil, action: nil)
     private var operationTask: Task<Void, Never>?
 
     init(
@@ -104,11 +106,11 @@ private final class CleanViewController: NSViewController, NSWindowDelegate {
         let addExclude = NSButton(title: "Add a path…", target: self, action: #selector(addExcludePath))
         let includeHeader = cleanHeader(includeToggle, addInclude)
         let excludeHeader = cleanHeader(excludeToggle, addExclude)
-        let includeHint = NSTextField(labelWithString: "(one path per line)")
         includeHint.textColor = .secondaryLabelColor
-        let excludeHint = NSTextField(labelWithString: "(one path per line)")
         excludeHint.textColor = .secondaryLabelColor
 
+        preview.image = AppKitFactory.resourceImage("Preview", accessibilityDescription: "Preview"); preview.imagePosition = .imageLeft
+        cleanup.image = AppKitFactory.resourceImage("CleanupRepo", accessibilityDescription: "Cleanup"); cleanup.imagePosition = .imageLeft
         preview.target = self
         preview.action = #selector(previewClean)
         cleanup.target = self
@@ -172,6 +174,8 @@ private final class CleanViewController: NSViewController, NSWindowDelegate {
         includePaths.textColor = includePaths.isEditable ? .textColor : .disabledControlTextColor
         excludePaths.isEditable = excludeToggle.state == .on
         excludePaths.textColor = excludePaths.isEditable ? .textColor : .disabledControlTextColor
+        includeHint.isHidden = includeToggle.state != .on
+        excludeHint.isHidden = excludeToggle.state != .on
     }
 
     @objc private func addIncludePath() {
@@ -212,8 +216,11 @@ private final class CleanViewController: NSViewController, NSWindowDelegate {
 
     @objc private func previewClean() {
         let cleanRequest = request()
-        run { [source] in
-            let result = try await source.previewClean(cleanRequest)
+        guard let panel else { return }
+        run { [source, repositoryURL] in
+            guard let result = await HostingProcessDialog.read("Process (\(repositoryURL.lastPathComponent))", parent: panel, operation: { output in
+                try await source.previewClean(cleanRequest, output: output)
+            }) else { throw CancellationError() }
             return (result.output, result.hasCandidates ? "Preview complete." : "Nothing to clean.", false, nil)
         }
     }
@@ -231,8 +238,11 @@ private final class CleanViewController: NSViewController, NSWindowDelegate {
         alert.beginSheetModal(for: panel) { [weak self] response in
             guard response == .alertFirstButtonReturn, let self else { return }
             let cleanRequest = request()
-            run { [source] in
-                let result = try await source.clean(cleanRequest)
+            run { [source, repositoryURL] in
+                guard let result = await HostingProcessDialog.read("Process (\(repositoryURL.lastPathComponent))", parent: panel,
+                    succeeded: { if case .partiallyCleaned = $0.outcome { return false }; return true }, operation: { output in
+                        try await source.clean(cleanRequest, output: output)
+                    }) else { throw CancellationError() }
                 switch result.outcome {
                 case .noChanges:
                     return (result.output, "Nothing to clean.", false, nil)

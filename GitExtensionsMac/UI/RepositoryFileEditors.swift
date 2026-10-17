@@ -2,12 +2,116 @@ import GitExtensionsCore
 import GitCommands
 import AppKit
 
+enum FileViewerTextLines {
+    static func starts(in text: String) -> [Int] {
+        let value = text as NSString
+        var starts = [0]
+        var offset = 0
+        while offset < value.length {
+            var end = 0
+            var contentsEnd = 0
+            value.getLineStart(nil, end: &end, contentsEnd: &contentsEnd, for: NSRange(location: offset, length: 0))
+            if end > contentsEnd { starts.append(end) }
+            offset = end
+        }
+        return starts
+    }
+}
+
+final class FileViewerLineNumberRuler: NSRulerView {
+    private weak var textView: NSTextView?
+    private var observers: [NSObjectProtocol] = []
+    private(set) var lineStarts = [0]
+    private var thicknessUpdatePending = false
+
+    init(scrollView: NSScrollView, textView: NSTextView) {
+        self.textView = textView
+        super.init(scrollView: scrollView, orientation: .verticalRuler)
+        clientView = textView
+        observers.append(NotificationCenter.default.addObserver(forName: NSTextStorage.didProcessEditingNotification, object: textView.textStorage, queue: .main) { [weak self] notification in
+            MainActor.assumeIsolated {
+                if (notification.object as? NSTextStorage)?.editedMask.contains(.editedCharacters) == true { self?.refresh() }
+                else { self?.needsDisplay = true }
+            }
+        })
+        observers.append(NotificationCenter.default.addObserver(forName: NSView.boundsDidChangeNotification, object: scrollView.contentView, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.needsDisplay = true }
+        })
+        scrollView.contentView.postsBoundsChangedNotifications = true
+        refresh()
+    }
+
+    required init(coder: NSCoder) { fatalError() }
+
+    deinit { for observer in observers { NotificationCenter.default.removeObserver(observer) } }
+
+    override var isFlipped: Bool { true }
+
+    func refresh() {
+        guard let textView else { return }
+        lineStarts = FileViewerTextLines.starts(in: textView.string)
+        needsDisplay = true
+        guard !thicknessUpdatePending else { return }
+        thicknessUpdatePending = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            thicknessUpdatePending = false
+            guard let textView = self.textView else { return }
+            let font = textView.font ?? AppSettingsStore.shared.codeFont
+            let thickness = max(32, ceil((String(lineStarts.count) as NSString).size(withAttributes: [.font: font]).width) + 14)
+            if ruleThickness != thickness { ruleThickness = thickness }
+        }
+    }
+
+    override func drawHashMarksAndLabels(in rect: NSRect) {
+        guard let textView, let layout = textView.layoutManager, let container = textView.textContainer else { return }
+        ApplicationColors.color("EditorBackground", fallback: .textBackgroundColor).setFill()
+        bounds.fill()
+        let visible = textView.visibleRect.offsetBy(dx: -textView.textContainerOrigin.x, dy: -textView.textContainerOrigin.y)
+        let glyphs = layout.glyphRange(forBoundingRect: visible, in: container)
+        let characters = layout.characterRange(forGlyphRange: glyphs, actualGlyphRange: nil)
+        var low = 0
+        var high = lineStarts.count
+        while low < high {
+            let middle = (low + high) / 2
+            if lineStarts[middle] <= characters.location { low = middle + 1 } else { high = middle }
+        }
+        let font = textView.font ?? AppSettingsStore.shared.codeFont
+        let attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.secondaryLabelColor]
+        for index in max(0, low - 1)..<lineStarts.count {
+            let start = lineStarts[index]
+            if start > NSMaxRange(characters) { break }
+            let fragment: NSRect
+            if start < (textView.textStorage?.length ?? 0) {
+                let glyph = layout.glyphIndexForCharacter(at: start)
+                fragment = layout.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
+            } else {
+                fragment = layout.extraLineFragmentRect
+            }
+            let point = convert(NSPoint(x: textView.textContainerOrigin.x, y: fragment.minY + textView.textContainerOrigin.y), from: textView)
+            let label = String(index + 1) as NSString
+            let size = label.size(withAttributes: attributes)
+            label.draw(at: NSPoint(x: ruleThickness - size.width - 7, y: point.y), withAttributes: attributes)
+        }
+    }
+
+    static func install(on scrollView: NSScrollView, textView: NSTextView) {
+        scrollView.verticalRulerView = FileViewerLineNumberRuler(scrollView: scrollView, textView: textView)
+        scrollView.hasVerticalRuler = true
+        scrollView.rulersVisible = true
+    }
+}
 
 
 final class EditableFileTextView: NSView, NSTextViewDelegate {
     let textView = EditorTextView(frame: .zero)
     private let scrollView = NSScrollView()
+    private(set) var viewerToolbar: DiffViewerToolbar?
+    private(set) var viewerPreferences = AppSettingsStore.shared.preferencesForNewFileViewer()
+    private var resolvedViewerEncoding: RepositoryTextEncoding?
     var onTextChanged: (() -> Void)?
+    var syntaxPath: String? { didSet { updateHighlighting() } }
+    var commentSetting = "#" { didSet { updateHighlighting() } }
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -27,6 +131,8 @@ final class EditableFileTextView: NSView, NSTextViewDelegate {
         textView.textColor = .textColor
         textView.backgroundColor = .textBackgroundColor
         textView.delegate = self
+        NotificationCenter.default.addObserver(self, selector: #selector(updateHighlighting), name: .fileViewerSettingsApplied, object: AppSettingsStore.shared)
+        NotificationCenter.default.addObserver(self, selector: #selector(updateHighlighting), name: .appPreferencesDidChange, object: AppSettingsStore.shared)
 
         textView.minSize = .zero
         textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
@@ -36,6 +142,7 @@ final class EditableFileTextView: NSView, NSTextViewDelegate {
         textView.textContainer?.widthTracksTextView = false
         textView.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         scrollView.documentView = textView
+        FileViewerLineNumberRuler.install(on: scrollView, textView: textView)
         scrollView.hasVerticalScroller = true
         scrollView.hasHorizontalScroller = true
         scrollView.borderType = .bezelBorder
@@ -51,11 +158,44 @@ final class EditableFileTextView: NSView, NSTextViewDelegate {
 
     required init?(coder: NSCoder) { nil }
 
+    func enableViewerToolbar(resolvedEncoding: RepositoryTextEncoding? = nil) {
+        if let resolvedEncoding { resolvedViewerEncoding = resolvedEncoding }
+        if viewerToolbar == nil {
+            let toolbar = DiffViewerToolbar(preferences: viewerPreferences)
+            toolbar.configure(for: .text)
+            toolbar.isHidden = false
+            toolbar.onAction = { [weak self] action, state in self?.performViewerAction(action, state: state) }
+            toolbar.install(in: self)
+            viewerToolbar = toolbar
+            textView.onGoToLine = { [weak self] in
+                guard let self, let line = FileViewerNavigationDialogs.requestLine(maximum: FileViewerTextLines.starts(in: text).count) else { return }
+                goToLine(line)
+            }
+        }
+        viewerToolbar?.apply(preferences: viewerPreferences, resolvedEncoding: resolvedViewerEncoding?.foundationEncoding)
+        textView.layoutManager?.showsInvisibleCharacters = viewerPreferences.showsNonPrintingCharacters
+    }
+
+    private func performViewerAction(_ action: String, state: NSControl.StateValue) {
+        if action == "Show nonprinting characters" {
+            viewerPreferences.showsNonPrintingCharacters = state == .on
+            textView.layoutManager?.showsInvisibleCharacters = state == .on
+            var preferences = AppSettingsStore.shared.fileViewerPreferences
+            preferences.showsNonPrintingCharacters = state == .on
+            AppSettingsStore.shared.updateFileViewerPreferences(preferences)
+        } else if action.hasPrefix("Encoding:"), let encoding = RepositoryTextEncoding(rawValue: String(action.dropFirst("Encoding:".count))) {
+            viewerPreferences.textEncoding = encoding
+        } else if action == "Settings" {
+            BrowserCommandCenter.perform(.settings)
+        }
+    }
+
 
     var text: String {
         get { textView.string }
         set {
             textView.string = newValue
+            updateHighlighting()
             textView.undoManager?.removeAllActions(withTarget: textView.textStorage as Any)
         }
     }
@@ -82,17 +222,68 @@ final class EditableFileTextView: NSView, NSTextViewDelegate {
         textView.scrollRangeToVisible(range)
     }
 
-    func textDidChange(_ notification: Notification) { onTextChanged?() }
+    func textDidChange(_ notification: Notification) { updateHighlighting(); onTextChanged?() }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        updateHighlighting()
+    }
+
+    @objc func updateHighlighting() {
+        if viewerToolbar != nil {
+            viewerPreferences.showsNonPrintingCharacters = AppSettingsStore.shared.fileViewerPreferences.showsNonPrintingCharacters
+            textView.layoutManager?.showsInvisibleCharacters = viewerPreferences.showsNonPrintingCharacters
+            viewerToolbar?.apply(preferences: viewerPreferences, resolvedEncoding: resolvedViewerEncoding?.foundationEncoding)
+        }
+        guard let layout = textView.layoutManager else { return }
+        let entire = NSRange(location: 0, length: textView.string.utf16.count)
+        for key in [NSAttributedString.Key.foregroundColor, .font] { layout.removeTemporaryAttribute(key, forCharacterRange: entire) }
+        let model = syntaxPath.map { FileEditorHighlighting.build(text: textView.string, path: $0, commentSetting: commentSetting) } ?? FileEditorHighlighting()
+        let dark = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        let font = AppSettingsStore.shared.codeFont
+        let bold = NSFontManager.shared.convert(font, toHaveTrait: .boldFontMask)
+        for token in model.tokens {
+            let color: NSColor
+            var tokenFont = font
+            switch token.kind {
+            case .syntax(let kind): color = DiffSyntaxHighlighter.color(for: kind)
+            case .comment: color = dark ? .systemGreen : NSColor(calibratedRed: 0, green: 0.392, blue: 0, alpha: 1)
+            case .summary: color = .textColor; tokenFont = bold
+            case .command(let command), .commitID(let command): color = FileEditorHighlighting.color(for: command, dark: dark); tokenFont = bold
+            }
+            layout.addTemporaryAttributes([.foregroundColor: color, .font: tokenFont], forCharacterRange: token.range)
+        }
+        textView.syntaxMarkers = model.markers
+        textView.needsDisplay = true
+    }
 }
 
 
 class FileViewerTextView: NSTextView {
+    var onReadOnlyFind: ((FileViewerShortcut) -> Void)?
+    var onGoToLine: (() -> Void)?
+    var normalizesCopyLineEndings = false
+
+    override func copy(_ sender: Any?) {
+        guard let text = FileViewerCopy.payload(.selection, text: string, selection: selectedRange(), isDiff: false,
+                                               normalizeLineEndings: normalizesCopyLineEndings) else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+    }
+
     private var occurrenceTerm = ""
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         if let id = ApplicationHotkeys.shared.matching(event, category: "File viewer"),
            let shortcut = FileViewerShortcut(rawValue: String(id.dropFirst("viewer.".count))) {
+            if !isEditable, [.find, .findNext, .findPrevious].contains(shortcut), let onReadOnlyFind {
+                onReadOnlyFind(shortcut)
+                return true
+            }
             switch shortcut {
+            case .goToLine:
+                guard let onGoToLine else { return super.performKeyEquivalent(with: event) }
+                onGoToLine()
             case .find: findAction(.showFindInterface)
             case .replace:
                 guard isEditable else { return false }
@@ -143,7 +334,9 @@ class FileViewerTextView: NSTextView {
     }
 
     override func menu(for event: NSEvent) -> NSMenu? {
+        if !isEditable, onReadOnlyFind != nil, let menu { return menu }
         let menu = super.menu(for: event) ?? NSMenu()
+        if !isEditable, onReadOnlyFind != nil { return menu }
         menu.addItem(.separator())
         for (title, action) in [("Find…", NSTextFinder.Action.showFindInterface), ("Replace…", .showReplaceInterface)] {
             if action == .showReplaceInterface && !isEditable { continue }
@@ -157,6 +350,52 @@ class FileViewerTextView: NSTextView {
 
 final class EditorTextView: FileViewerTextView {
     var onEscape: (() -> Bool)?
+    var syntaxMarkers: [FileEditorHighlighting.Marker] = []
+    private var markerTrackingArea: NSTrackingArea?
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let markerTrackingArea { removeTrackingArea(markerTrackingArea) }
+        let area = NSTrackingArea(rect: .zero, options: [.mouseMoved, .mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect], owner: self)
+        addTrackingArea(area)
+        markerTrackingArea = area
+    }
+
+    override func mouseExited(with event: NSEvent) { toolTip = nil; super.mouseExited(with: event) }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard let layoutManager, let textContainer else { return }
+        NSColor.systemRed.setStroke()
+        for marker in syntaxMarkers {
+            let glyphs = layoutManager.glyphRange(forCharacterRange: marker.range, actualCharacterRange: nil)
+            layoutManager.enumerateLineFragments(forGlyphRange: glyphs) { _, _, _, lineGlyphs, _ in
+                let range = NSIntersectionRange(glyphs, lineGlyphs)
+                guard range.length > 0 else { return }
+                let rect = layoutManager.boundingRect(forGlyphRange: range, in: textContainer).offsetBy(dx: self.textContainerOrigin.x, dy: self.textContainerOrigin.y)
+                guard rect.intersects(dirtyRect) else { return }
+                let wave = NSBezierPath()
+                wave.lineWidth = 1
+                wave.move(to: NSPoint(x: rect.minX, y: rect.maxY - 1))
+                var x = rect.minX
+                while x < rect.maxX {
+                    x = min(x + 2, rect.maxX)
+                    wave.line(to: NSPoint(x: x, y: rect.maxY - 3))
+                    x = min(x + 2, rect.maxX)
+                    wave.line(to: NSPoint(x: x, y: rect.maxY - 1))
+                }
+                wave.stroke()
+            }
+        }
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        super.mouseMoved(with: event)
+        guard let layoutManager, let textContainer else { return }
+        let point = convert(event.locationInWindow, from: nil)
+        let index = layoutManager.characterIndex(for: NSPoint(x: point.x - textContainerOrigin.x, y: point.y - textContainerOrigin.y), in: textContainer, fractionOfDistanceBetweenInsertionPoints: nil)
+        toolTip = syntaxMarkers.first { NSLocationInRange(index, $0.range) }?.message
+    }
     override func cancelOperation(_ sender: Any?) {
         if onEscape?() == true { return }
         super.cancelOperation(sender)
@@ -167,6 +406,10 @@ final class EditorTextView: FileViewerTextView {
 final class RepositoryFileEditorWindow: NSWindow {
     var onSave: (() -> Void)?
     var onCommandReturn: (() -> Void)?
+    var onCancel: (() -> Void)?
+    override func cancelOperation(_ sender: Any?) {
+        if let onCancel { onCancel() } else { super.cancelOperation(sender) }
+    }
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         let command = event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command
         if let onSave, command, event.charactersIgnoringModifiers?.lowercased() == "s" {
@@ -381,11 +624,21 @@ final class RepositoryFileEditorWindowController: NSWindowController, NSWindowDe
         editor.translatesAutoresizingMaskIntoConstraints = false
         left.addSubview(editor)
 
-        let help = NSTextField(wrappingLabelWithString: kind.help)
+        let help = NSTextView.scrollableTextView()
+        if let textView = help.documentView as? NSTextView {
+            textView.string = kind.help
+            textView.isEditable = false
+            textView.isSelectable = true
+            textView.drawsBackground = false
+            textView.font = AppSettingsStore.shared.applicationFont(size: NSFont.systemFontSize)
+            textView.textContainerInset = .zero
+        }
+        help.drawsBackground = false
+        help.borderType = .noBorder
+        help.hasVerticalScroller = true
+        help.autohidesScrollers = true
+        help.setAccessibilityIdentifier("RepositoryFileEditor.Help")
         help.translatesAutoresizingMaskIntoConstraints = false
-        help.isSelectable = true
-        help.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
-        help.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         right.addSubview(help)
         split.addArrangedSubview(left)
         split.addArrangedSubview(right)
@@ -440,7 +693,7 @@ final class RepositoryFileEditorWindowController: NSWindowController, NSWindowDe
                 leftButtons.bottomAnchor.constraint(equalTo: left.bottomAnchor),
                 help.topAnchor.constraint(equalTo: right.topAnchor, constant: 4),
                 help.leadingAnchor.constraint(equalTo: right.leadingAnchor, constant: 8),
-                help.trailingAnchor.constraint(lessThanOrEqualTo: right.trailingAnchor, constant: -8),
+                help.trailingAnchor.constraint(equalTo: right.trailingAnchor, constant: -8),
 
                 links.trailingAnchor.constraint(equalTo: right.trailingAnchor, constant: -8),
                 links.bottomAnchor.constraint(equalTo: right.bottomAnchor, constant: -4),
@@ -464,7 +717,7 @@ final class RepositoryFileEditorWindowController: NSWindowController, NSWindowDe
                 editor.bottomAnchor.constraint(equalTo: left.bottomAnchor),
                 help.topAnchor.constraint(equalTo: right.topAnchor, constant: 8),
                 help.leadingAnchor.constraint(equalTo: right.leadingAnchor, constant: 8),
-                help.trailingAnchor.constraint(lessThanOrEqualTo: right.trailingAnchor, constant: -8),
+                help.trailingAnchor.constraint(equalTo: right.trailingAnchor, constant: -8),
 
                 saveButton.trailingAnchor.constraint(equalTo: right.trailingAnchor, constant: -8),
                 saveButton.bottomAnchor.constraint(equalTo: right.bottomAnchor, constant: -8),
@@ -475,7 +728,7 @@ final class RepositoryFileEditorWindowController: NSWindowController, NSWindowDe
             split.setHoldingPriority(.defaultLow + 1, forSubviewAt: 1)
         }
 
-        let helpBottom = help.bottomAnchor.constraint(lessThanOrEqualTo: helpFloor.topAnchor, constant: -8)
+        let helpBottom = help.bottomAnchor.constraint(equalTo: helpFloor.topAnchor, constant: -8)
         helpBottom.priority = .defaultHigh
         helpBottom.isActive = true
         return root
@@ -574,6 +827,7 @@ final class FileEditorWindowController: NSWindowController, NSWindowDelegate {
     private let lineNumber: Int?
     private let onClose: () -> Void
     private var loaded: EditableFileText?
+    let previewPresentation = FilePreviewPresentation<EditableFileText>()
     private var closing = false
     private let saveButton = NSButton()
 
@@ -581,7 +835,7 @@ final class FileEditorWindowController: NSWindowController, NSWindowDelegate {
         didSet { saveButton.isEnabled = hasChanges }
     }
 
-    init(fileURL: URL, source: any RepositoryFileEditingDataSource, showWarning: Bool, lineNumber: Int? = nil, onClose: @escaping () -> Void) {
+    init(fileURL: URL, source: any RepositoryFileEditingDataSource, showWarning: Bool, lineNumber: Int? = nil, displayName: String? = nil, onClose: @escaping () -> Void) {
         self.fileURL = fileURL
         self.source = source
         self.showWarning = showWarning
@@ -590,7 +844,7 @@ final class FileEditorWindowController: NSWindowController, NSWindowDelegate {
         let window = RepositoryFileEditorWindow(contentRect: NSRect(x: 0, y: 0, width: 659, height: 543),
                                                 styleMask: [.titled, .closable, .resizable, .miniaturizable],
                                                 backing: .buffered, defer: false)
-        window.title = fileURL.path
+        window.title = displayName ?? fileURL.path
         window.isReleasedWhenClosed = false
         super.init(window: window)
         window.delegate = self
@@ -606,10 +860,23 @@ final class FileEditorWindowController: NSWindowController, NSWindowDelegate {
 
 
     func load() async throws {
+        editor.syntaxPath = fileURL.path
+        if FileEditorHighlighting.mode(for: fileURL.path) == .commitMessage || FileEditorHighlighting.mode(for: fileURL.path) == .rebaseTodo {
+            editor.commentSetting = try await source.editorCommentCharacter()
+        }
         if FileManager.default.fileExists(atPath: fileURL.path) {
-            let text = try await source.loadEditableFile(at: fileURL)
-            loaded = text
-            editor.text = text.text
+            let preview = try await source.prepareEditableFile(at: fileURL, encoding: editor.viewerPreferences.textEncoding)
+            previewPresentation.present(preview, display: { [weak self] text in
+                guard let self else { return }
+                loaded = text
+                editor.text = text.text
+                editor.enableViewerToolbar(resolvedEncoding: text.encoding)
+                if let lineNumber { editor.goToLine(lineNumber) }
+                hasChanges = false
+            }, failure: { [weak self] error in
+                guard let self, let window else { return }
+                Task { await RepositoryFileEditorDialogs.message("Cannot open file:\n" + error.localizedDescription, caption: "Error", window: window) }
+            })
         } else {
             editor.text = "File \(fileURL.path) does not exist"
         }
@@ -650,6 +917,7 @@ final class FileEditorWindowController: NSWindowController, NSWindowDelegate {
             rows.append(panel)
         }
         rows.append(editor)
+        editor.enableViewerToolbar()
         let stack = NSStackView(views: rows)
         stack.orientation = .vertical
         stack.alignment = .leading
@@ -664,6 +932,7 @@ final class FileEditorWindowController: NSWindowController, NSWindowDelegate {
             stack.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             stack.bottomAnchor.constraint(equalTo: root.bottomAnchor)
         ])
+        previewPresentation.install(in: editor)
         return root
     }
 
@@ -705,7 +974,7 @@ final class FileEditorWindowController: NSWindowController, NSWindowDelegate {
         return false
     }
 
-    func windowWillClose(_ notification: Notification) { onClose() }
+    func windowWillClose(_ notification: Notification) { previewPresentation.cancel(); onClose() }
 }
 
 

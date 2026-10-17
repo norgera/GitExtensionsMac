@@ -251,15 +251,16 @@ extension GitRepositoryModule: RepositoryBuiltInPluginDataSource {
         let revisions = try await builtInRead(["rev-list", "HEAD"]).split(separator: "\n").map { try ObjectID(parsing: String($0)) }
         let formatter = DateFormatter(); formatter.locale = Locale(identifier: "en_US_POSIX"); formatter.dateFormat = "yyyy-MM-dd HH:mm:ss Z"
         var objects: [ObjectID: LargeGitFile] = [:]
+        var order: [ObjectID] = []
         for (index, revision) in revisions.enumerated() {
             let date = formatter.date(from: try await builtInRead(["show", "-s", revision.string, "--format=%ci"]).trimmingCharacters(in: .whitespacesAndNewlines)) ?? .distantPast
             let result = try await builtInRun(GitCommand(arguments: ["ls-tree", "-zrl", revision.string], accessesRemote: false, changesRepositoryState: false))
             for object in BuiltInPluginCommands.parseLargeFiles(result.standardOutput, revision: revision, date: date, minimum: minimum) {
                 if var known = objects[object.id] {
                     known.revisions.insert(revision); known.lastDate = max(date, known.lastDate); objects[object.id] = known
-                } else { objects[object.id] = object }
+                } else { objects[object.id] = object; order.append(object.id) }
             }
-            progress(index + 1, revisions.count, objects.values.sorted { $0.size == $1.size ? $0.path < $1.path : $0.size > $1.size })
+            progress(index + 1, revisions.count, order.compactMap { objects[$0] })
         }
         let common = try await builtInRead(["rev-parse", "--git-common-dir"]).trimmingCharacters(in: .whitespacesAndNewlines)
         let directory = try await settingsDirectories().working
@@ -273,7 +274,7 @@ extension GitRepositoryModule: RepositoryBuiltInPluginDataSource {
                 }
             }
         }
-        return objects.values.sorted { $0.size == $1.size ? $0.path < $1.path : $0.size > $1.size }
+        return order.compactMap { objects[$0] }
     }
 
     package func removeLargeFiles(_ paths: [String]) async throws -> BuiltInMutationOutcome {
@@ -354,6 +355,9 @@ extension GitRepositoryModule: RepositoryBuiltInPluginDataSource {
     package func solutionFiles() async throws -> [URL] {
         let directory = try await settingsDirectories().working
         guard let files = FileManager.default.enumerator(at: directory, includingPropertiesForKeys: [.isRegularFileKey]) else { return [] }
-        return files.compactMap { $0 as? URL }.filter { $0.pathExtension == "sln" }
+        return files.compactMap { $0 as? URL }.filter { $0.pathExtension == "sln" }.sorted { lhs, rhs in
+            let depths = (lhs.pathComponents.count, rhs.pathComponents.count)
+            return depths.0 != depths.1 ? depths.0 < depths.1 : lhs.path.uppercased() < rhs.path.uppercased()
+        }
     }
 }

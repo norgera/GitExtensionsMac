@@ -53,6 +53,7 @@ final class ApplicationScriptsMenu: NSMenu, NSMenuDelegate {
 @MainActor
 final class ScriptProcessWindow: NSWindowController, NSWindowDelegate {
     private let output = NSTextView()
+    let processInput = ProcessInputController()
     private var task: Task<GitCommandResult, Error>?
 
     private init(title: String) {
@@ -73,32 +74,48 @@ final class ScriptProcessWindow: NSWindowController, NSWindowDelegate {
         scroll.widthAnchor.constraint(equalTo: root.widthAnchor, constant: -20).isActive = true
         scroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 200).isActive = true
         let cancel = NSButton(title: "Cancel", target: self, action: #selector(cancel))
-        cancel.keyEquivalent = "\u{1b}"; root.addArrangedSubview(cancel)
+        cancel.keyEquivalent = "\u{1b}"
+        let spacer = NSView(); spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let footer = NSStackView(views: [processInput.toggle, spacer, cancel]); footer.orientation = .horizontal; footer.alignment = .centerY; footer.spacing = 8
+        let bottom = processInput.bottomStack(footer: footer)
+        root.addArrangedSubview(bottom)
+        bottom.widthAnchor.constraint(equalTo: root.widthAnchor, constant: -20).isActive = true
+        processInput.window = window
     }
     required init?(coder: NSCoder) { nil }
     @objc private func cancel() { task?.cancel() }
     func windowShouldClose(_ sender: NSWindow) -> Bool { cancel(); return false }
 
     static func run(_ invocation: ScriptInvocation, title: String, owner: NSWindow?) async throws -> GitCommandResult {
+        try await run(title: title, owner: owner) { output in try await ScriptExecution.run(invocation, output: output) }
+    }
+
+    static func run(title: String, owner: NSWindow?,
+                    operation: @escaping @Sendable (@escaping GitOutputHandler) async throws -> GitCommandResult) async throws -> GitCommandResult {
         let controller = ScriptProcessWindow(title: title)
         if let owner, let window = controller.window {
             window.setFrameOrigin(NSPoint(x: owner.frame.minX + 30, y: owner.frame.minY + 30))
             owner.addChildWindow(window, ordered: .above)
         }
         controller.showWindow(nil)
+        let processInput = controller.processInput
         let task = Task {
             try await OutputHistoryRecording.perform {
-                try await ScriptExecution.run(invocation) { [weak controller] event in
-                    Task { @MainActor in
-                        guard let controller else { return }
-                        controller.output.textStorage?.append(NSAttributedString(string: String(decoding: event.data, as: UTF8.self)))
-                        controller.output.scrollToEndOfDocument(nil)
+                try await processInput.perform {
+                    try await operation { [weak controller] event in
+                        Task { @MainActor in
+                            guard let controller else { return }
+                            controller.processInput.observeOutput(event.text)
+                            controller.output.textStorage?.append(NSAttributedString(string: String(decoding: event.data, as: UTF8.self)))
+                            controller.output.scrollToEndOfDocument(nil)
+                        }
                     }
                 }
             }
         }
         controller.task = task
         defer {
+            processInput.finish()
             if let window = controller.window { owner?.removeChildWindow(window) }
             controller.close()
         }
@@ -176,7 +193,7 @@ enum ApplicationScriptEvents {
 enum ScriptPrompts {
     static func resolve(_ definition: ScriptDefinition, options: [String: [String]],
                         input: (String?, String) async -> String?,
-                        files: () async -> [URL]?) async -> ScriptDefinition? {
+                        files: () async -> String?) async -> ScriptDefinition? {
         var script = definition
         let pattern = #"\{UserInput:([^}=]+)(=([^{}]*((\{[^{}]+\})+[^{}]*)*))?\}"#
         let regex = try! NSRegularExpression(pattern: pattern)
@@ -195,32 +212,38 @@ enum ScriptPrompts {
         }
         if script.arguments.contains("{UserFiles}") {
             guard let selected = await files() else { return nil }
-            let quotedFiles = ScriptExecution.expand("{{files}}", options: ["files": selected.map(\.path)], powerShell: script.isPowerShell)
-            script.arguments = ScriptExecution.replaceOption("UserFiles", in: script.arguments, values: [quotedFiles], powerShell: script.isPowerShell)
+            script.arguments = ScriptExecution.replaceOption("UserFiles", in: script.arguments, values: [selected], powerShell: script.isPowerShell)
         }
         return script
     }
 
     static func resolve(_ script: ScriptDefinition, options: [String: [String]]) async -> ScriptDefinition? {
-        await resolve(script, options: options, input: { label, initial in
-            let alert = NSAlert(); alert.messageText = script.displayName
-            alert.informativeText = label ?? "Enter script input"
-            let field = NSTextField(string: initial); field.frame = NSRect(x: 0, y: 0, width: 400, height: 24)
-            alert.accessoryView = field
-            alert.addButton(withTitle: "OK"); alert.addButton(withTitle: "Cancel")
-            alert.window.initialFirstResponder = field
-            guard alert.runModal() == .alertFirstButtonReturn else { return nil }
-            return field.stringValue
+        let result = await resolve(script, options: options, input: { label, initial in
+            ScriptInputWindow(scriptName: script.displayName, label: label, initial: initial).run()
         }, files: {
-            let panel = NSOpenPanel(); panel.allowsMultipleSelection = true
-            guard panel.runModal() == .OK else { return nil }
-            return panel.urls
+            ScriptInputWindow(scriptName: script.displayName, label: nil, initial: "", files: true).run()
         })
+        if result == nil {
+            let alert = NSAlert(); alert.messageText = script.displayName
+            alert.informativeText = "Script not started."
+            alert.addButton(withTitle: "OK"); alert.runModal()
+        }
+        return result
     }
 }
 
 @MainActor
 final class ScriptsWindowController: NSWindowController, NSTableViewDataSource, NSTableViewDelegate {
+    private static var editorOnly: ScriptsWindowController?
+
+    static func showEditorOnly() {
+        if let editorOnly, editorOnly.window?.isVisible == true { editorOnly.window?.makeKeyAndOrderFront(nil); return }
+        do {
+            editorOnly = try ScriptsWindowController(execute: { _, completion in completion(.failure(CancellationError())) }, cancel: {}, canExecute: false)
+            editorOnly?.showWindow(nil); editorOnly?.window?.makeKeyAndOrderFront(nil)
+        } catch { NSAlert(error: error).runModal() }
+    }
+
     private var scripts: [ScriptDefinition]
     private let store: ApplicationScriptsStore
     private let execute: (ScriptDefinition, @escaping (Result<ScriptExecutionOutcome, Error>) -> Void) -> Void
@@ -237,10 +260,11 @@ final class ScriptsWindowController: NSWindowController, NSTableViewDataSource, 
     private let output = NSTextView()
     private var editingIndex: Int?
     private var running = false
+    private var argumentsHelp: ScriptArgumentsHelpWindow?
 
     init(store: ApplicationScriptsStore = .shared,
          execute: @escaping (ScriptDefinition, @escaping (Result<ScriptExecutionOutcome, Error>) -> Void) -> Void,
-         cancel: @escaping () -> Void) throws {
+         cancel: @escaping () -> Void, canExecute: Bool = true) throws {
         self.store = store; scripts = try store.load(); self.execute = execute; cancelExecution = cancel
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 740, height: 530),
                               styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
@@ -258,6 +282,13 @@ final class ScriptsWindowController: NSWindowController, NSTableViewDataSource, 
         list.widthAnchor.constraint(equalTo: root.widthAnchor, constant: -24).isActive = true
         for (label, field) in [("Name", name), ("Command", command), ("Arguments", arguments), ("Icon", icon), ("Icon file", iconFile)] {
             let row = NSStackView(views: [NSTextField(labelWithString: label), field])
+            if field === arguments {
+                let help = NSButton(title: "?", target: self, action: #selector(showArgumentsHelp))
+                help.bezelStyle = .helpButton
+                help.toolTip = "Arguments help"
+                help.setAccessibilityIdentifier("Scripts.ArgumentsHelp")
+                row.addArrangedSubview(help)
+            }
             root.addArrangedSubview(row); row.widthAnchor.constraint(equalTo: list.widthAnchor).isActive = true
             field.widthAnchor.constraint(equalToConstant: 570).isActive = true
         }
@@ -268,7 +299,8 @@ final class ScriptsWindowController: NSWindowController, NSTableViewDataSource, 
         let note = NSTextField(wrappingLabelWithString: "Configure an executable and its arguments. Use {WorkingDir}, {{cHash}}, {UserInput:Label=default} or {UserFiles}. ShowInUserMenuBar adds a toolbar action; ShowInFileList adds a file action. Shortcuts are configured in Settings → Hotkeys → Scripts.")
         root.addArrangedSubview(note); note.widthAnchor.constraint(equalTo: list.widthAnchor).isActive = true
         let actions = NSStackView()
-        for (title, selector) in [("Add", #selector(add)), ("Delete", #selector(delete)), ("Up", #selector(moveScriptUp)), ("Down", #selector(moveScriptDown)), ("Save", #selector(save)), ("Run", #selector(run)), ("Cancel execution", #selector(cancelRun))] {
+        let editing: [(String, Selector)] = [("Add", #selector(add)), ("Delete", #selector(delete)), ("Up", #selector(moveScriptUp)), ("Down", #selector(moveScriptDown)), ("Save", #selector(save))]
+        for (title, selector) in editing + (canExecute ? [("Run", #selector(run)), ("Cancel execution", #selector(cancelRun))] : []) {
             actions.addArrangedSubview(NSButton(title: title, target: self, action: selector))
         }
         root.addArrangedSubview(actions)
@@ -359,4 +391,119 @@ final class ScriptsWindowController: NSWindowController, NSTableViewDataSource, 
         }
     }
     @objc private func cancelRun() { cancelExecution() }
+    @objc private func showArgumentsHelp() {
+        if argumentsHelp?.window?.isVisible != true { argumentsHelp = ScriptArgumentsHelpWindow(owner: window) }
+        argumentsHelp?.showWindow(nil)
+        argumentsHelp?.window?.makeKeyAndOrderFront(nil)
+    }
+}
+
+
+enum ScriptArgumentsHelp {
+    static let text = """
+    Use {option} for normal replacement.
+    Use {{option}} for quoted replacement.
+
+    User inputs:
+    {UserInput}
+    {UserInput:a popup label}
+    {UserInput:a popup label=a default value}
+    {UserInput:a popup label=a default value using {sLocalBranch}}
+    {UserFiles}
+
+    Working directory:
+    {WorkingDir}
+
+    Repository:
+    {RepoName}
+
+    Selected commits:
+    {sHashes}
+
+    Selected revision:
+    {sTag}
+    {sBranch}
+    {sLocalBranch}
+    {sRemoteBranch}
+    {sRemoteBranchName}   (without the remote's name)
+    {sRemote}
+    {sRemoteUrl}
+    {sRemotePathFromUrl}
+    {sHash}
+    {sMessage}
+    {sSubject}
+    {sAuthor}
+    {sCommitter}
+    {sAuthorDate}
+    {sCommitDate}
+
+    Currently checked out revision:
+    {HEAD}   (checked out branch name or checked out commit hash)
+    {cTag}
+    {cBranch}
+    {cLocalBranch}
+    {cRemoteBranch}
+    {cRemoteBranchName}   (without the remote's name)
+    {cHash}
+    {cMessage}
+    {cSubject}
+    {cAuthor}
+    {cCommitter}
+    {cAuthorDate}
+    {cCommitDate}
+    {cDefaultRemote}
+    {cDefaultRemoteUrl}
+    {cDefaultRemotePathFromUrl}
+
+    Diff selection:
+    {SelectedRelativePaths}   (relative paths as they were in the selected commit)
+    {LineNumber}
+    {ColumnNumber}
+    """
+}
+
+@MainActor
+final class ScriptArgumentsHelpWindow: NSWindowController, NSWindowDelegate {
+    let textView = NSTextView()
+    private var ownerObserver: NSObjectProtocol?
+
+    init(owner: NSWindow?) {
+        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 299, height: 439),
+                            styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        panel.title = "Arguments help"
+        panel.isReleasedWhenClosed = false
+        panel.worksWhenModal = true
+        panel.becomesKeyOnlyIfNeeded = false
+        panel.standardWindowButton(.zoomButton)?.isEnabled = false
+        super.init(window: panel)
+        panel.delegate = self
+        textView.isEditable = false
+        textView.isRichText = false
+        textView.font = AppSettingsStore.shared.applicationFont(size: 12)
+        textView.string = ScriptArgumentsHelp.text
+        textView.textContainerInset = NSSize(width: 6, height: 6)
+        textView.isVerticallyResizable = true
+        textView.autoresizingMask = [.width]
+        textView.textContainer?.widthTracksTextView = true
+        textView.setAccessibilityIdentifier("Scripts.ArgumentsHelp.Text")
+        let scroll = NSScrollView()
+        scroll.documentView = textView
+        scroll.hasVerticalScroller = true
+        scroll.borderType = .bezelBorder
+        panel.contentView = scroll
+        panel.initialFirstResponder = textView
+        if let owner {
+            owner.addChildWindow(panel, ordered: .above)
+            ownerObserver = NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: owner, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.close() }
+            }
+        }
+        OwnedModalWindow.center(panel, over: owner)
+    }
+
+    required init?(coder: NSCoder) { nil }
+    deinit { if let ownerObserver { NotificationCenter.default.removeObserver(ownerObserver) } }
+    func windowWillClose(_ notification: Notification) {
+        if let ownerObserver { NotificationCenter.default.removeObserver(ownerObserver); self.ownerObserver = nil }
+    }
 }

@@ -165,19 +165,7 @@ package final class GitRepositoryCreator: RepositoryCreating, @unchecked Sendabl
     }
 
     package func suggestedCloneSubdirectory(for source: String) -> String {
-        var value = source.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !value.isEmpty else { return "" }
-        while value.last == "/" || value.last == "\\" { value.removeLast() }
-        guard !value.isEmpty else { return "" }
-        if let colon = value.lastIndex(of: ":"),
-           !value[value.index(after: colon)...].contains("/"),
-           !value[value.index(after: colon)...].contains("\\") {
-            value = String(value[value.index(after: colon)...])
-        } else {
-            value = URL(fileURLWithPath: value).lastPathComponent
-        }
-        if value.lowercased().hasSuffix(".git") { value.removeLast(4) }
-        return value
+        CloneSourcePath.repositoryName(source)
     }
 
     package func remoteBranches(at source: String) async throws -> [String] {
@@ -280,5 +268,78 @@ package final class GitRepositoryCreator: RepositoryCreating, @unchecked Sendabl
             status: result.exitStatus,
             stderr: result.standardErrorString
         )
+    }
+}
+
+
+package enum CloneSourcePath {
+    package static func isAbsoluteURI(_ value: String) -> Bool {
+        let value = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty, !value.contains(where: { $0.isWhitespace }), !value.contains("\\"),
+              let colon = value.firstIndex(of: ":") else { return false }
+        let scheme = String(value[..<colon])
+        guard scheme.utf8.count > 1, scheme.range(of: "^[A-Za-z][A-Za-z0-9+.-]*$", options: .regularExpression) != nil,
+              value.range(of: "%($|[^0-9A-Fa-f]|[0-9A-Fa-f]($|[^0-9A-Fa-f]))", options: .regularExpression) == nil else { return false }
+        let rest = String(value[value.index(after: colon)...])
+        if ["http", "https", "ftp", "ws", "wss", "gopher", "nntp"].contains(scheme.lowercased()) {
+            guard rest.hasPrefix("//"), let components = URLComponents(string: value), components.host?.isEmpty == false else { return false }
+        }
+        if scheme.lowercased() == "file" {
+            guard rest.hasPrefix("//"), rest.count > 2 else { return false }
+        }
+        if rest.hasPrefix("//") {
+            let authority = rest.dropFirst(2).prefix { !"/?#".contains($0) }
+            let host = authority.split(separator: "@", omittingEmptySubsequences: false).last ?? ""
+            if let separator = host.lastIndex(of: ":"), !host.hasSuffix("]") {
+                let port = host[host.index(after: separator)...]
+                if !port.isEmpty && (port.contains(where: { !$0.isASCII || !$0.isNumber }) || Int(port).map { $0 > 65535 } != false) { return false }
+            }
+        }
+        return true
+    }
+
+    private static func urlDecode(_ source: String) -> String {
+        let bytes = Array(source.utf8)
+        var decoded: [UInt8] = []; var index = 0
+        func hex(_ byte: UInt8) -> UInt8? {
+            switch byte { case 48...57: return byte - 48; case 65...70: return byte - 55; case 97...102: return byte - 87; default: return nil }
+        }
+        while index < bytes.count {
+            if bytes[index] == 37, index + 2 < bytes.count, let a = hex(bytes[index + 1]), let b = hex(bytes[index + 2]) {
+                decoded.append(a * 16 + b); index += 3
+            } else { decoded.append(bytes[index] == 43 ? 32 : bytes[index]); index += 1 }
+        }
+        return String(decoding: decoded, as: UTF8.self)
+    }
+
+    package static func repositoryName(_ source: String?) -> String {
+        guard let source else { return "" }
+        var path = source
+        if isAbsoluteURI(source) || source.lowercased().hasPrefix("git@") {
+            path = urlDecode(source)
+        }
+        while path.hasSuffix("/") || path.hasSuffix("\\") { path.removeLast() }
+        if path.hasSuffix(".git") { path.removeLast(4) }
+        guard let separator = path.lastIndex(where: { $0 == "/" || $0 == "\\" }) else { return "" }
+        return String(path[path.index(after: separator)...])
+    }
+
+    package static func canBeGitURL(_ value: String?, isGitDirectory: ((String) -> Bool)? = nil) -> Bool {
+        guard let value, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+        let lower = value.lowercased()
+        if isAbsoluteURI(value), !value.contains("?"), !value.contains("#") { return true }
+        if lower.hasSuffix(".git") || lower.hasSuffix(".git/") { return true }
+        if let isGitDirectory { return isGitDirectory(value) }
+        let url = URL(fileURLWithPath: value)
+        let manager = FileManager.default
+        if manager.fileExists(atPath: url.appendingPathComponent(".git").path) { return true }
+        return ["info", "objects", "refs"].allSatisfy { name in
+            var directory: ObjCBool = false
+            return manager.fileExists(atPath: url.appendingPathComponent(name).path, isDirectory: &directory) && directory.boolValue
+        }
+    }
+
+    package static func extract(_ text: String?) -> String? {
+        text?.components(separatedBy: " ").first { canBeGitURL($0) }
     }
 }

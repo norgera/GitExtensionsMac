@@ -27,10 +27,11 @@ final class CommandLogDetailView: NSTextView {
 
 private final class CommandLogTableView: NSTableView {
     var shortcut: ((String) -> Void)?
+    var shortcutKeys: Set<String> = ["c", "s", "l"]
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         guard window?.firstResponder === self,
               event.modifierFlags.intersection([.command, .control, .option, .shift]) == .command,
-              let key = event.charactersIgnoringModifiers, ["c", "s", "l"].contains(key) else {
+              let key = event.charactersIgnoringModifiers, shortcutKeys.contains(key) else {
             return super.performKeyEquivalent(with: event)
         }
         shortcut?(key)
@@ -39,9 +40,13 @@ private final class CommandLogTableView: NSTableView {
 }
 
 @MainActor
-final class CommandLogWindowController: NSWindowController, NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate {
+final class CommandLogWindowController: NSWindowController, NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate, NSTabViewDelegate {
     private let table = CommandLogTableView()
     private let detail = CommandLogDetailView()
+    private let tabs = NSTabView()
+    private let cacheTable = CommandLogTableView()
+    private let cacheDetail = CommandLogDetailView()
+    private var cachedEntries: [CommandCacheEntry] = []
     private var entries: [CommandLogEntry] = []
     private var timer: Timer?
     var onClose: (() -> Void)?
@@ -96,9 +101,36 @@ final class CommandLogWindowController: NSWindowController, NSWindowDelegate, NS
         output.documentView = detail
         detail.setWordWrap(true)
         split.addArrangedSubview(list); split.addArrangedSubview(output)
-        root.addArrangedSubview(split)
-        split.widthAnchor.constraint(equalTo: root.widthAnchor, constant: -16).isActive = true
-        split.heightAnchor.constraint(greaterThanOrEqualToConstant: 150).isActive = true
+        let logTab = NSTabViewItem(identifier: "log"); logTab.label = "Command log"; logTab.view = split
+        let cacheSplit = NSSplitView(); cacheSplit.isVertical = false; cacheSplit.dividerStyle = .thin
+        let cacheList = NSScrollView(frame: NSRect(x: 0, y: 0, width: 643, height: 183))
+        cacheList.hasVerticalScroller = true; cacheList.hasHorizontalScroller = true
+        let cacheColumn = NSTableColumn(identifier: .init("cachedCommand")); cacheColumn.width = 1800
+        cacheTable.addTableColumn(cacheColumn); cacheTable.headerView = nil
+        cacheTable.dataSource = self; cacheTable.delegate = self; cacheTable.allowsEmptySelection = false
+        cacheTable.setAccessibilityIdentifier("CommandCache.Table")
+        table.setAccessibilityIdentifier("CommandLog.Table")
+        cacheTable.shortcutKeys = ["l"]
+        cacheTable.shortcut = { [weak self] _ in self?.clearCache() }
+        cacheList.documentView = cacheTable
+        let cacheOutput = NSScrollView(frame: NSRect(x: 0, y: 0, width: 643, height: 231))
+        cacheOutput.hasVerticalScroller = true; cacheOutput.hasHorizontalScroller = true
+        cacheDetail.isEditable = false; cacheDetail.isRichText = false
+        cacheDetail.setAccessibilityIdentifier("CommandCache.Output")
+        cacheDetail.frame = NSRect(origin: .zero, size: cacheOutput.contentSize)
+        cacheDetail.minSize = NSSize(width: 0, height: cacheOutput.contentSize.height)
+        cacheDetail.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        cacheDetail.font = AppSettingsStore.shared.monospaceFont; cacheDetail.isVerticallyResizable = true
+        cacheDetail.autoresizingMask = [.width]; cacheDetail.textContainer?.widthTracksTextView = true
+        cacheOutput.documentView = cacheDetail; cacheDetail.setWordWrap(true)
+        cacheSplit.addArrangedSubview(cacheList); cacheSplit.addArrangedSubview(cacheOutput)
+        let cacheTab = NSTabViewItem(identifier: "cache"); cacheTab.label = "Command cache"; cacheTab.view = cacheSplit
+        tabs.addTabViewItem(logTab); tabs.addTabViewItem(cacheTab); tabs.delegate = self
+        tabs.setContentHuggingPriority(.defaultLow, for: .vertical)
+        tabs.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
+        root.addArrangedSubview(tabs)
+        tabs.widthAnchor.constraint(equalTo: root.widthAnchor, constant: -16).isActive = true
+        tabs.heightAnchor.constraint(greaterThanOrEqualToConstant: 150).isActive = true
         let controls = NSStackView()
         for (title, action) in [("Always on top", #selector(top(_:))), ("Word wrap", #selector(wrap(_:))), ("Capture call stacks", #selector(capture(_:)))] {
             let button = NSButton(checkboxWithTitle: title, target: self, action: action)
@@ -113,12 +145,13 @@ final class CommandLogWindowController: NSWindowController, NSWindowDelegate, NS
             menu.addItem(item)
         }
         table.menu = menu
-        let buttons = NSStackView()
-        for item in menu.items {
-            let button = NSButton(title: item.title, target: self, action: item.action)
-            buttons.addArrangedSubview(button)
-        }
-        root.addArrangedSubview(buttons)
+        let cacheMenu = NSMenu()
+        let clear = NSMenuItem(title: "Clear", action: #selector(clearCache), keyEquivalent: "l")
+        clear.keyEquivalentModifierMask = .command; clear.target = self
+        clear.image = NSImage(systemSymbolName: "eraser", accessibilityDescription: nil)
+        cacheMenu.addItem(clear)
+        cacheTable.menu = cacheMenu; cacheSplit.menu = cacheMenu
+        split.menu = menu
         refresh()
         timer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.refresh() }
@@ -128,8 +161,13 @@ final class CommandLogWindowController: NSWindowController, NSWindowDelegate, NS
 
     required init?(coder: NSCoder) { nil }
     func windowWillClose(_ notification: Notification) { timer?.invalidate(); timer = nil; onClose?() }
-    func numberOfRows(in tableView: NSTableView) -> Int { entries.count }
+    func numberOfRows(in tableView: NSTableView) -> Int { tableView === cacheTable ? cachedEntries.count : entries.count }
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        if tableView === cacheTable {
+            let field = NSTextField(labelWithString: cachedEntries[row].displayString)
+            field.font = AppSettingsStore.shared.monospaceFont
+            return field
+        }
         let entry = entries[row]
         let duration = entry.duration.map { String(format: "%.0f ms", $0 * 1000) } ?? "running"
         let state = entry.cancelled ? "cancelled" : entry.exitStatus.map(String.init) ?? (entry.failedToExecute ? "error" : "")
@@ -137,9 +175,16 @@ final class CommandLogWindowController: NSWindowController, NSWindowDelegate, NS
         field.font = AppSettingsStore.shared.monospaceFont
         return field
     }
-    func tableViewSelectionDidChange(_ notification: Notification) { updateDetail() }
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        if notification.object as? NSTableView === cacheTable { updateCacheDetail() } else { updateDetail() }
+    }
+    func tabView(_ tabView: NSTabView, didSelect tabViewItem: NSTabViewItem?) {
+        refresh()
+        window?.makeFirstResponder(tabViewItem?.identifier as? String == "cache" ? cacheTable : table)
+    }
     private static let time: DateFormatter = { let value = DateFormatter(); value.dateFormat = "HH:mm:ss.SSS"; return value }()
     private func refresh() {
+        if tabs.selectedTabViewItem?.identifier as? String == "cache" { refreshCache(); return }
         let updated = CommandLog.shared.snapshot()
         guard updated != entries else { return }
         let followsTail = entries.isEmpty || table.selectedRow == entries.count - 1
@@ -154,10 +199,37 @@ final class CommandLogWindowController: NSWindowController, NSWindowDelegate, NS
         updateDetail()
     }
     private func updateDetail() {
+        if entries.isEmpty { return }
         guard entries.indices.contains(table.selectedRow) else { detail.string = ""; return }
         let entry = entries[table.selectedRow]
         detail.string = "Command: \(entry.commandLine)\nWorking dir: \(entry.directory)\nProcess ID: \(entry.processID.map(String.init) ?? "unknown")\nUI thread: \(entry.isOnMainThread)\nStarted at: \(entry.startedAt.ISO8601Format())\nDuration: \(entry.duration.map { String(format: "%.3f ms", $0 * 1000) } ?? "still running")\nExit code: \(entry.exitStatus.map(String.init) ?? "unknown")\nCancelled: \(entry.cancelled)\nLaunch error: \(entry.failedToExecute)\nRemote: \(entry.accessesRemote)\nMay change repository: \(entry.mayChangeRepository)\nOutput bytes: \(entry.stdoutBytes) stdout, \(entry.stderrBytes) stderr\nOutput bodies: not captured (credential safety)\nCall stack:\n\(entry.callStack.isEmpty ? "not captured" : entry.callStack.joined(separator: "\n"))"
     }
+    private func refreshCache() {
+        let updated = CommandCache.shared.snapshot()
+        guard updated != cachedEntries else { return }
+        let followsTail = cachedEntries.isEmpty || cacheTable.selectedRow == cachedEntries.count - 1
+        let selected = cacheTable.selectedRow
+        cachedEntries = updated
+        let font = AppSettingsStore.shared.monospaceFont
+        let longest = cachedEntries.map { ($0.displayString as NSString).size(withAttributes: [.font: font]).width }.max() ?? 0
+        cacheTable.tableColumns.first?.maxWidth = .greatestFiniteMagnitude
+        cacheTable.tableColumns.first?.width = max(cacheTable.enclosingScrollView?.contentSize.width ?? 0, longest + 12)
+        cacheTable.reloadData()
+        if !cachedEntries.isEmpty {
+            let row = followsTail ? cachedEntries.count - 1 : min(max(0, selected), cachedEntries.count - 1)
+            cacheTable.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+            if followsTail { cacheTable.scrollRowToVisible(row) }
+            updateCacheDetail()
+        }
+    }
+    private func updateCacheDetail() {
+        guard cachedEntries.indices.contains(cacheTable.selectedRow),
+              let entry = CommandCache.shared.value(for: cachedEntries[cacheTable.selectedRow].key) else { return }
+        cacheDetail.string = entry.details
+        cacheDetail.setWordWrap(!cacheDetail.enclosingScrollView!.hasHorizontalScroller)
+    }
+    @objc private func clearCache() { CommandCache.shared.clear(); refreshCache() }
+
     @objc private func clearLog() { CommandLog.shared.clear(); refresh() }
     @objc private func copyCommand() {
         guard entries.indices.contains(table.selectedRow) else { return }
@@ -184,6 +256,7 @@ final class CommandLogWindowController: NSWindowController, NSWindowDelegate, NS
     @objc private func top(_ sender: NSButton) { window?.level = sender.state == .on ? .floating : .normal }
     @objc private func wrap(_ sender: NSButton) {
         detail.setWordWrap(sender.state == .on)
+        cacheDetail.setWordWrap(sender.state == .on)
     }
     @objc private func capture(_ sender: NSButton) {
         CommandLog.shared.capturesCallStacks = sender.state == .on

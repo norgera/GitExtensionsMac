@@ -154,8 +154,8 @@ final class CheckoutBranchWorkflowCoordinator {
         }
     }
 
-    func checkoutRevision(_ commit: Commit, onFinished: ((Bool) -> Void)? = nil) {
-        guard !context.repository.isBare, !commit.isArtificial, let owner else { onFinished?(false); return }
+    func checkoutRevision(_ commit: Commit?, onFinished: ((Bool) -> Void)? = nil) {
+        guard !context.repository.isBare, commit?.isArtificial != true, let owner else { onFinished?(false); return }
         let startingContext = context
         let previousSelection = startingContext.headID.map(RevisionID.object)
         replaceTask { [weak self, weak owner] in
@@ -171,7 +171,7 @@ final class CheckoutBranchWorkflowCoordinator {
                 owner: owner
             ) else { onStatus("Checkout cancelled"); return }
             do {
-                onStatus("Checking out \(commit.shortID)…")
+                onStatus("Checking out \(commit?.shortID ?? "revision")…")
                 scriptHooks?.begin()
                 defer { scriptHooks?.end() }
                 let hooks = scriptHooks

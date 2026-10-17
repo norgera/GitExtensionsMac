@@ -24,6 +24,16 @@ final class BlameViewController: NSViewController, NSTableViewDataSource, NSTabl
     private let scroll = NSScrollView()
     private let authorTable = BlameTableView()
     private let authorScroll = NSScrollView()
+    private let viewerToolbar = DiffViewerToolbar(preferences: AppSettingsStore.shared.preferencesForNewFileViewer())
+    private var viewerPreferences = AppSettingsStore.shared.preferencesForNewFileViewer()
+    private var initialAuthorWidth: NSLayoutConstraint?
+    private var hasSizedAuthorPane = false
+    var defaultAuthorDistance: CGFloat = 186
+    var restoredAuthorDistance: ((CGFloat) -> CGFloat?)?
+    var authorSplitter: (distance: CGFloat, size: CGFloat)? {
+        guard hasSizedAuthorPane, let panes = authorScroll.superview as? NSSplitView, panes.bounds.width > 0 else { return nil }
+        return (authorScroll.frame.width, panes.bounds.width)
+    }
     private var synchronizing = false
     private var scrollObservers: [NSObjectProtocol] = []
     private let messageLabel = NSTextField(wrappingLabelWithString: "")
@@ -45,7 +55,13 @@ final class BlameViewController: NSViewController, NSTableViewDataSource, NSTabl
     private var hostedRemotes: [HostedRemote] = []
     private var preferencesObserver: NSObjectProtocol?
     private var generation = 0
-    private var searchQuery = ""
+    let searchState = FileViewerSearchState()
+    private var searchOffsets: [Int] = []
+    let previewPresentation = FilePreviewPresentation<BlameResult>()
+    private lazy var findPanel = FileViewerFindPanel(state: searchState, caret: { [weak self] in
+        guard let self else { return 0 }
+        return searchState.currentMatch.map(NSMaxRange) ?? (searchOffsets.indices.contains(table.selectedRow) ? searchOffsets[table.selectedRow] : 0)
+    }, changed: { [weak self] in self?.applySearch() })
     private var occurrences = FileViewerOccurrences()
     private var syntaxEnabled = AppSettingsStore.shared.preferencesForNewFileViewer().showsSyntaxHighlighting
     var onSelectedCommit: ((BlameCommit) -> Void)?
@@ -96,7 +112,7 @@ final class BlameViewController: NSViewController, NSTableViewDataSource, NSTabl
         authorTable.dataSource = self
         authorTable.allowsMultipleSelection = true
         authorTable.delegate = self
-        authorTable.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
+        authorTable.columnAutoresizingStyle = .noColumnAutoresizing
         authorTable.target = self
         authorTable.doubleAction = #selector(doubleClicked)
         authorTable.onHover = table.onHover
@@ -124,10 +140,13 @@ final class BlameViewController: NSViewController, NSTableViewDataSource, NSTabl
         panes.translatesAutoresizingMaskIntoConstraints = false
         panes.addArrangedSubview(authorScroll)
         panes.addArrangedSubview(scroll)
-        authorScroll.widthAnchor.constraint(greaterThanOrEqualToConstant: 75).isActive = true
-        let initialWidth = authorScroll.widthAnchor.constraint(equalToConstant: 220)
+        authorScroll.widthAnchor.constraint(greaterThanOrEqualToConstant: Self.authorPanelMinSize).isActive = true
+        scroll.widthAnchor.constraint(greaterThanOrEqualToConstant: Self.authorPanelMinSize).isActive = true
+        SplitterManager.applyFixedPanel(.proportional, to: panes)
+        let initialWidth = authorScroll.widthAnchor.constraint(equalToConstant: defaultAuthorDistance)
         initialWidth.priority = .defaultLow
         initialWidth.isActive = true
+        initialAuthorWidth = initialWidth
         root.addSubview(panes)
         for (from, to) in [(scroll, authorScroll), (authorScroll, scroll)] {
             from.contentView.postsBoundsChangedNotifications = true
@@ -152,6 +171,11 @@ final class BlameViewController: NSViewController, NSTableViewDataSource, NSTabl
             messageLabel.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 8),
             messageLabel.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -8)
         ])
+        previewPresentation.install(in: root)
+        viewerToolbar.configure(for: .text)
+        viewerToolbar.install(in: root)
+        viewerToolbar.isHidden = false
+        viewerToolbar.onAction = { [weak self] action, state in self?.performViewerAction(action, state: state) }
         view = root
         preferencesObserver = NotificationCenter.default.addObserver(forName: .blamePreferencesDidChange, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.preferencesChanged() }
@@ -160,10 +184,50 @@ final class BlameViewController: NSViewController, NSTableViewDataSource, NSTabl
     }
 
     @objc private func viewerSettingsChanged() {
+        viewerPreferences = AppSettingsStore.shared.preferencesForNewFileViewer()
+        viewerToolbar.apply(preferences: viewerPreferences, resolvedEncoding: blame?.contentEncoding)
         syntaxEnabled = AppSettingsStore.shared.preferencesForNewFileViewer().showsSyntaxHighlighting
         table.rowHeight = AppSettingsStore.shared.diffLineHeight
         authorTable.rowHeight = table.rowHeight
         preferencesChanged()
+    }
+
+    override func viewDidLayout() {
+        super.viewDidLayout()
+        sizeAuthorPaneIfNeeded()
+    }
+
+    private func sizeAuthorPaneIfNeeded() {
+        guard !hasSizedAuthorPane, blame != nil, let panes = authorScroll.superview as? NSSplitView, panes.bounds.width > 100 else { return }
+        hasSizedAuthorPane = true
+        initialAuthorWidth?.isActive = false
+        let distance = Self.authorDistance(restored: restoredAuthorDistance?(panes.bounds.width), default: defaultAuthorDistance,
+                                           size: panes.bounds.width, divider: panes.dividerThickness)
+        panes.setPosition(distance, ofDividerAt: 0)
+    }
+
+    static let authorPanelMinSize: CGFloat = 25
+
+    static func authorDistance(restored: CGFloat?, default fallback: CGFloat, size: CGFloat, divider: CGFloat) -> CGFloat {
+        let valid: (CGFloat) -> Bool = { $0 > authorPanelMinSize && $0 < size - authorPanelMinSize - divider }
+        if let restored, valid(restored) { return restored }
+        return valid(fallback) ? fallback : authorPanelMinSize + 1
+    }
+
+    private func performViewerAction(_ action: String, state: NSControl.StateValue) {
+        if action == "Show nonprinting characters" {
+            viewerPreferences.showsNonPrintingCharacters = state == .on
+            var preferences = AppSettingsStore.shared.fileViewerPreferences
+            preferences.showsNonPrintingCharacters = state == .on
+            AppSettingsStore.shared.updateFileViewerPreferences(preferences)
+            reloadLines()
+        } else if action == "Settings" {
+            BrowserCommandCenter.perform(.settings)
+        } else if action.hasPrefix("Encoding:"), let selected = RepositoryTextEncoding(rawValue: String(action.dropFirst("Encoding:".count))) {
+            viewerPreferences.textEncoding = selected
+            viewerToolbar.apply(preferences: viewerPreferences, resolvedEncoding: blame?.contentEncoding)
+            if let blameID, let fileName { load(revision: blameID, file: fileName, encoding: selected, force: true) }
+        }
     }
 
 
@@ -199,8 +263,12 @@ final class BlameViewController: NSViewController, NSTableViewDataSource, NSTabl
 
     private func reloadLines() {
         synchronizing = true
+        let selection = table.selectedRowIndexes
         table.reloadData()
         authorTable.reloadData()
+        let restored = selection.intersection(IndexSet(integersIn: 0..<table.numberOfRows))
+        table.selectRowIndexes(restored, byExtendingSelection: false)
+        authorTable.selectRowIndexes(restored, byExtendingSelection: false)
         synchronizing = false
     }
 
@@ -209,6 +277,7 @@ final class BlameViewController: NSViewController, NSTableViewDataSource, NSTabl
     var currentFileLine: Int { table.selectedRow >= 0 ? table.selectedRow + 1 : 1 }
 
     func cancel() {
+        previewPresentation.cancel()
         generation += 1
         loadTask?.cancel()
         isLoading = false
@@ -226,6 +295,8 @@ final class BlameViewController: NSViewController, NSTableViewDataSource, NSTabl
         self.encoding = encoding
         isLoading = true
         blame = nil
+        searchState.setText("")
+        searchOffsets = []
         blameID = nil
         gutterTexts = []
         ageBuckets = []
@@ -274,14 +345,38 @@ final class BlameViewController: NSViewController, NSTableViewDataSource, NSTabl
                      histogramDiffAlgorithm: AppSettingsStore.shared.fileViewerPreferences.usesHistogram)
     }
 
-    private func process(_ result: BlameResult, revision: ObjectID, file: String, line: Int) {
+    func process(_ result: BlameResult, revision: ObjectID, file: String, line: Int, confirmed: Bool = false) {
+        _ = view
+        let length = result.lines.reduce(0) { $0 + $1.text.utf16.count + 1 }
+        if !confirmed, length > FilePreview<BlameResult>.threshold {
+            blame = nil
+            searchState.setText("")
+            reloadLines()
+            previewPresentation.present(.deferred(length: length, load: { result }), display: { [weak self] in self?.process($0, revision: revision, file: file, line: line, confirmed: true) }, failure: { [weak self] in self?.messageLabel.stringValue = $0.localizedDescription })
+            return
+        }
+        previewPresentation.cancel()
         blame = result
+        viewerPreferences.textEncoding = encoding ?? viewerPreferences.textEncoding
+        viewerToolbar.apply(preferences: viewerPreferences, resolvedEncoding: result.contentEncoding)
+        var offset = 0
+        searchOffsets = result.lines.map { value in defer { offset += value.text.utf16.count + 1 }; return offset }
+        searchState.setText(result.lines.map(\.text).joined(separator: "\n") + (result.lines.isEmpty ? "" : "\n"))
         syntaxStates = DiffSyntaxHighlighter.lineStates(result.lines.enumerated().map {
             DiffLine(id: String($0.offset), oldLineNumber: nil, newLineNumber: $0.offset + 1, kind: .context, text: $0.element.text)
         }, filePath: file)
         gutterTexts = Self.gutter(result, fileName: file, preferences: preferences)
         ageBuckets = Self.ageBuckets(result.lines.map(\.commit.authorTime), now: Date())
         let font = AppSettingsStore.shared.codeFont
+        let authorWidth = max(186, ceil(gutterTexts.map { ($0 as NSString).size(withAttributes: [.font: font]).width }.max() ?? 0) + 16)
+        authorTable.tableColumn(withIdentifier: .init("author"))?.width = authorWidth
+        let documentWidth = authorTable.tableColumns.reduce(0) { $0 + $1.width }
+        authorTable.setFrameSize(NSSize(width: documentWidth, height: authorTable.frame.height))
+        if !hasSizedAuthorPane {
+            view.needsLayout = true
+            view.layoutSubtreeIfNeeded()
+            sizeAuthorPaneIfNeeded()
+        }
 
         table.tableColumn(withIdentifier: .init("content"))?.width = max(800, result.lines.map {
             ($0.text as NSString).size(withAttributes: [.font: font]).width + 16
@@ -347,7 +442,10 @@ final class BlameViewController: NSViewController, NSTableViewDataSource, NSTabl
 
 
 
-    func numberOfRows(in tableView: NSTableView) -> Int { blame?.lines.count ?? 0 }
+    func numberOfRows(in tableView: NSTableView) -> Int {
+        guard let blame, !blame.lines.isEmpty else { return 0 }
+        return blame.lines.count + 1
+    }
 
     private static let tooltipFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -357,7 +455,15 @@ final class BlameViewController: NSViewController, NSTableViewDataSource, NSTabl
     }()
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        guard let blame, blame.lines.indices.contains(row), let id = tableColumn?.identifier.rawValue else { return nil }
+        guard let blame, let id = tableColumn?.identifier.rawValue else { return nil }
+        if row == blame.lines.count, !blame.lines.isEmpty {
+            let field = NSTextField(labelWithString: id == "line" ? String(row + 1) : "")
+            field.font = AppSettingsStore.shared.codeFont
+            field.textColor = .secondaryLabelColor
+            field.alignment = id == "line" ? .right : .left
+            return field
+        }
+        guard blame.lines.indices.contains(row) else { return nil }
         let line = blame.lines[row]
         let font = AppSettingsStore.shared.codeFont
         switch id {
@@ -387,13 +493,24 @@ final class BlameViewController: NSViewController, NSTableViewDataSource, NSTabl
             let field = NSTextField(labelWithString: "")
             field.isSelectable = true
             let diffLine = DiffLine(id: String(row), oldLineNumber: nil, newLineNumber: row + 1, kind: .context, text: line.text)
-            let text = DiffSyntaxHighlighter.attributedText(for: diffLine, displayText: line.text,
+            let displayed = viewerPreferences.showsNonPrintingCharacters
+                ? FileViewerWhitespace.patchLine(line.text, glyph: AppSettingsStore.shared.fontPreferences.showEolMarkerAsGlyph) : line.text
+            let text = DiffSyntaxHighlighter.attributedText(for: diffLine, displayText: displayed,
                                                             enabled: syntaxEnabled,
                                                             filePath: fileName ?? "",
                                                             openSpan: syntaxStates.indices.contains(row) ? syntaxStates[row] : nil)
             let attributed = NSMutableAttributedString(attributedString: text)
             FileViewerOccurrences.highlight(occurrences.term, in: attributed)
             attributed.addAttribute(.font, value: font, range: NSRange(location: 0, length: attributed.length))
+            let lineRange = NSRange(location: searchOffsets[row], length: line.text.utf16.count)
+            for match in searchState.highlightedRanges {
+                let range = NSIntersectionRange(match, lineRange)
+                if range.length > 0 { attributed.addAttribute(.backgroundColor, value: NSColor.systemYellow.withAlphaComponent(0.5), range: NSRange(location: range.location - lineRange.location, length: range.length)) }
+            }
+            if let match = searchState.currentMatch {
+                let range = NSIntersectionRange(match, lineRange)
+                if range.length > 0 { attributed.addAttribute(.backgroundColor, value: NSColor.systemOrange.withAlphaComponent(0.6), range: NSRange(location: range.location - lineRange.location, length: range.length)) }
+            }
             field.attributedStringValue = attributed
             field.lineBreakMode = .byClipping
             return field
@@ -502,22 +619,17 @@ final class BlameViewController: NSViewController, NSTableViewDataSource, NSTabl
         copy(table.selectedRowIndexes.compactMap { blame.lines[safe: $0]?.text }.joined(separator: "\n"))
     }
 
-    @objc private func findText() {
-        if let row = FileViewerNavigationDialogs.find(lines: fileLines, after: table.selectedRow, query: &searchQuery) {
-            highlightOccurrences(row: row); goToLine(row + 1)
-        }
-    }
+    @objc private func findText() { if blame != nil { findPanel.present(owner: view.window) } }
 
     func findNext(forward: Bool, query: String? = nil) {
-        if let query { searchQuery = query }
-        if let row = FileViewerNavigationDialogs.matchingRow(lines: fileLines, query: searchQuery, after: table.selectedRow, forward: forward) {
-            highlightOccurrences(row: row); goToLine(row + 1)
-        }
+        if let query { searchState.query = query }
+        let caret = searchState.currentMatch.map(NSMaxRange) ?? (searchOffsets.indices.contains(table.selectedRow) ? searchOffsets[table.selectedRow] : 0)
+        _ = searchState.find(forward ? .next : .previous, caret: caret, viaKeyboard: true)
+        applySearch()
     }
 
-    private func highlightOccurrences(row: Int) {
-        occurrences.term = searchQuery; occurrences.row = row
-        occurrences.column = FileViewerOccurrences.ranges(of: searchQuery, in: fileLines[row].text).first?.location ?? -1
+    private func applySearch() {
+        if let match = searchState.currentMatch, let row = searchOffsets.lastIndex(where: { $0 <= match.location }) { goToLine(row + 1) }
         reloadLines()
     }
 
@@ -536,6 +648,7 @@ final class BlameViewController: NSViewController, NSTableViewDataSource, NSTabl
             item.target = self
             item.isEnabled = enabled && action != nil
             item.identifier = .init("blame.\(id)")
+            if let image = ["revision": "Blame", "previous": "RecentRepositories", "showChanges": "Information", "copyHash": "CommitId", "copyMessage": "Message", "copyAll": "CommitSummary"][id] { AppKitFactory.setMenuImage(image, for: item) }
             return item
         }
         let gridRevision = context?.revisionInGrid(commit.objectID)
@@ -548,6 +661,7 @@ final class BlameViewController: NSViewController, NSTableViewDataSource, NSTabl
         menu.addItem(.separator())
         let copy = NSMenuItem(title: "Copy to clipboard", action: nil, keyEquivalent: "")
         copy.identifier = .init("blame.copy")
+        AppKitFactory.setMenuImage("CopyToClipboard", for: copy)
         let copyMenu = NSMenu()
         copyMenu.autoenablesItems = false
         copyMenu.addItem(item("Commit hash", #selector(copyHash), id: "copyHash"))
@@ -555,13 +669,15 @@ final class BlameViewController: NSViewController, NSTableViewDataSource, NSTabl
         copyMenu.addItem(item("All commit info", #selector(copyAll), id: "copyAll"))
         copy.submenu = copyMenu
         menu.addItem(copy)
-        menu.addItem(.separator())
-        menu.addItem(item("Copy selection", #selector(copySelectedLines), id: "copySelection", enabled: table.selectedRow >= 0))
-        menu.addItem(item("Find…", #selector(findText), id: "find"))
-        menu.addItem(item("Go to line…", #selector(goToFileLine), id: "goToLine"))
-        let syntax = item("Show syntax highlighting", #selector(toggleSyntax), id: "syntax")
-        syntax.state = syntaxEnabled ? .on : .off
-        menu.addItem(syntax)
+        if menu !== authorTable.menu {
+            menu.addItem(.separator())
+            menu.addItem(item("Copy selection", #selector(copySelectedLines), id: "copySelection", enabled: table.selectedRow >= 0))
+            menu.addItem(item("Find…", #selector(findText), id: "find"))
+            menu.addItem(item("Go to line…", #selector(goToFileLine), id: "goToLine"))
+            let syntax = item("Show syntax highlighting", #selector(toggleSyntax), id: "syntax")
+            syntax.state = syntaxEnabled ? .on : .off
+            menu.addItem(syntax)
+        }
 
         if !hostedRemotes.isEmpty {
             let view = NSMenuItem(title: "View in GitHub", action: nil, keyEquivalent: "")
@@ -578,13 +694,14 @@ final class BlameViewController: NSViewController, NSTableViewDataSource, NSTabl
         }
     }
 
-    func contextMenu(forRow row: Int) -> NSMenu {
-        let menu = NSMenu()
+    func contextMenu(forRow row: Int, authorPane: Bool = false) -> NSMenu {
+        let owner = authorPane ? authorTable : table
+        let menu = authorPane ? authorTable.menu! : NSMenu()
         menu.autoenablesItems = false
-        let saved = table.clickedRowOverride
-        table.clickedRowOverride = row
+        let saved = owner.clickedRowOverride
+        owner.clickedRowOverride = row
         menuNeedsUpdate(menu)
-        table.clickedRowOverride = saved
+        owner.clickedRowOverride = saved
         return menu
     }
 

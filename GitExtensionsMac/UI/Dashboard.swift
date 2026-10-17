@@ -638,7 +638,9 @@ final class UserRepositoriesListViewController: NSViewController, NSCollectionVi
             item.target = self
             return item
         }
-        repositoryMenu.addItem(item("Show in Finder", #selector(showInFinder)))
+        let show = item("Show in Finder", #selector(showInFinder))
+        AppKitFactory.setMenuImage("BrowseFileExplorer", for: show)
+        repositoryMenu.addItem(show)
         repositoryMenu.addItem(.separator())
         let categories = NSMenuItem(title: "Categories", action: nil, keyEquivalent: "")
         categories.submenu = categoriesMenu(for: tile)
@@ -731,15 +733,16 @@ final class UserRepositoriesListViewController: NSViewController, NSCollectionVi
         guard section < groups.count else { return }
         let group = groups[section]
         let menu = NSMenu()
-        func add(_ title: String, _ handler: @escaping () -> Void) {
+        func add(_ title: String, image: String, _ handler: @escaping () -> Void) {
             let item = DashboardClosureMenuItem(title: title, handler: handler)
+            AppKitFactory.setMenuImage(image, for: item)
             menu.addItem(item)
         }
         if group.isRecent {
-            add("Clear all recent repositories") { [weak self] in self?.clearRecent() }
+            add("Clear all recent repositories", image: "CleanupRepo") { [weak self] in self?.clearRecent() }
         } else {
-            add("Rename category") { [weak self] in self?.renameCategory(group.title) }
-            add("Delete category") { [weak self] in self?.deleteCategory(group.title, count: group.tiles.count) }
+            add("Rename category", image: "FileStatusModified") { [weak self] in self?.renameCategory(group.title) }
+            add("Delete category", image: "StarRemove") { [weak self] in self?.deleteCategory(group.title, count: group.tiles.count) }
         }
         menu.popUp(positioning: nil, at: NSPoint(x: view.bounds.maxX - 60, y: view.bounds.maxY), in: view)
     }
@@ -975,6 +978,7 @@ final class DashboardCategoryTitleDialog: NSViewController, NSTextFieldDelegate 
         let panel = NSPanel(contentViewController: controller)
         panel.title = originalName == nil ? "Enter Caption" : "Rename category"
         panel.styleMask = [.titled]
+        panel.setContentSize(NSSize(width: 410, height: 90))
         owner.beginSheet(panel)
     }
 
@@ -996,14 +1000,22 @@ final class DashboardCategoryTitleDialog: NSViewController, NSTextFieldDelegate 
         okButton.isEnabled = field.stringValue != (originalName ?? "") || originalName == nil
         let cancel = NSButton(title: "Cancel", target: self, action: #selector(cancel))
         cancel.keyEquivalent = "\u{1b}"
-        let buttons = NSStackView(views: [cancel, okButton])
-        let stack = NSStackView(views: [label, field, buttons])
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.edgeInsets = NSEdgeInsets(top: 16, left: 16, bottom: 16, right: 16)
-        field.widthAnchor.constraint(equalToConstant: 280).isActive = true
-        buttons.trailingAnchor.constraint(equalTo: field.trailingAnchor).isActive = true
-        view = stack
+        let root = NSView(frame: NSRect(x: 0, y: 0, width: 410, height: 90))
+        let row = NSStackView(views: [label, field]); row.spacing = 6; row.alignment = .centerY
+        let spacer = NSView(); spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let buttons = NSStackView(views: [spacer, cancel, okButton]); buttons.spacing = 6
+        for control in [row, buttons] { control.translatesAutoresizingMaskIntoConstraints = false; root.addSubview(control) }
+        field.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        NSLayoutConstraint.activate([
+            row.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 8),
+            row.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -8),
+            row.topAnchor.constraint(equalTo: root.topAnchor, constant: 8),
+            buttons.leadingAnchor.constraint(equalTo: row.leadingAnchor),
+            buttons.trailingAnchor.constraint(equalTo: row.trailingAnchor),
+            buttons.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -8),
+            buttons.topAnchor.constraint(greaterThanOrEqualTo: row.bottomAnchor, constant: 8)
+        ])
+        view = root
     }
 
     override func viewDidAppear() {

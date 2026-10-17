@@ -86,13 +86,23 @@ class RetainingSplitViewController: NSViewController, NSSplitViewDelegate {
             }
             collapsedItems.insert(identifier)
             item.viewController.view.isHidden = true
+            item.viewController.view.removeFromSuperview()
         } else {
             collapsedItems.remove(identifier)
-            item.viewController.view.isHidden = false
+            let itemView = item.viewController.view
+            itemView.isHidden = false
+            let following = splitViewItems[(index + 1)...].first { !isCollapsed($0) }?.viewController.view
+            if let following, following.superview === splitView {
+                splitView.addSubview(itemView, positioned: .below, relativeTo: following)
+            } else {
+                splitView.addSubview(itemView)
+            }
         }
 
+        applyHoldingPriorities()
         splitView.adjustSubviews()
         if !collapsed {
+            applyRetainedPosition()
             restoreRetainedPosition()
         }
     }
@@ -164,6 +174,11 @@ class RetainingSplitViewController: NSViewController, NSSplitViewDelegate {
         }
     }
 
+    func splitView(_ splitView: NSSplitView, shouldHideDividerAt dividerIndex: Int) -> Bool {
+        guard dividerIndex + 1 < splitViewItems.count else { return false }
+        return isCollapsed(splitViewItems[dividerIndex]) || isCollapsed(splitViewItems[dividerIndex + 1])
+    }
+
     func splitView(
         _ splitView: NSSplitView,
         constrainMinCoordinate proposedMinimumPosition: CGFloat,
@@ -185,7 +200,8 @@ class RetainingSplitViewController: NSViewController, NSSplitViewDelegate {
     }
 
     private func applyHoldingPriorities() {
-        for (index, item) in splitViewItems.enumerated() {
+        for item in splitViewItems {
+            guard let index = splitView.arrangedSubviews.firstIndex(of: item.viewController.view) else { continue }
             splitView.setHoldingPriority(item.holdingPriority, forSubviewAt: index)
         }
     }

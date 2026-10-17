@@ -1,4 +1,5 @@
 import Foundation
+import CoreFoundation
 
 enum CommandLogContext {
     static let entryID = TaskLocal<UUID?>(wrappedValue: nil)
@@ -6,6 +7,7 @@ enum CommandLogContext {
 
 package enum ProcessOutputHistory {
     package static let recording = TaskLocal<Bool>(wrappedValue: false)
+    package static let presentsCommands = TaskLocal<Bool>(wrappedValue: false)
     package static var recordsOutput: Bool { recording.wrappedValue }
 }
 
@@ -41,16 +43,19 @@ package struct CommandLogEntry: Sendable, Identifiable, Equatable {
 
     package var displayCommand: String {
         if !isGit { return commandLine }
-        var skip = false
-        let visible = arguments.filter { value in
-            if skip { skip = false; return false }
-            if value == "-c" { skip = true; return false }
-            return value != "--no-optional-locks"
-        }
-        return Self.quoted(["git"] + visible)
+        return Self.quoted(["git"] + Self.argumentsWithoutConfiguration(arguments))
     }
 
-    private static func quoted(_ arguments: [String]) -> String {
+    static func argumentsWithoutConfiguration(_ arguments: [String]) -> [String] {
+        var skip = false
+        return arguments.filter {
+            if skip { skip = false; return false }
+            if $0 == "-c" { skip = true; return false }
+            return $0 != "--no-optional-locks"
+        }
+    }
+
+    static func quoted(_ arguments: [String]) -> String {
         arguments.map { value in
             value.isEmpty || value.contains(where: { $0.isWhitespace || "'\"\\;$`".contains($0) })
                 ? "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'" : value
@@ -233,5 +238,84 @@ package final class CommandLog: @unchecked Sendable {
             text = text.replacingOccurrences(of: pattern, with: replacement, options: .regularExpression)
         }
         return text
+    }
+}
+
+package struct CommandCacheEntry: Sendable, Equatable {
+    package let key: String
+    package let arguments: [String]
+    package let directory: String
+    package let output: Data
+    package let error: Data
+    package var outputEncoding: String.Encoding? = .utf8
+
+    package var displayString: String {
+        let visible = CommandLogEntry.argumentsWithoutConfiguration(arguments)
+        let prefix = CommandLogEntry.quoted(arguments)
+        let suffix = key.hasPrefix(prefix) ? String(key.dropFirst(prefix.count)) : ""
+        return CommandLogEntry.quoted(visible) + suffix
+    }
+
+    package var details: String {
+        let text = outputEncoding.flatMap { String(data: output, encoding: $0) }
+            ?? (outputEncoding == nil ? FileContentDecoder.decodedText(output, requestedEncoding: .automatic)?.text : nil)
+            ?? String(decoding: output, as: UTF8.self)
+        return key + "\n-------------------------------------\n\n" + Self.printable(text)
+            + "\n-------------------------------------\n\n" + Self.printable(String(decoding: error, as: UTF8.self))
+    }
+
+    package static func printable(_ value: String) -> String {
+        value.replacingOccurrences(of: "\0", with: "\\0").replacingOccurrences(of: "\r", with: "\\r")
+            .replacingOccurrences(of: "\n", with: "\\n\n").replacingOccurrences(of: "\t", with: "»")
+            .replacingOccurrences(of: " ", with: "·").replacingOccurrences(of: "\u{1b}", with: "\\x1b")
+    }
+}
+
+package final class CommandCache: @unchecked Sendable {
+    package static let shared = CommandCache()
+    package let capacity: Int
+    private let lock = NSLock()
+    private var entries: [CommandCacheEntry] = []
+    private var recency: [String] = []
+
+    package init(capacity: Int = 50) { precondition(capacity > 0); self.capacity = capacity }
+    package func snapshot() -> [CommandCacheEntry] { lock.lock(); defer { lock.unlock() }; return entries }
+    package func value(for key: String?) -> CommandCacheEntry? {
+        guard let key, !key.isEmpty else { return nil }
+        lock.lock(); defer { lock.unlock() }
+        guard let entry = entries.first(where: { $0.key == key }) else { return nil }
+        recency.removeAll { $0 == key }; recency.insert(key, at: 0)
+        return entry
+    }
+    package func add(_ entry: CommandCacheEntry?) {
+        guard let entry, !entry.key.isEmpty else { return }
+        lock.lock(); defer { lock.unlock() }
+        if let index = entries.firstIndex(where: { $0.key == entry.key }) { entries[index] = entry }
+        else if entries.count == capacity, let evicted = recency.last, let index = entries.firstIndex(where: { $0.key == evicted }) {
+            entries[index] = entry
+            recency.removeLast()
+        } else { entries.append(entry) }
+        recency.removeAll { $0 == entry.key }; recency.insert(entry.key, at: 0)
+    }
+    package func clear() { lock.lock(); entries.removeAll(); recency.removeAll(); lock.unlock() }
+}
+
+package extension GitCommandRunning {
+    func runCached(_ command: GitCommand, in directory: URL, cache: CommandCache = .shared, outputEncoding: String.Encoding? = .utf8) async throws -> GitCommandResult {
+        guard !command.arguments.isEmpty, !command.accessesRemote, !command.changesRepositoryState else { return try await run(command, in: directory) }
+        let arguments = command.processArguments
+        let encodingName = outputEncoding.map {
+            (CFStringConvertEncodingToIANACharSetName(CFStringConvertNSStringEncodingToEncoding($0.rawValue)) as String?)?.lowercased() ?? String($0.rawValue)
+        } ?? "automatic"
+        let key = CommandLogEntry.quoted(arguments) + " #" + directory.standardizedFileURL.path + "::plain::" + encodingName + "::" + (command.decodesLogOutput ? "log-output" : "")
+        if let entry = cache.value(for: key) {
+            return GitCommandResult(arguments: command.arguments, standardOutput: entry.output, standardError: entry.error, exitStatus: 0)
+        }
+        try Task.checkCancellation()
+        let result = try await run(command, in: directory)
+        if result.succeeded {
+            cache.add(CommandCacheEntry(key: key, arguments: arguments, directory: directory.path, output: result.standardOutput, error: result.standardError, outputEncoding: outputEncoding))
+        }
+        return result
     }
 }

@@ -49,6 +49,12 @@ final class RecentRepositoriesSettingsDialog: NSViewController, NSTableViewDataS
 
     required init?(coder: NSCoder) { nil }
 
+    override func viewDidAppear() {
+        super.viewDidAppear()
+        view.window?.makeFirstResponder(historySize)
+        historySize.selectText(nil)
+    }
+
     override func loadView() {
         func number(_ field: NSTextField, _ stepper: NSStepper, value: Int, range: ClosedRange<Int>) -> NSView {
             field.integerValue = min(max(value, range.lowerBound), range.upperBound)
@@ -324,8 +330,9 @@ final class OpenLocalRepositoryDialog: NSViewController, NSComboBoxDelegate {
         let panel = NSPanel(contentViewController: controller)
         panel.title = "Open local repository"
         panel.styleMask = [.titled, .resizable]
-        panel.contentMinSize = NSSize(width: 450, height: 90)
-        panel.contentMaxSize = NSSize(width: 800, height: 90)
+        panel.contentMinSize = NSSize(width: 560, height: 96)
+        panel.contentMaxSize = NSSize(width: 900, height: 96)
+        panel.setContentSize(NSSize(width: 600, height: 96))
         owner.beginSheet(panel)
     }
 
@@ -382,11 +389,16 @@ final class OpenLocalRepositoryDialog: NSViewController, NSComboBoxDelegate {
         goUp.action = #selector(goToParent)
         let browse = NSButton(title: "Browse...", target: self, action: #selector(browse))
         let openButton = NSButton(title: "Open", target: self, action: #selector(open))
+        openButton.image = AppKitFactory.resourceImage("RepoOpen", accessibilityDescription: "Open")
+        openButton.imagePosition = .imageLeading
+        browse.image = AppKitFactory.resourceImage("BrowseFileExplorer", accessibilityDescription: "Browse")
+        browse.imagePosition = .imageLeading
         openButton.keyEquivalent = "\r"
         let cancel = NSButton(title: "Cancel", target: self, action: #selector(cancel))
         cancel.keyEquivalent = "\u{1b}"
-        let row = NSStackView(views: [label, directory, goUp])
-        let buttons = NSStackView(views: [browse, NSView(), cancel, openButton])
+        let row = NSStackView(views: [label, directory, browse, goUp])
+        label.setContentCompressionResistancePriority(.required, for: .horizontal)
+        let buttons = NSStackView(views: [NSView(), cancel, openButton])
         let stack = NSStackView(views: [row, buttons])
         stack.orientation = .vertical
         stack.alignment = .width
@@ -487,11 +499,27 @@ final class DonateWindowController: NSWindowController {
             badge.action = #selector(openDonation)
             let stack = NSStackView(views: [text, badge])
             stack.orientation = .vertical
+            stack.alignment = .centerX
             stack.edgeInsets = NSEdgeInsets(top: 18, left: 18, bottom: 18, right: 18)
             stack.spacing = 16
-            let window = NSWindow(contentRect: .zero, styleMask: [.titled, .closable], backing: .buffered, defer: false)
+            text.widthAnchor.constraint(equalToConstant: 420).isActive = true
+            let window = NSWindow(contentRect: .zero, styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
             window.title = "Donate"
-            window.contentView = stack
+            let container = NSView()
+            stack.translatesAutoresizingMaskIntoConstraints = false
+            container.addSubview(stack)
+            NSLayoutConstraint.activate([
+                text.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 18),
+                text.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -18),
+                stack.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+                stack.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+                stack.topAnchor.constraint(equalTo: container.topAnchor),
+                stack.bottomAnchor.constraint(equalTo: container.bottomAnchor)
+            ])
+            window.contentView = container
+            container.layoutSubtreeIfNeeded()
+            window.setContentSize(container.fittingSize)
+            window.contentMinSize = container.fittingSize
             window.isReleasedWhenClosed = false
             controller.window = window
             window.center()
@@ -512,10 +540,10 @@ final class AboutWindowController: NSWindowController {
     private var timer: Timer?
     private var environment = NSTextField(wrappingLabelWithString: "")
 
-    static func show() {
+    static func show(owner: NSWindow? = nil) {
         if shared == nil { shared = AboutWindowController() }
-        shared?.showWindow(nil)
-        shared?.window?.makeKeyAndOrderFront(nil)
+        guard let window = shared?.window else { return }
+        OwnedModalWindow.run(window, owner: owner ?? OwnedModalWindow.defaultOwner)
     }
 
     convenience init() {
@@ -542,31 +570,58 @@ final class AboutWindowController: NSWindowController {
         let icons = linkButton("Some icons by Yusuke Kamiyamane (CCA3)", size: NSFont.systemFontSize) {
             NSWorkspace.shared.open(URL(string: "http://p.yusukekamiyamane.com/")!)
         }
-        let involved = NSTextField(labelWithString: "Git Extensions is open source. Get involved!")
+        let involved = NSTextField(wrappingLabelWithString: "Git Extensions is open source. Get involved!")
+        involved.alignment = .center
+        involved.preferredMaxLayoutWidth = 150
+        involved.widthAnchor.constraint(lessThanOrEqualToConstant: 150).isActive = true
         let donate = NSButton(image: AppKitFactory.resourceImage("DonateBadge", size: NSSize(width: 150, height: 31)) ?? NSImage(),
                               target: self, action: #selector(donate))
         donate.isBordered = false
         let warranty = NSTextField(wrappingLabelWithString: "This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY of FITNESS FOR A PARTICULAR PURPOSE.")
         warranty.preferredMaxLayoutWidth = 420
         warranty.textColor = .secondaryLabelColor
-        let details = NSStackView(views: [product, environmentRow, copyright, thanksTo, icons, involved, donate, warranty])
+        let details = NSStackView(views: [product, copyright, thanksTo, icons, environmentRow, warranty])
         details.orientation = .vertical
         details.alignment = .leading
         details.spacing = 8
+        details.setAccessibilityIdentifier("About.Information")
         thanksTo.widthAnchor.constraint(lessThanOrEqualToConstant: 420).isActive = true
         details.widthAnchor.constraint(equalToConstant: 420).isActive = true
-        let content = NSStackView(views: [logo, details])
+        let logoColumn = NSStackView(views: [logo, involved, donate])
+        logoColumn.orientation = .vertical
+        logoColumn.alignment = .centerX
+        logoColumn.spacing = 8
+        logoColumn.setAccessibilityIdentifier("About.LogoColumn")
+        let content = NSStackView(views: [logoColumn, details])
         content.alignment = .top
         content.spacing = 18
-        content.edgeInsets = NSEdgeInsets(top: 18, left: 18, bottom: 18, right: 18)
-        window.contentView = content
+        let container = NSView()
+        content.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(content)
+        NSLayoutConstraint.activate([
+            content.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 18),
+            content.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -18),
+            content.topAnchor.constraint(equalTo: container.topAnchor, constant: 18),
+            content.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -18)
+        ])
+        window.contentView = container
         environment.stringValue = UserEnvironmentInformation.information(gitVersion: nil)
-        Task { @MainActor [weak self] in self?.environment.stringValue = await UserEnvironmentInformation.information() }
+        window.setContentSize(container.fittingSize)
+        Task { @MainActor [weak self, weak content = container] in
+            self?.environment.stringValue = await UserEnvironmentInformation.information()
+            guard let window = self?.window, let content else { return }
+            let size = content.fittingSize
+            var frame = window.frameRect(forContentRect: NSRect(origin: .zero, size: size))
+            frame.origin = NSPoint(x: window.frame.minX, y: window.frame.maxY - frame.height)
+            window.setFrame(frame, display: true)
+        }
         thankNextContributor()
 
-        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in
+        let timer = Timer(timeInterval: 1, repeats: true) { _ in
             Task { @MainActor in AboutWindowController.shared?.thankNextContributor() }
         }
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
         window.center()
     }
 
@@ -589,7 +644,7 @@ final class AboutWindowController: NSWindowController {
 
     @objc private func copyEnvironment() { Task { await UserEnvironmentInformation.copyInformation() } }
     @objc private func donate() { NSWorkspace.shared.open(DashboardViewController.donationURL) }
-    @objc private func showContributors() { ContributorsWindowController.show() }
+    @objc private func showContributors() { ContributorsWindowController.show(owner: window) }
 }
 
 
@@ -597,7 +652,7 @@ final class AboutWindowController: NSWindowController {
 final class ContributorsWindowController: NSWindowController {
     private static var shared: ContributorsWindowController?
 
-    static func show() {
+    static func show(owner: NSWindow? = nil, modal: Bool = true) {
         if shared == nil {
             let tabs = NSTabView()
             let pages = [
@@ -621,7 +676,310 @@ final class ContributorsWindowController: NSWindowController {
             window.center()
             shared = ContributorsWindowController(window: window)
         }
-        shared?.showWindow(nil)
-        shared?.window?.makeKeyAndOrderFront(nil)
+        if shared?.window?.isVisible != true, let tabs = shared?.window?.contentView as? NSTabView, tabs.numberOfTabViewItems > 0 {
+            tabs.selectTabViewItem(at: 0)
+        }
+        guard let window = shared?.window else { return }
+        if modal {
+            OwnedModalWindow.run(window, owner: owner ?? OwnedModalWindow.defaultOwner)
+        } else {
+            OwnedModalWindow.center(window, over: owner)
+            window.makeKeyAndOrderFront(nil)
+        }
+    }
+
+    static var selectedTabForTesting: String? {
+        ((shared?.window?.contentView as? NSTabView)?.selectedTabViewItem?.identifier as? String)
+    }
+
+    static func closeForTesting() { shared?.window?.orderOut(nil) }
+
+    static func selectTabForTesting(_ index: Int) { (shared?.window?.contentView as? NSTabView)?.selectTabViewItem(at: index) }
+}
+
+@MainActor
+enum OwnedModalWindow {
+    static var defaultOwner: NSWindow? {
+        [NSApp.keyWindow, NSApp.mainWindow].compactMap { $0 }.first { $0.isVisible && !($0 is NSPanel) }
+            ?? NSApp.orderedWindows.first { $0.isVisible && !($0 is NSPanel) && $0.canBecomeMain }
+    }
+
+    static func center(_ window: NSWindow, over owner: NSWindow?, includingHiddenOwner: Bool = false) {
+        guard let owner, owner !== window, owner.isVisible || includingHiddenOwner else {
+            window.center()
+            return
+        }
+        window.layoutIfNeeded()
+        if let content = window.contentView, window.frame.width < 1 || window.frame.height < 1 {
+            window.setContentSize(content.fittingSize)
+        }
+        let size = window.frame.size
+        window.setFrameOrigin(NSPoint(x: (owner.frame.midX - size.width / 2).rounded(), y: (owner.frame.midY - size.height / 2).rounded()))
+    }
+
+    static func runAsync(_ window: NSWindow, owner: NSWindow?) async {
+        center(window, over: owner)
+        window.makeKeyAndOrderFront(nil)
+        while window.isVisible, !Task.isCancelled {
+            let session = NSApp.beginModalSession(for: window)
+            while window.isVisible, !Task.isCancelled, NSApp.runModalSession(session) == .continue {
+                do { try await Task.sleep(for: .milliseconds(20)) }
+                catch { break }
+            }
+            NSApp.endModalSession(session)
+            if window.isVisible, !Task.isCancelled { await Task.yield() }
+        }
+    }
+
+    static func run(_ window: NSWindow, owner: NSWindow?) {
+        guard !window.isVisible else {
+            window.makeKeyAndOrderFront(nil)
+            return
+        }
+        center(window, over: owner)
+        window.makeKeyAndOrderFront(nil)
+        let observer = NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: window, queue: .main) { _ in
+            MainActor.assumeIsolated { NSApp.stopModal() }
+        }
+        NSApp.runModal(for: window)
+        NotificationCenter.default.removeObserver(observer)
+    }
+}
+
+@MainActor
+struct AvailableEncodingsSelection {
+    private(set) var selected: [RepositoryTextEncoding]
+    private(set) var available: [RepositoryTextEncoding]
+
+    init(selected: [RepositoryTextEncoding], supported: [RepositoryTextEncoding] = RepositoryTextEncoding.allCases) {
+        var unique: [RepositoryTextEncoding] = []
+        for encoding in selected where encoding != .automatic && !unique.contains(encoding) { unique.append(encoding) }
+        self.selected = unique
+        var candidates: [RepositoryTextEncoding] = []
+        for encoding in supported where encoding != .automatic && !unique.contains(encoding) && !candidates.contains(encoding) { candidates.append(encoding) }
+        available = candidates.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+    }
+
+    mutating func include(_ index: Int) {
+        guard available.indices.contains(index) else { return }
+        selected.append(available.remove(at: index))
+    }
+
+    mutating func exclude(_ index: Int) {
+        guard selected.indices.contains(index), !AppSettingsStore.isProtectedTextEncoding(selected[index]) else { return }
+        available.append(selected.remove(at: index))
+        available.sort { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+    }
+}
+
+@MainActor
+final class AvailableEncodingsDialog: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
+    private(set) var selection: AvailableEncodingsSelection
+    let selectedList = NSTableView()
+    let availableList = NSTableView()
+    let excludeButton = NSButton(title: ">", target: nil, action: nil)
+    let includeButton = NSButton(title: "<", target: nil, action: nil)
+    private(set) var accepted = false
+
+    init(selected: [RepositoryTextEncoding]) {
+        selection = AvailableEncodingsSelection(selected: selected)
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    func present(owner: NSWindow) async -> [RepositoryTextEncoding]? {
+        let window = NSWindow(contentViewController: self)
+        window.isReleasedWhenClosed = false
+        window.title = "Configure available encodings"
+        window.styleMask = [.titled, .closable, .resizable]
+        window.setContentSize(NSSize(width: 605, height: 315))
+        window.contentMinSize = NSSize(width: 400, height: 200)
+        window.initialFirstResponder = selectedList
+        await OwnedModalWindow.runAsync(window, owner: owner)
+        return accepted ? selection.selected : nil
+    }
+
+    override func loadView() {
+        let root = NSView()
+        func list(_ table: NSTableView, _ identifier: String) -> NSScrollView {
+            let column = NSTableColumn(identifier: .init(identifier))
+            column.resizingMask = .autoresizingMask
+            table.addTableColumn(column)
+            table.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
+            table.headerView = nil
+            table.rowHeight = AppSettingsStore.shared.applicationRowHeight(minimum: 18)
+            table.allowsEmptySelection = true
+            table.allowsMultipleSelection = false
+            table.delegate = self
+            table.dataSource = self
+            table.setAccessibilityIdentifier(identifier)
+            let scroll = NSScrollView()
+            scroll.documentView = table
+            scroll.hasVerticalScroller = true
+            scroll.borderType = .bezelBorder
+            return scroll
+        }
+        let selectedScroll = list(selectedList, "Encodings.Selected")
+        let availableScroll = list(availableList, "Encodings.Available")
+        excludeButton.target = self
+        excludeButton.action = #selector(excludeSelected)
+        excludeButton.setAccessibilityIdentifier("Encodings.Exclude")
+        includeButton.target = self
+        includeButton.action = #selector(includeSelected)
+        includeButton.setAccessibilityIdentifier("Encodings.Include")
+        let ok = NSButton(title: "OK", target: self, action: #selector(accept))
+        ok.keyEquivalent = "\r"
+        let cancel = NSButton(title: "Cancel", target: self, action: #selector(cancelOperation(_:)))
+        cancel.keyEquivalent = "\u{1b}"
+        let buttons = NSStackView(views: [cancel, ok])
+        buttons.spacing = 8
+        let selectedCaption = NSTextField(labelWithString: "Selected:")
+        let availableCaption = NSTextField(labelWithString: "Available:")
+        for control in [selectedScroll, availableScroll, selectedCaption, availableCaption, excludeButton, includeButton, buttons] {
+            control.translatesAutoresizingMaskIntoConstraints = false
+            root.addSubview(control)
+        }
+        NSLayoutConstraint.activate([
+            selectedCaption.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 6),
+            selectedCaption.topAnchor.constraint(equalTo: root.topAnchor, constant: 3),
+            availableCaption.leadingAnchor.constraint(equalTo: availableScroll.leadingAnchor),
+            availableCaption.topAnchor.constraint(equalTo: selectedCaption.topAnchor),
+            selectedScroll.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 6),
+            selectedScroll.topAnchor.constraint(equalTo: selectedCaption.bottomAnchor, constant: 3),
+            selectedScroll.bottomAnchor.constraint(equalTo: buttons.topAnchor, constant: -6),
+            availableScroll.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -6),
+            availableScroll.topAnchor.constraint(equalTo: selectedScroll.topAnchor),
+            availableScroll.bottomAnchor.constraint(equalTo: selectedScroll.bottomAnchor),
+            selectedScroll.widthAnchor.constraint(equalTo: availableScroll.widthAnchor),
+            excludeButton.leadingAnchor.constraint(equalTo: selectedScroll.trailingAnchor, constant: 6),
+            excludeButton.trailingAnchor.constraint(equalTo: availableScroll.leadingAnchor, constant: -6),
+            excludeButton.widthAnchor.constraint(equalToConstant: 28),
+            excludeButton.centerYAnchor.constraint(equalTo: selectedScroll.centerYAnchor, constant: -15),
+            includeButton.leadingAnchor.constraint(equalTo: excludeButton.leadingAnchor),
+            includeButton.trailingAnchor.constraint(equalTo: excludeButton.trailingAnchor),
+            includeButton.topAnchor.constraint(equalTo: excludeButton.bottomAnchor, constant: 3),
+            buttons.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -6),
+            buttons.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -6)
+        ])
+        view = root
+        updateButtons()
+    }
+
+    func numberOfRows(in tableView: NSTableView) -> Int {
+        tableView === selectedList ? selection.selected.count : selection.available.count
+    }
+
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        let values = tableView === selectedList ? selection.selected : selection.available
+        let label = NSTextField(labelWithString: values[row].title)
+        label.lineBreakMode = .byTruncatingTail
+        return label
+    }
+
+    func tableViewSelectionDidChange(_ notification: Notification) { updateButtons() }
+
+    private func updateButtons() {
+        excludeButton.isEnabled = selection.selected.indices.contains(selectedList.selectedRow) && !AppSettingsStore.isProtectedTextEncoding(selection.selected[selectedList.selectedRow])
+        includeButton.isEnabled = selection.available.indices.contains(availableList.selectedRow)
+    }
+
+    @objc private func excludeSelected() {
+        selection.exclude(selectedList.selectedRow)
+        selectedList.deselectAll(nil)
+        selectedList.reloadData()
+        availableList.reloadData()
+        updateButtons()
+    }
+
+    @objc private func includeSelected() {
+        selection.include(availableList.selectedRow)
+        availableList.deselectAll(nil)
+        selectedList.reloadData()
+        availableList.reloadData()
+        updateButtons()
+    }
+
+    @objc private func accept() {
+        accepted = true
+        view.window?.close()
+    }
+
+    override func cancelOperation(_ sender: Any?) { view.window?.close() }
+}
+
+struct NativeShellDefinition: Equatable, Sendable {
+    let id: String
+    let name: String
+    let bundleIdentifier: String
+}
+
+@MainActor
+final class NativeShellProvider {
+    static let shared = NativeShellProvider()
+    static let definitions = [
+        NativeShellDefinition(id: "terminal", name: "Terminal", bundleIdentifier: "com.apple.Terminal"),
+        NativeShellDefinition(id: "iterm2", name: "iTerm2", bundleIdentifier: "com.googlecode.iterm2")
+    ]
+    private let resolve: (String) -> URL?
+    private let launch: (URL, URL) async throws -> Void
+    private var applications: [String: URL] = [:]
+    private var icons: [String: NSImage] = [:]
+
+    init(resolve: @escaping (String) -> URL? = { NSWorkspace.shared.urlForApplication(withBundleIdentifier: $0) },
+         launch: @escaping (URL, URL) async throws -> Void = { application, directory in
+             _ = try await NSWorkspace.shared.open([directory], withApplicationAt: application, configuration: NSWorkspace.OpenConfiguration())
+         }) {
+        self.resolve = resolve; self.launch = launch
+        refresh()
+    }
+    func refresh() {
+        applications = Dictionary(uniqueKeysWithValues: Self.definitions.compactMap { shell in resolve(shell.bundleIdentifier).map { (shell.id, $0) } })
+        icons.removeAll()
+    }
+    var available: [NativeShellDefinition] { Self.definitions.filter { applications[$0.id] != nil } }
+    func preferred(_ name: String) -> NativeShellDefinition? {
+        available.first { $0.id.caseInsensitiveCompare(name) == .orderedSame || $0.name.caseInsensitiveCompare(name) == .orderedSame } ?? available.first
+    }
+    func isAvailable(_ id: String) -> Bool { applications[id] != nil }
+    func icon(_ id: String) -> NSImage? {
+        if let cached = icons[id] { return cached }
+        guard let application = applications[id] else { return nil }
+        let image = NSWorkspace.shared.icon(forFile: application.path).copy() as! NSImage
+        image.size = NSSize(width: 16, height: 16); icons[id] = image
+        return image
+    }
+    func open(_ shell: NativeShellDefinition, directory: URL) async throws {
+        guard let application = applications[shell.id] else { throw PluginError.invalid("The selected shell is not installed, or is not on your path.") }
+        try await launch(application, directory)
+    }
+}
+
+@MainActor
+final class NativeShellSettingsControl: NSPopUpButton {
+    private let provider: NativeShellProvider
+    private var previous: String
+    private let changed: (String) -> Void
+    init(provider: NativeShellProvider, selected: String, changed: @escaping (String) -> Void) {
+        self.provider = provider; self.changed = changed
+        previous = NativeShellProvider.definitions.first { $0.id.caseInsensitiveCompare(selected) == .orderedSame }?.id ?? provider.preferred(selected)?.id ?? "terminal"
+        super.init(frame: .zero, pullsDown: false)
+        setAccessibilityIdentifier("Settings.defaultShell")
+        for shell in NativeShellProvider.definitions {
+            addItem(withTitle: shell.name); lastItem?.representedObject = shell.id
+            if let item = lastItem { AppKitFactory.setMenuImage(provider.icon(shell.id), for: item) }
+        }
+        selectItem(at: NativeShellProvider.definitions.firstIndex { $0.id == previous } ?? 0)
+        target = self; action = #selector(selectionChanged)
+    }
+    required init?(coder: NSCoder) { nil }
+    @objc private func selectionChanged() {
+        guard let id = selectedItem?.representedObject as? String else { return }
+        guard provider.isAvailable(id) else {
+            selectItem(at: NativeShellProvider.definitions.firstIndex { $0.id == previous } ?? 0)
+            Task { [weak self] in await MutationDialogs.showValidationError("The selected shell is not installed, or is not on your path.", caption: "Shell not found", window: self?.window) }
+            return
+        }
+        previous = id; changed(id)
     }
 }

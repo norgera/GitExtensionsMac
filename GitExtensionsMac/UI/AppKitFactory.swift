@@ -2,6 +2,103 @@ import GitExtensionsCore
 import GitCommands
 import AppKit
 
+final class SplitToolbarPopUpButton: NSPopUpButton {
+    var onPrimaryClick: (() -> Void)?
+    static let arrowWidth: CGFloat = 12
+    override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        if point.x < bounds.width - Self.arrowWidth, let onPrimaryClick {
+            highlight(true)
+            onPrimaryClick()
+            highlight(false)
+            return
+        }
+        super.mouseDown(with: event)
+    }
+}
+
+final class PersistentMenuChoiceView: NSView {
+    private weak var item: NSMenuItem?
+    private var hovered = false
+    private var tracking: NSTrackingArea?
+
+    init(item: NSMenuItem) {
+        self.item = item
+        let width = ceil((item.title as NSString).size(withAttributes: [.font: NSFont.menuFont(ofSize: 0)]).width) + 68
+        super.init(frame: NSRect(x: 0, y: 0, width: width, height: 24))
+        autoresizingMask = [.width]
+        setAccessibilityElement(true)
+        setAccessibilityRole(.menuItem)
+        setAccessibilityLabel(item.title)
+    }
+
+    required init?(coder: NSCoder) { nil }
+    override var acceptsFirstResponder: Bool { true }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let tracking { removeTrackingArea(tracking) }
+        let area = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self)
+        addTrackingArea(area)
+        tracking = area
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        hovered = true
+        needsDisplay = true
+        window?.makeFirstResponder(self)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        hovered = false
+        needsDisplay = true
+    }
+
+    override func mouseDown(with event: NSEvent) { window?.makeFirstResponder(self) }
+    override func mouseUp(with event: NSEvent) {
+        if bounds.contains(convert(event.locationInWindow, from: nil)) { _ = accessibilityPerformPress() }
+    }
+
+    override func keyDown(with event: NSEvent) {
+        switch event.keyCode {
+        case 36, 49, 76: _ = accessibilityPerformPress()
+        case 53: item?.menu?.cancelTracking()
+        case 125, 126:
+            guard let views = item?.menu?.items.compactMap({ $0.view as? PersistentMenuChoiceView }),
+                  let index = views.firstIndex(of: self), !views.isEmpty else { return }
+            let next = views[(index + (event.keyCode == 125 ? 1 : views.count - 1)) % views.count]
+            hovered = false
+            needsDisplay = true
+            next.hovered = true
+            next.needsDisplay = true
+            window?.makeFirstResponder(next)
+        default: super.keyDown(with: event)
+        }
+    }
+
+    override func accessibilityPerformPress() -> Bool {
+        guard let item, item.isEnabled, let action = item.action else { return false }
+        let result = NSApp.sendAction(action, to: item.target, from: item)
+        setAccessibilityValue(item.state == .on ? 1 : 0)
+        needsDisplay = true
+        return result
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard let item else { return }
+        if hovered {
+            NSColor.selectedContentBackgroundColor.setFill()
+            NSBezierPath(roundedRect: bounds.insetBy(dx: 4, dy: 1), xRadius: 4, yRadius: 4).fill()
+        }
+        let color: NSColor = hovered ? .selectedMenuItemTextColor : .labelColor
+        if item.state == .on {
+            ("✓" as NSString).draw(at: NSPoint(x: 8, y: 4), withAttributes: [.font: NSFont.menuFont(ofSize: 0), .foregroundColor: color])
+        }
+        item.image?.draw(in: NSRect(x: 28, y: 4, width: 16, height: 16))
+        (item.title as NSString).draw(at: NSPoint(x: 50, y: 4), withAttributes: [.font: NSFont.menuFont(ofSize: 0), .foregroundColor: color])
+    }
+}
+
 enum BrowserMetrics {
     static let primaryToolbarHeight: CGFloat = 25
     static let filterToolbarHeight: CGFloat = 25
@@ -12,6 +109,60 @@ enum BrowserMetrics {
 }
 
 enum AppKitFactory {
+    @MainActor
+    static func applyRevisionCopyImages(to menu: NSMenu) {
+        for (id, image) in [("revision.copy", "CopyToClipboard"), ("revision.copy.hash", "CommitId"),
+                            ("revision.copy.message", "Message"), ("revision.copy.author", "Author"),
+                            ("revision.copy.date", "Date"), ("revision.copy.authorDate", "Date"), ("revision.copy.commitDate", "Date")] {
+            if let item = menuItem(withIdentifier: id, in: menu) { setMenuImage(image, for: item) }
+        }
+        guard let submenu = menuItem(withIdentifier: "revision.copy", in: menu)?.submenu else { return }
+        var image: String?
+        for item in submenu.items {
+            if item.identifier?.rawValue == "revision.copy.caption.branches" { image = "Branch" }
+            if item.identifier?.rawValue == "revision.copy.caption.tags" { image = "Tag" }
+            if item.identifier?.rawValue.hasPrefix("revision.copy.value.") == true, let image { setMenuImage(image, for: item) }
+        }
+    }
+
+    @MainActor
+    static func buttonColumnWidth(minimum: CGFloat, _ buttons: [NSButton]) -> CGFloat {
+        max(minimum, buttons.map { ceil($0.intrinsicContentSize.width) }.max() ?? 0)
+    }
+
+    static func titledBox(_ title: String, _ content: NSView, inset: CGFloat = 8) -> NSBox {
+        let box = NSBox()
+        box.title = title
+        box.titlePosition = title.isEmpty ? .noTitle : .atTop
+        content.translatesAutoresizingMaskIntoConstraints = false
+        box.contentView?.addSubview(content)
+        if let holder = box.contentView {
+            NSLayoutConstraint.activate([
+                content.leadingAnchor.constraint(equalTo: holder.leadingAnchor, constant: inset),
+                content.trailingAnchor.constraint(equalTo: holder.trailingAnchor, constant: -inset),
+                content.topAnchor.constraint(equalTo: holder.topAnchor, constant: inset),
+                content.bottomAnchor.constraint(equalTo: holder.bottomAnchor, constant: -inset)
+            ])
+        }
+        return box
+    }
+
+    @MainActor
+    static func autosizeColumns(_ table: NSTableView, _ identifiers: [String], includeHeader: Bool = false, maximumRows: Int = 1000) {
+        guard let delegate = table.delegate, let rows = table.dataSource?.numberOfRows?(in: table) else { return }
+        for identifier in identifiers {
+            guard let column = table.tableColumns.first(where: { $0.identifier.rawValue == identifier }) else { continue }
+            var width: CGFloat = includeHeader ? column.headerCell.cellSize.width : 0
+            for row in 0..<min(rows, maximumRows) {
+                guard let view = delegate.tableView?(table, viewFor: column, row: row) else { continue }
+                let field = (view as? NSTableCellView)?.textField ?? (view as? NSTextField)
+                width = max(width, field?.intrinsicContentSize.width ?? view.fittingSize.width)
+            }
+            guard width > 0 else { continue }
+            column.width = max(column.minWidth, ceil(width + 8))
+        }
+    }
+
     static func resourceImage(
         _ name: String,
         accessibilityDescription: String? = nil,
@@ -20,7 +171,7 @@ enum AppKitFactory {
         adaptLightness: Bool = false
     ) -> NSImage? {
         let loadedImage: NSImage?
-        if let url = Bundle.main.url(forResource: name, withExtension: "png") {
+        if let url = Bundle.main.url(forResource: name, withExtension: "png") ?? Bundle.main.url(forResource: name, withExtension: "ico") {
             loadedImage = NSImage(contentsOf: url)
         } else if let encoded = embeddedGitExtensionsImages[name],
                   let data = Data(base64Encoded: encoded) {
@@ -38,6 +189,24 @@ enum AppKitFactory {
         image.isTemplate = isTemplate
         image.accessibilityDescription = accessibilityDescription
         return image
+    }
+
+    @MainActor
+    static func setMenuImage(_ name: String, for item: NSMenuItem, adaptLightness: Bool = false) {
+        setMenuImage(resourceImage(name, accessibilityDescription: item.title, adaptLightness: adaptLightness), for: item)
+    }
+
+    @MainActor
+    static func setMenuImage(_ image: NSImage?, for item: NSMenuItem) {
+        item.image = image
+        if #available(macOS 27.0, *) { item.preferredImageVisibility = .visible }
+    }
+
+    @MainActor
+    static func setMenuShortcut(_ id: String, for item: NSMenuItem) {
+        guard let chord = ApplicationHotkeys.shared.chord(for: id) else { return }
+        item.keyEquivalent = chord.key
+        item.keyEquivalentModifierMask = NSEvent.ModifierFlags(rawValue: chord.modifiers)
     }
 
     static func resourceButton(
@@ -289,4 +458,55 @@ final class GitExtensionsSelectionRowView: NSTableRowView {
     }
 
     override var isOpaque: Bool { false }
+}
+
+class LeadingImageButton: NSButton {
+    override class var cellClass: AnyClass? {
+        get { LeadingImageButtonCell.self }
+        set {}
+    }
+
+    override var intrinsicContentSize: NSSize {
+        let size = super.intrinsicContentSize
+        guard let cell = cell as? LeadingImageButtonCell else { return size }
+        return NSSize(width: max(size.width, cell.cellSize.width), height: size.height)
+    }
+}
+
+final class LeadingImageButtonCell: NSButtonCell {
+    static let imageInset: CGFloat = 8
+    static let imageSpacing: CGFloat = 6
+
+    override func imageRect(forBounds rect: NSRect) -> NSRect {
+        guard let image else { return super.imageRect(forBounds: rect) }
+        return NSRect(x: rect.minX + Self.imageInset, y: (rect.midY - image.size.height / 2).rounded(),
+                      width: image.size.width, height: image.size.height)
+    }
+
+    override func titleRect(forBounds rect: NSRect) -> NSRect {
+        var frame = super.titleRect(forBounds: rect)
+        guard image != nil else { return frame }
+        let width = min(ceil(attributedTitle.size().width), rect.width)
+        frame.origin.x = (rect.midX - width / 2).rounded()
+        frame.size.width = width
+        return frame
+    }
+
+    override func drawTitle(_ title: NSAttributedString, withFrame frame: NSRect, in controlView: NSView) -> NSRect {
+        guard image != nil else { return super.drawTitle(title, withFrame: frame, in: controlView) }
+        return super.drawTitle(title, withFrame: titleRect(forBounds: controlView.bounds), in: controlView)
+    }
+
+    override func drawImage(_ image: NSImage, withFrame frame: NSRect, in controlView: NSView) {
+        super.drawImage(image, withFrame: imageRect(forBounds: controlView.bounds), in: controlView)
+    }
+
+    override var cellSize: NSSize { fitted(super.cellSize) }
+
+    override func cellSize(forBounds rect: NSRect) -> NSSize { fitted(super.cellSize(forBounds: rect)) }
+
+    private func fitted(_ size: NSSize) -> NSSize {
+        guard let image else { return size }
+        return NSSize(width: max(size.width, ceil(attributedTitle.size().width) + 2 * (Self.imageInset + image.size.width + Self.imageSpacing)), height: size.height)
+    }
 }

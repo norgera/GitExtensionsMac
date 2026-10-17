@@ -316,8 +316,11 @@ extension GitRepositoryModule: RepositoryLostObjectsDataSource {
 
     package static let lfsPointerPrefix = Data("version https://git-lfs.github.com/spec/v".utf8)
 
-    package func materializedBlob(_ specifier: String, in root: URL) async throws -> Data {
-        let blob = try await git.run(GitCommand(arguments: ["cat-file", "blob", specifier], accessesRemote: false, changesRepositoryState: false), in: root)
+    package func materializedBlob(_ specifier: String, in root: URL, immutable: Bool = false, outputEncoding: String.Encoding? = .utf8) async throws -> Data {
+        let command = GitCommand(arguments: ["cat-file", "blob", specifier], accessesRemote: false, changesRepositoryState: false)
+        let blob: GitCommandResult
+        if immutable { blob = try await git.runCached(command, in: root, outputEncoding: outputEncoding) }
+        else { blob = try await git.run(command, in: root) }
         guard blob.succeeded else {
             throw GitError.commandFailed(arguments: blob.arguments, status: blob.exitStatus, stderr: blob.standardErrorString)
         }
@@ -331,8 +334,7 @@ extension GitRepositoryModule: RepositoryLostObjectsDataSource {
 
     package func exportBlob(_ specifier: String, to url: URL, in root: URL) async throws {
         var data = try await materializedBlob(specifier, in: root)
-        let autocrlf = try await git.run(GitCommand(arguments: ["config", "--get", "core.autocrlf"], accessesRemote: false, changesRepositoryState: false), in: root)
-        if autocrlf.standardOutputString.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "true" {
+        if try await copyNormalizesLineEndings(in: root) {
             let attributes = try await git.run(GitCommand(arguments: ["check-attr", "-z", "diff", "text", "crlf", "eol", "--", url.path],
                                                           accessesRemote: false, changesRepositoryState: false), in: root)
             let byName = attributes.succeeded ? LostObjectsCommands.binaryAccordingToAttributes(attributes.standardOutputString) : nil
@@ -343,6 +345,11 @@ extension GitRepositoryModule: RepositoryLostObjectsDataSource {
         }
         try data.write(to: url)
     }
+
+    func copyNormalizesLineEndings(in root: URL) async throws -> Bool {
+        let result = try await git.run(GitCommand(arguments: ["config", "--get", "core.autocrlf"], accessesRemote: false, changesRepositoryState: false), in: root)
+        return result.succeeded && result.standardOutputString.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "true"
+    }
 }
 
 
@@ -352,6 +359,11 @@ package enum FixedPatchLines {
                                          "copy from", "copy to", "Binary files "]
 
     package static func lines(_ text: String) -> [DiffLine] {
+        if text.hasPrefix("@@@") || text.contains("\n@@@") {
+            var lines = GitOutputParser.parseDiffLines(text, fileID: "fixed")
+            if text.hasSuffix("\n") { lines.removeLast() }
+            return lines
+        }
         var oldLine = 0, newLine = 0, inHunk = false
         var result: [DiffLine] = []
         let rows = text.components(separatedBy: "\n")

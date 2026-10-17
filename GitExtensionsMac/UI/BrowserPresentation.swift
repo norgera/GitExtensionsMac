@@ -3,6 +3,7 @@ import GitCommands
 import GitExtensionsCore
 
 
+@MainActor
 enum BrowserPresentation {
     static let applicationName = "Git Extensions"
 
@@ -23,6 +24,12 @@ enum BrowserPresentation {
 
 
     static func repositoryDescription(_ repositoryURL: URL, fileManager: FileManager = .default) -> String {
+        do { return try repositoryDescription(repositoryURL, fileManager: fileManager, uninformativePattern: AppSettingsStore.shared.uninformativeRepoNameRegex) }
+        catch { return error.localizedDescription }
+    }
+
+    static func repositoryDescription(_ repositoryURL: URL, fileManager: FileManager = .default, uninformativePattern: String) throws -> String {
+        let uninformative = try NSRegularExpression(pattern: "^(\(uninformativePattern))$", options: [.caseInsensitive])
         let directory = repositoryURL.standardizedFileURL
         var root = directory
         var parent = directory.deletingLastPathComponent()
@@ -36,9 +43,8 @@ enum BrowserPresentation {
             guard fileManager.fileExists(atPath: url.path) else { return url.lastPathComponent }
             if let description = repositoryDescriptionFile(url, fileManager: fileManager) { return description }
             var current = url
-            let uninformative = try? NSRegularExpression(pattern: "^(app|(repo(sitory)?))$", options: [.caseInsensitive])
             while current.path != root.path, current.path != "/",
-                  uninformative?.firstMatch(in: current.lastPathComponent, range: NSRange(current.lastPathComponent.startIndex..., in: current.lastPathComponent)) != nil,
+                  uninformative.firstMatch(in: current.lastPathComponent, range: NSRange(current.lastPathComponent.startIndex..., in: current.lastPathComponent)) != nil,
                   !isValidGitWorkingDir(current.deletingLastPathComponent(), fileManager: fileManager) {
                 current = current.deletingLastPathComponent()
             }
@@ -101,5 +107,33 @@ enum BrowserGitAction: Equatable, Sendable {
         }
         buttons.insert(hasConflicts ? .resolve : .continue, at: 0)
         return (hasConflicts ? "\(name) is currently in progress with merge conflicts." : "\(name) is currently in progress.", buttons)
+    }
+}
+
+
+enum BrowserBranchMenu {
+    struct Item {
+        let branch: Branch
+        let hidden: Bool
+    }
+    static func items(_ branches: [Branch], visible: (ObjectID) -> Bool) -> [Item] {
+        branches.filter { !$0.isRemote }.prefix(100).map { Item(branch: $0, hidden: !visible($0.commitID)) }
+    }
+}
+
+enum BrowserRepositoryDrop {
+    static func relativePath(text: String?, files: [URL], repository: URL, fileManager: FileManager = .default) -> String? {
+        let root = repository.standardizedFileURL
+        let canonicalRoot = root.resolvingSymlinksInPath()
+        let candidates = text.flatMap { $0.hasPrefix("/") ? [URL(fileURLWithPath: $0)] : nil } ?? []
+        for url in candidates + files where url.isFileURL {
+            let path = url.standardizedFileURL
+            guard fileManager.fileExists(atPath: path.path),
+                  path.path == root.path || path.path.hasPrefix(root.path + "/") else { continue }
+            let canonical = path.resolvingSymlinksInPath()
+            guard canonical.path == canonicalRoot.path || canonical.path.hasPrefix(canonicalRoot.path + "/") else { continue }
+            return path.path == root.path ? "" : String(path.path.dropFirst(root.path.count + 1))
+        }
+        return nil
     }
 }

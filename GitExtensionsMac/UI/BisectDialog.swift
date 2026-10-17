@@ -117,7 +117,7 @@ private final class BisectViewController: NSViewController, NSWindowDelegate {
     }
 
     @objc private func start() {
-        run(closeAfterward: false) { [source] in try await source.startBisect() } completion: { [weak self] in
+        run(closeAfterward: false) { [source] output in try await source.startBisect(output: output) } completion: { [weak self] in
             guard let self else { return }
             if selectedRevisionIDs.count > 1 {
                 await confirmAndSetSelectedRange()
@@ -128,19 +128,19 @@ private final class BisectViewController: NSViewController, NSWindowDelegate {
     }
 
     @objc private func markBad() {
-        run(closeAfterward: true) { [source] in try await source.markBisect(.bad, revisions: []) }
+        run(closeAfterward: true) { [source] output in try await source.markBisect(.bad, revisions: [], output: output) }
     }
 
     @objc private func markGood() {
-        run(closeAfterward: true) { [source] in try await source.markBisect(.good, revisions: []) }
+        run(closeAfterward: true) { [source] output in try await source.markBisect(.good, revisions: [], output: output) }
     }
 
     @objc private func skip() {
-        run(closeAfterward: true) { [source] in try await source.markBisect(.skip, revisions: []) }
+        run(closeAfterward: true) { [source] output in try await source.markBisect(.skip, revisions: [], output: output) }
     }
 
     @objc private func stop() {
-        run(closeAfterward: true) { [source] in try await source.resetBisect() }
+        run(closeAfterward: true) { [source] output in try await source.resetBisect(output: output) }
     }
 
     private func confirmAndSetSelectedRange() async {
@@ -158,49 +158,42 @@ private final class BisectViewController: NSViewController, NSWindowDelegate {
 
         let good = selectedRevisionIDs[0]
         let bad = selectedRevisionIDs[selectedRevisionIDs.count - 1]
-        do {
-            setButtonsEnabled(false)
-            let goodResult = try await source.markBisect(.good, revisions: [good])
-            apply(goodResult)
-            guard case .completed = goodResult.outcome else {
-                finish()
-                return
-            }
-            let badResult = try await source.markBisect(.bad, revisions: [bad])
-            apply(badResult)
+        setButtonsEnabled(false)
+        guard let goodResult = await HostingProcessDialog.read("Process", parent: panel, succeeded: { $0.outcome == .completed }, operation: { [source] output in
+            try await source.markBisect(.good, revisions: [good], output: output)
+        }) else { reloadState(); return }
+        apply(goodResult)
+        guard case .completed = goodResult.outcome else {
             finish()
-        } catch is CancellationError {
-            finish()
-        } catch {
-            await show(error)
-            reloadState()
+            return
         }
+        guard let badResult = await HostingProcessDialog.read("Process", parent: panel, succeeded: { $0.outcome == .completed }, operation: { [source] output in
+            try await source.markBisect(.bad, revisions: [bad], output: output)
+        }) else { finish(); return }
+        apply(badResult)
+        finish()
     }
 
     private func run(
         closeAfterward: Bool,
-        operation: @escaping @Sendable () async throws -> RepositoryMutationResult,
+        operation: @escaping @Sendable (@escaping GitOutputHandler) async throws -> RepositoryMutationResult,
         completion: (@MainActor () async -> Void)? = nil
     ) {
         operationTask?.cancel()
         setButtonsEnabled(false)
         operationTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            do {
-                let result = try await operation()
-                guard !Task.isCancelled else { return }
-                apply(result)
-                if closeAfterward {
-                    finish()
-                } else if let completion {
-                    await completion()
-                } else {
-                    reloadState()
-                }
-            } catch is CancellationError {
-                return
-            } catch {
-                await show(error)
+            guard let panel else { return }
+            let result = await HostingProcessDialog.read("Process", parent: panel, useDialogSettings: !closeAfterward,
+                succeeded: { $0.outcome == .completed }, operation: operation)
+            guard !Task.isCancelled else { return }
+            guard let result else { if closeAfterward { finish() } else { reloadState() }; return }
+            apply(result)
+            if closeAfterward {
+                finish()
+            } else if let completion {
+                await completion()
+            } else {
                 reloadState()
             }
         }

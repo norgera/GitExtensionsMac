@@ -118,6 +118,7 @@ private final class RevertViewController: NSViewController, NSTableViewDataSourc
             (offset + 1, history.first(where: { $0.id == .object(parentID) }))
         }
         parentTable.reloadData()
+        AppKitFactory.autosizeColumns(parentTable, ["date"])
         parentSection.isHidden = !commit.isMerge
         if commit.isMerge, !parentRows.isEmpty {
             parentTable.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)

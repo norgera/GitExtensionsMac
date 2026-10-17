@@ -93,8 +93,10 @@ struct AppPreferences: Codable, Equatable, Sendable {
     var defaultAllowEmpty = false
     var autoStashDuringRebase = false
     var gitExecutablePath = "/usr/bin/git"
+    var sshPath = ""
     var editorPath = ""
     var shellPath = "/bin/zsh"
+    var defaultShell = "terminal"
     var externalDiffToolPath = ""
     var externalMergeToolPath = ""
     var signingKey = ""
@@ -114,7 +116,7 @@ struct AppPreferences: Codable, Equatable, Sendable {
     init() {}
     private enum CodingKeys: String, CodingKey {
         case reopenLastRepository, maximumRecentRepositories, theme, mergeCommonParentLanes, straightenGraphDiagonals, renderGraphWithDiagonals, diffContextLines, ignoreWhitespace, defaultSignOff, defaultAllowEmpty, autoStashDuringRebase, gitExecutablePath, editorPath, shellPath, externalDiffToolPath, externalMergeToolPath, signingKey, openSubmoduleDiffInSeparateWindow, automaticContinuousScroll, automaticContinuousScrollDelay, outputHistoryDepth, showOutputHistoryAsTab, outputHistoryPanelVisible
-        case provideAutocompletion, showErrorsWhenStagingFiles, dontShowHelpImages, truncatePathMethod, composeCommitMessages
+        case provideAutocompletion, showErrorsWhenStagingFiles, dontShowHelpImages, truncatePathMethod, composeCommitMessages, sshPath, defaultShell
     }
 
     init(from decoder: Decoder) throws {
@@ -133,8 +135,10 @@ struct AppPreferences: Codable, Equatable, Sendable {
         defaultAllowEmpty = value(.defaultAllowEmpty, defaults.defaultAllowEmpty)
         autoStashDuringRebase = value(.autoStashDuringRebase, defaults.autoStashDuringRebase)
         gitExecutablePath = value(.gitExecutablePath, defaults.gitExecutablePath)
+        sshPath = value(.sshPath, defaults.sshPath)
         editorPath = value(.editorPath, defaults.editorPath)
         shellPath = value(.shellPath, defaults.shellPath)
+        defaultShell = value(.defaultShell, defaults.defaultShell)
         externalDiffToolPath = value(.externalDiffToolPath, defaults.externalDiffToolPath)
         externalMergeToolPath = value(.externalMergeToolPath, defaults.externalMergeToolPath)
         signingKey = value(.signingKey, defaults.signingKey)
@@ -274,6 +278,7 @@ struct RevisionGridPreferences: Codable, Equatable, Sendable {
     var showRemoteBranches = true
     var showArtificialCommits = true
     var showStashes = true
+    var maxStashesWithUntrackedFiles = 10
     var showGitNotes = false
     var showSessionRefs = false
     var showOnlyFirstParent = false
@@ -314,6 +319,7 @@ struct RevisionGridPreferences: Codable, Equatable, Sendable {
         showRemoteBranches = try value(.showRemoteBranches, fallback.showRemoteBranches)
         showArtificialCommits = try value(.showArtificialCommits, fallback.showArtificialCommits)
         showStashes = try value(.showStashes, fallback.showStashes)
+        maxStashesWithUntrackedFiles = try value(.maxStashesWithUntrackedFiles, fallback.maxStashesWithUntrackedFiles)
         showGitNotes = try value(.showGitNotes, fallback.showGitNotes)
         showSessionRefs = try value(.showSessionRefs, fallback.showSessionRefs)
         showOnlyFirstParent = try value(.showOnlyFirstParent, fallback.showOnlyFirstParent)
@@ -409,6 +415,8 @@ enum RepositoryTreeRoot: String, Codable, CaseIterable, Sendable {
 enum RepositoryTreeSortOrder: String, Codable, CaseIterable, Sendable {
     case ascending
     case descending
+
+    var settingsTitle: String { self == .ascending ? "A ↓ Z" : "Z ↑ A" }
 }
 
 enum RepositoryTreeSortBy: String, Codable, CaseIterable, Sendable {
@@ -441,7 +449,7 @@ struct RepositoryTreePreferences: Codable, Equatable, Sendable {
     var visibleRoots = Set(RepositoryTreeRoot.allCases)
     var rootOrder = RepositoryTreeRoot.allCases
     var sortBy: RepositoryTreeSortBy = .gitDefault
-    var sortOrder: RepositoryTreeSortOrder = .ascending
+    var sortOrder: RepositoryTreeSortOrder = .descending
     var prioritizedBranchNames = CommitInfoPresentation.prioritizedBranchNames
     var prioritizedRemoteNames = CommitInfoPresentation.prioritizedRemoteNames
 
@@ -458,7 +466,7 @@ struct RepositoryTreePreferences: Codable, Equatable, Sendable {
         rootOrder = try container.decodeIfPresent([RepositoryTreeRoot].self, forKey: .rootOrder)
             ?? RepositoryTreeRoot.allCases
         sortBy = try container.decodeIfPresent(RepositoryTreeSortBy.self, forKey: .sortBy) ?? .gitDefault
-        sortOrder = try container.decodeIfPresent(RepositoryTreeSortOrder.self, forKey: .sortOrder) ?? .ascending
+        sortOrder = try container.decodeIfPresent(RepositoryTreeSortOrder.self, forKey: .sortOrder) ?? .descending
         prioritizedBranchNames = try container.decodeIfPresent(String.self, forKey: .prioritizedBranchNames)
             ?? CommitInfoPresentation.prioritizedBranchNames
         prioritizedRemoteNames = try container.decodeIfPresent(String.self, forKey: .prioritizedRemoteNames)
@@ -622,6 +630,8 @@ struct CommitValidationPreferences: Codable, Equatable, Sendable {
     var regularExpression = ""
 }
 
+typealias SplitterSetting = BrowserLayoutPreferences.Splitter
+
 struct CommitPreferences: Codable, Equatable, Sendable {
     var historyLimit = 6
     var showOnlyMyMessages = false
@@ -642,10 +652,6 @@ struct CommitPreferences: Codable, Equatable, Sendable {
     var validation = CommitValidationPreferences()
     var windowWidth = 918.0
     var windowHeight = 644.0
-    var mainDivider = 397.0
-    var fileDivider = 274.0
-    var contentDivider = 426.0
-    var commandDivider = 171.0
 }
 
 enum FileStatusGrouping: String, Codable, CaseIterable, Sendable {
@@ -690,7 +696,7 @@ struct BlamePreferences: Codable, Equatable, Sendable {
 struct FileStatusListPreferences: Codable, Equatable, Sendable {
     var grouping: FileStatusGrouping = .path
     var isTreeMode = true
-    var usesDenseTree = true
+    var usesDenseTree = false
     var showsGroupNodesInFlatList = false
     var showsUntrackedFiles = true
 
@@ -709,7 +715,7 @@ struct FileStatusListPreferences: Codable, Equatable, Sendable {
     init(
         grouping: FileStatusGrouping = .path,
         isTreeMode: Bool = true,
-        usesDenseTree: Bool = true,
+        usesDenseTree: Bool = false,
         showsGroupNodesInFlatList: Bool = false,
         showsUntrackedFiles: Bool = true
     ) {
@@ -987,6 +993,8 @@ final class AppSettingsStore {
         static let pullPreferences = "GitExtensionsMac.pullPreferences.v1"
         static let pushPreferences = "GitExtensionsMac.pushPreferences.v1"
         static let commitPreferences = "GitExtensionsMac.commitPreferences.v1"
+        static let commitMessageEditorPreferences = "GitExtensionsMac.commitMessageEditorPreferences.v1"
+        static let processDialogPreferences = "GitExtensionsMac.processDialogPreferences.v1"
         static let fileStatusListPreferences = "GitExtensionsMac.fileStatusListPreferences.v1"
         static let blamePreferences = "GitExtensionsMac.blamePreferences.v1"
         static let fileViewerPreferences = "GitExtensionsMac.fileViewerPreferences.v1"
@@ -995,6 +1003,7 @@ final class AppSettingsStore {
         static let cherryPickPreferences = "GitExtensionsMac.cherryPickPreferences.v1"
         static let stashPreferences = "GitExtensionsMac.stashPreferences.v1"
         static let browseDisplay = "GitExtensionsMac.browseDisplay.v1"
+        static let splitters = "GitExtensionsMac.splitters.v1"
         static let tagPreferences = "GitExtensionsMac.tagPreferences.v1"
         static let repositoryTreePreferences = "GitExtensionsMac.repositoryTreePreferences.v1"
         static let remoteManagementPreferences = "GitExtensionsMac.remoteManagementPreferences.v1"
@@ -1065,7 +1074,8 @@ final class AppSettingsStore {
         set {
             cachedColorPreferences = newValue
             defaults.set(try? JSONEncoder().encode(newValue), forKey: "GitExtensionsMac.colors.v1")
-            ApplicationColors.invalidate()
+            applyAppearance()
+            NotificationCenter.default.post(name: .appPreferencesDidChange, object: self)
         }
     }
 
@@ -1085,18 +1095,40 @@ final class AppSettingsStore {
         set { defaults.set(newValue, forKey: "GitExtensionsMac.revisionLinks.v1") }
     }
 
+    private var availableTextEncodingsOverride: [RepositoryTextEncoding]?
+
     var includedTextEncodings: [RepositoryTextEncoding] {
         get {
-            let baseline: [RepositoryTextEncoding] = [.utf8, .utf16LittleEndian, .utf16BigEndian, .westernISO88591, .windows1252]
+            if let availableTextEncodingsOverride { return availableTextEncodingsOverride }
+            let baseline = Self.defaultTextEncodings
             let saved = defaults.stringArray(forKey: "GitExtensionsMac.availableEncodings.v1")?.compactMap { RepositoryTextEncoding(rawValue: $0) } ?? baseline
-            var result = Self.requiredTextEncodings
+            var result: [RepositoryTextEncoding] = []
             for encoding in saved where encoding != .automatic && !result.contains(encoding) { result.append(encoding) }
+            for encoding in Self.requiredTextEncodings where !result.contains(encoding) { result.append(encoding) }
             return result
         }
-        set { defaults.set(newValue.map(\.rawValue), forKey: "GitExtensionsMac.availableEncodings.v1") }
+        set {
+            updateAvailableTextEncodings(newValue)
+            defaults.set(includedTextEncodings.map(\.rawValue), forKey: "GitExtensionsMac.availableEncodings.v1")
+        }
+    }
+    func updateAvailableTextEncodings(_ values: [RepositoryTextEncoding]) {
+        var unique: [RepositoryTextEncoding] = []
+        for encoding in values where encoding != .automatic && !unique.contains(encoding) { unique.append(encoding) }
+        for encoding in Self.requiredTextEncodings where !unique.contains(encoding) { unique.append(encoding) }
+        availableTextEncodingsOverride = unique
+    }
+    static var defaultTextEncodings: [RepositoryTextEncoding] {
+        var values = requiredTextEncodings
+        if let oem = RepositoryTextEncoding(ianaName: "ibm437") { values.append(oem) }
+        values.append(.windows1252)
+        return values
     }
     static var requiredTextEncodings: [RepositoryTextEncoding] {
-        [.utf8, .utf16LittleEndian, .utf16BigEndian, RepositoryTextEncoding(ianaName: "us-ascii")!]
+        [.utf8, RepositoryTextEncoding(ianaName: "us-ascii")!, .utf16LittleEndian]
+    }
+    static func isProtectedTextEncoding(_ encoding: RepositoryTextEncoding) -> Bool {
+        requiredTextEncodings.contains(encoding) || encoding == .utf16BigEndian
     }
     func viewerEncodings(including selected: RepositoryTextEncoding) -> [RepositoryTextEncoding] {
         var values = [.automatic] + includedTextEncodings
@@ -1109,6 +1141,8 @@ final class AppSettingsStore {
     private(set) var pullPreferences: PullPreferences
     private(set) var pushPreferences: PushPreferences
     private(set) var commitPreferences: CommitPreferences
+    private(set) var commitMessageEditorPreferences: CommitMessageEditorPreferences
+    private(set) var processDialogPreferences: ProcessDialogPreferences
     private(set) var fileStatusListPreferences: FileStatusListPreferences
     private(set) var blamePreferences: BlamePreferences
     private(set) var fileViewerPreferences: FileViewerPreferences
@@ -1135,13 +1169,29 @@ final class AppSettingsStore {
     private(set) var showBuildStatusIconColumn: Bool
     private(set) var showBuildStatusTextColumn: Bool
 
-    init(defaults: UserDefaults = .standard) {
+    private let themeBundledDirectory: URL
+    private let themeUserDirectory: URL
+    private let themeFailureReporter: (ApplicationThemeFailure) -> Void
+    private lazy var themeRuntime = ApplicationThemeRuntime(reader: { [bundled = themeBundledDirectory, user = themeUserDirectory] name, colorblind in
+        try ApplicationThemeReader.load(name, colorblind: colorblind, bundled: bundled, user: user)
+    }, report: themeFailureReporter)
+
+    init(defaults: UserDefaults = .standard, bundledThemes: URL = ApplicationThemeReader.bundledDirectory,
+         userThemes: URL = ApplicationThemeReader.userDirectory, themeFailureReporter: ((ApplicationThemeFailure) -> Void)? = nil) {
         self.defaults = defaults
+        themeBundledDirectory = bundledThemes; themeUserDirectory = userThemes
+        self.themeFailureReporter = themeFailureReporter ?? { failure in
+            NSLog("%@", failure.localizedDescription)
+            if defaults === UserDefaults.standard {
+                Task { await MutationDialogs.showError(failure, title: "Cannot load theme", window: NSApp?.keyWindow ?? NSApp?.mainWindow, helpURL: ApplicationThemeFailure.helpURL) }
+            }
+        }
         let decoder = JSONDecoder()
         let loadedPreferences = defaults.data(forKey: Key.preferences)
             .flatMap { try? decoder.decode(AppPreferences.self, from: $0) }
             ?? AppPreferences()
         preferences = loadedPreferences
+        if defaults === UserDefaults.standard { GitSshEnvironment.apply(loadedPreferences.sshPath) }
         pullPreferences = defaults.data(forKey: Key.pullPreferences)
             .flatMap { try? decoder.decode(PullPreferences.self, from: $0) }
             ?? PullPreferences()
@@ -1151,6 +1201,12 @@ final class AppSettingsStore {
         commitPreferences = defaults.data(forKey: Key.commitPreferences)
             .flatMap { try? decoder.decode(CommitPreferences.self, from: $0) }
             ?? CommitPreferences()
+        commitMessageEditorPreferences = defaults.data(forKey: Key.commitMessageEditorPreferences)
+            .flatMap { try? decoder.decode(CommitMessageEditorPreferences.self, from: $0) }
+            ?? CommitMessageEditorPreferences()
+        processDialogPreferences = defaults.data(forKey: Key.processDialogPreferences)
+            .flatMap { try? decoder.decode(ProcessDialogPreferences.self, from: $0) }
+            ?? ProcessDialogPreferences()
         fileStatusListPreferences = defaults.data(forKey: Key.fileStatusListPreferences)
             .flatMap { try? decoder.decode(FileStatusListPreferences.self, from: $0) }
             ?? FileStatusListPreferences()
@@ -1250,7 +1306,12 @@ final class AppSettingsStore {
     }
 
     func save(_ preferences: AppPreferences) {
-        if defaults === UserDefaults.standard { CommandLog.shared.setOutputHistoryDepth(preferences.outputHistoryDepth) }
+        var preferences = preferences
+        if colorPreferences.themeFile == ApplicationThemeRecovery.defaultThemeFile { preferences.theme = .light }
+        if defaults === UserDefaults.standard {
+            CommandLog.shared.setOutputHistoryDepth(preferences.outputHistoryDepth)
+            GitSshEnvironment.apply(preferences.sshPath)
+        }
         let previous = self.preferences
         self.preferences = preferences
         defaults.set(try? JSONEncoder().encode(preferences), forKey: Key.preferences)
@@ -1288,6 +1349,16 @@ final class AppSettingsStore {
         NotificationCenter.default.post(name: .commitPreferencesDidChange, object: self)
     }
 
+    func saveProcessDialogPreferences(_ preferences: ProcessDialogPreferences) {
+        processDialogPreferences = preferences
+        defaults.set(try? JSONEncoder().encode(preferences), forKey: Key.processDialogPreferences)
+    }
+
+    func saveCommitMessageEditorPreferences(_ preferences: CommitMessageEditorPreferences) {
+        commitMessageEditorPreferences = preferences
+        defaults.set(try? JSONEncoder().encode(preferences), forKey: Key.commitMessageEditorPreferences)
+    }
+
     func saveFileStatusListPreferences(_ preferences: FileStatusListPreferences) {
         fileStatusListPreferences = preferences
         defaults.set(try? JSONEncoder().encode(preferences), forKey: Key.fileStatusListPreferences)
@@ -1320,6 +1391,16 @@ final class AppSettingsStore {
         defaults.set(try? JSONEncoder().encode(preferences), forKey: Key.fonts)
     }
 
+    func splitterSetting(_ name: String) -> SplitterSetting? {
+        defaults.data(forKey: Key.splitters).flatMap { try? JSONDecoder().decode([String: SplitterSetting].self, from: $0) }?[name]
+    }
+
+    func saveSplitterSetting(_ setting: SplitterSetting, for name: String) {
+        var all = defaults.data(forKey: Key.splitters).flatMap { try? JSONDecoder().decode([String: SplitterSetting].self, from: $0) } ?? [:]
+        all[name] = setting
+        defaults.set(try? JSONEncoder().encode(all), forKey: Key.splitters)
+    }
+
     func saveBrowseDisplayPreferences(_ preferences: BrowseDisplayPreferences) {
         browseDisplayPreferences = preferences
         defaults.set(try? JSONEncoder().encode(preferences), forKey: Key.browseDisplay)
@@ -1332,7 +1413,7 @@ final class AppSettingsStore {
         let font = codeFont
         return max(BrowserMetrics.diffRowHeight, ceil(font.ascender - font.descender + font.leading + 3))
     }
-    var commitFont: NSFont { fontPreferences.font(.commit, fallback: .monospacedSystemFont(ofSize: 12, weight: .regular)) }
+    var commitFont: NSFont { fontPreferences.font(.commit, fallback: .messageFont(ofSize: 0)) }
     var monospaceFont: NSFont { fontPreferences.font(.monospace, fallback: .monospacedSystemFont(ofSize: 11, weight: .regular)) }
     func applicationFont(size: CGFloat, weight: NSFont.Weight = .regular) -> NSFont {
         guard let font = fontPreferences.fonts[.application]?.font else { return .systemFont(ofSize: size, weight: weight) }
@@ -1418,29 +1499,87 @@ final class AppSettingsStore {
         defaults.set(try? JSONEncoder().encode(preferences), forKey: Key.remoteManagementPreferences)
     }
 
+    var remotesCacheLength: Int {
+        get { (defaults.object(forKey: "GitExtensionsMac.RemotesCacheLength") as? NSNumber)?.intValue ?? 30 }
+        set { defaults.set(newValue, forKey: "GitExtensionsMac.RemotesCacheLength") }
+    }
+
+    var remoteRepositoryHistory: [String] {
+        migrateRemoteRepositoryHistory()
+        return Array((defaults.stringArray(forKey: "GitExtensionsMac.remoteRepositoryHistory.v1") ?? []).prefix(max(0, remotesCacheLength)))
+    }
+
+    func saveRemoteRepositoryHistory(_ values: [String]) {
+        defaults.set(Array(values.prefix(max(0, recentRepositorySettings.historySize))), forKey: "GitExtensionsMac.remoteRepositoryHistory.v1")
+    }
+
+    private func migrateRemoteRepositoryHistory() {
+        guard defaults.object(forKey: "GitExtensionsMac.remoteRepositoryHistory.v1") == nil else { return }
+        let histories = [repositoryCreationPreferences.recentSources, pullPreferences.recentURLs, pushPreferences.recentURLs, remoteManagementPreferences.recentURLs]
+        var merged: [String] = []
+        for index in 0..<(histories.map(\.count).max() ?? 0) {
+            for values in histories where values.indices.contains(index) {
+                let value = values[index]
+                if !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                   !merged.contains(where: { $0.compare(value, options: .caseInsensitive, locale: .current) == .orderedSame }) { merged.append(value) }
+            }
+        }
+        defaults.set(merged, forKey: "GitExtensionsMac.remoteRepositoryHistory.legacy.v1")
+        saveRemoteRepositoryHistory(merged)
+    }
+
     func recordRemoteURL(_ value: String) {
-        let value = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !value.isEmpty else { return }
-        var preferences = remoteManagementPreferences
-        preferences.recentURLs.removeAll { $0 == value }
-        preferences.recentURLs.insert(value, at: 0)
-        preferences.recentURLs = Array(preferences.recentURLs.prefix(20))
-        saveRemoteManagementPreferences(preferences)
+        guard !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        var history = remoteRepositoryHistory
+        if let index = history.firstIndex(where: { $0.compare(value, options: .caseInsensitive, locale: .current) == .orderedSame }) {
+            if index == 0 { return }
+            let existing = history.remove(at: index)
+            history.insert(existing, at: 0)
+        } else { history.insert(value, at: 0) }
+        saveRemoteRepositoryHistory(history)
+    }
+
+    func removeRemoteURL(_ value: String) {
+        var history = remoteRepositoryHistory
+        guard let index = history.firstIndex(where: { $0.compare(value, options: .caseInsensitive, locale: .current) == .orderedSame }) else { return }
+        history.remove(at: index)
+        saveRemoteRepositoryHistory(history)
+    }
+
+    func deleteRemoteURLHistory(_ value: String) {
+        var history = remoteRepositoryHistory
+        guard let index = history.firstIndex(where: { $0.utf16.elementsEqual(value.utf16) }) else { return }
+        history.remove(at: index)
+        saveRemoteRepositoryHistory(history)
     }
 
     func replaceRemoteURLHistory(_ oldValue: String?, with newValue: String) {
-        let oldValue = oldValue?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let newValue = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        var preferences = remoteManagementPreferences
-        if let oldValue, !oldValue.isEmpty, oldValue != newValue {
-            preferences.recentURLs.removeAll { $0 == oldValue }
+        guard !newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        var history = remoteRepositoryHistory
+        if let oldValue, oldValue.caseInsensitiveCompare(newValue) != .orderedSame,
+           let index = history.firstIndex(where: { $0.utf16.elementsEqual(oldValue.utf16) }) { history.remove(at: index) }
+        if !history.contains(where: { $0.utf16.elementsEqual(newValue.utf16) }) { history.insert(newValue, at: 0) }
+        saveRemoteRepositoryHistory(history)
+    }
+
+    var customGenericRemoteNames: [String] {
+        get { (defaults.string(forKey: "GitExtensionsMac.CustomGenericRemoteNames") ?? "").split(separator: ",", omittingEmptySubsequences: true).map(String.init) }
+        set { defaults.set(newValue.joined(separator: ","), forKey: "GitExtensionsMac.CustomGenericRemoteNames") }
+    }
+    var uninformativeRepoNameRegex: String {
+        get { defaults.string(forKey: "GitExtensionsMac.UninformativeRepoNameRegex") ?? "app|(repo(sitory)?)" }
+        set { defaults.set(newValue, forKey: "GitExtensionsMac.UninformativeRepoNameRegex") }
+    }
+    var prioritizedBuildServerRemoteNames: String {
+        get { defaults.string(forKey: "GitExtensionsMac.PrioritizedBuildServerRemoteNames") ?? "upstream|origin|remote" }
+        set { defaults.set(newValue, forKey: "GitExtensionsMac.PrioritizedBuildServerRemoteNames") }
+    }
+    var authorImageSizeInCommitInfo: Int {
+        get {
+            let size = (defaults.object(forKey: "GitExtensionsMac.AuthorImageSizeInCommitInfo") as? NSNumber)?.intValue ?? 80
+            return size > 0 ? size : 80
         }
-        if !newValue.isEmpty {
-            preferences.recentURLs.removeAll { $0 == newValue }
-            preferences.recentURLs.insert(newValue, at: 0)
-        }
-        preferences.recentURLs = Array(preferences.recentURLs.prefix(20))
-        saveRemoteManagementPreferences(preferences)
+        set { defaults.set(newValue, forKey: "GitExtensionsMac.AuthorImageSizeInCommitInfo") }
     }
 
     func saveMergePreferences(_ preferences: MergePreferences) {
@@ -1548,35 +1687,9 @@ final class AppSettingsStore {
         saveFileViewerPreferences(fileViewerPreferences)
     }
 
-    func recordCloneSource(_ source: String) {
-        let source = source.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !source.isEmpty else { return }
-        var preferences = repositoryCreationPreferences
-        preferences.recentSources.removeAll { $0 == source }
-        preferences.recentSources.insert(source, at: 0)
-        preferences.recentSources = Array(preferences.recentSources.prefix(20))
-        saveRepositoryCreationPreferences(preferences)
-    }
-
-    func recordPullURL(_ value: String) {
-        let value = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !value.isEmpty else { return }
-        var preferences = pullPreferences
-        preferences.recentURLs.removeAll { $0 == value }
-        preferences.recentURLs.insert(value, at: 0)
-        preferences.recentURLs = Array(preferences.recentURLs.prefix(20))
-        savePullPreferences(preferences)
-    }
-
-    func recordPushURL(_ value: String) {
-        let value = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !value.isEmpty else { return }
-        var preferences = pushPreferences
-        preferences.recentURLs.removeAll { $0 == value }
-        preferences.recentURLs.insert(value, at: 0)
-        preferences.recentURLs = Array(preferences.recentURLs.prefix(20))
-        savePushPreferences(preferences)
-    }
+    func recordCloneSource(_ source: String) { recordRemoteURL(source) }
+    func recordPullURL(_ value: String) { recordRemoteURL(value) }
+    func recordPushURL(_ value: String) { recordRemoteURL(value) }
 
     func recordOpenedRepository(_ url: URL) {
         recordRecentRepository(url)
@@ -1677,8 +1790,43 @@ final class AppSettingsStore {
         saveRecentHistory([])
     }
 
+    var availableThemeFiles: [String] { ApplicationThemeReader.availableThemes(user: themeUserDirectory) }
+
+    func validateTheme(_ preferences: ApplicationColorPreferences) throws {
+        if !preferences.themeFile.isEmpty {
+            _ = try ApplicationThemeReader.load(preferences.themeFile, colorblind: preferences.colorblind,
+                                                bundled: themeBundledDirectory, user: themeUserDirectory)
+        }
+    }
+
+    func loadTheme(_ name: String) -> ApplicationThemeLoadResult {
+        let result = themeRuntime.load(name, colorblind: colorPreferences.colorblind)
+        if result.resetSelectedTheme {
+            var repaired = colorPreferences
+            repaired.themeFile = ApplicationThemeRecovery.defaultThemeFile
+            cachedColorPreferences = repaired
+            defaults.set(try? JSONEncoder().encode(repaired), forKey: "GitExtensionsMac.colors.v1")
+            preferences.theme = .light
+            defaults.set(try? JSONEncoder().encode(preferences), forKey: Key.preferences)
+            NSApp?.appearance = NSAppearance(named: .aqua)
+            ApplicationColors.invalidate()
+        }
+        return result
+    }
+
+    func reloadTheme() {
+        applyAppearance()
+        NotificationCenter.default.post(name: .appPreferencesDidChange, object: self)
+    }
+
     private func applyAppearance() {
+        themeRuntime.invalidate()
         ApplicationColors.invalidate()
+        let colors = colorPreferences
+        if !colors.themeFile.isEmpty || colors.colorblind {
+            let selected = colors.themeFile.isEmpty ? (preferences.theme == .dark ? "dark.css" : "invariant.css") : colors.themeFile
+            _ = loadTheme(selected)
+        }
         guard let application = NSApp else { return }
         switch preferences.theme {
         case .system: application.appearance = nil

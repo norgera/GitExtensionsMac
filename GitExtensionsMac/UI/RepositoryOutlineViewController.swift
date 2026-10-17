@@ -74,6 +74,10 @@ enum SubmoduleTreePresentation {
         return item.commitState == .modified || item.commitState == .conflicted ? "FileStatusModified" : "FolderSubmodule"
     }
     static func toolTip(_ item: SubmoduleTreeItem) -> String {
+        if let summary = item.diffSummary { return SubmoduleDiffPresentation.text(summary, limitOutput: true) }
+        if item.addedCommits == nil, item.removedCommits == nil, let counts = item.changeCounts {
+            return counts.summary
+        }
         var lines = [item.repositoryURL.path]
         if item.isTop { lines.append("Top superproject") }
         if item.isCurrent { lines.append("Current repository") }
@@ -524,8 +528,8 @@ enum RepositoryTreeBuilder {
 
     private static func nodePriority(_ node: RepositoryTreeNode, patterns: String) -> Int {
         switch node.kind {
-        case .branch(let branch): branchPriority(branch.name, patterns: patterns)
-        case .folder(let prefix, false): branchPriority(prefix + "/", patterns: patterns)
+        case .branch(let branch), .remoteBranch(let branch): branchPriority(branch.name, patterns: patterns)
+        case .folder(let prefix, _): branchPriority(prefix + "/", patterns: patterns)
         default: Int.max
         }
     }
@@ -615,6 +619,7 @@ final class RepositoryOutlineViewController: NSViewController, NSOutlineViewData
     private var expandedBeforeFiltering = Set<String>()
     private var selectedBeforeFiltering = Set<String>()
     private var hasAppliedRepositoryState = false
+    private var ignoreSelectionChangedEvent = false
 
     override func loadView() {
         let root = NSView()
@@ -687,6 +692,7 @@ final class RepositoryOutlineViewController: NSViewController, NSOutlineViewData
         scrollView.documentView = outlineView
         scrollView.hasVerticalScroller = true
         scrollView.hasHorizontalScroller = true
+        scrollView.autohidesScrollers = true
         scrollView.borderType = .noBorder
         scrollView.translatesAutoresizingMaskIntoConstraints = false
 
@@ -790,6 +796,9 @@ final class RepositoryOutlineViewController: NSViewController, NSOutlineViewData
         expandedIDs: Set<String>? = nil,
         selectedIDs: Set<String>? = nil
     ) {
+        let wasIgnoringSelection = ignoreSelectionChangedEvent
+        ignoreSelectionChangedEvent = true
+        defer { ignoreSelectionChangedEvent = wasIgnoringSelection }
         let criterion = searchField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         visibleRoots = criterion.isEmpty
             ? allRoots
@@ -953,10 +962,14 @@ final class RepositoryOutlineViewController: NSViewController, NSOutlineViewData
         let identifier = NSUserInterfaceItemIdentifier("RepositoryTreeCell")
         let cell = (outlineView.makeView(withIdentifier: identifier, owner: self) as? NSTableCellView) ?? makeCell(identifier: identifier)
         cell.textField?.stringValue = node.title
+        let isHiddenRevision: Bool = switch node.kind {
+        case .branch, .remoteBranch, .tag, .stash: !node.isRevisionVisible
+        default: false
+        }
         let symbolName: String = switch node.kind {
+        case _ where isHiddenRevision: "EyeClosed"
         case .branch where node.isMerged: "BranchLocalMerged"
         case .remoteBranch where node.isMerged: "BranchRemoteMerged"
-        case .branch, .remoteBranch, .tag, .stash where !node.isRevisionVisible: "EyeClosed"
         case .remote(let remote) where remote.isDisabled: "EyeClosed"
         default: node.symbolName
         }
@@ -966,6 +979,17 @@ final class RepositoryOutlineViewController: NSViewController, NSOutlineViewData
         cell.imageView?.image = image
         cell.imageView?.contentTintColor = nil
         cell.toolTip = node.toolTip
+        switch node.kind {
+        case .branch, .remoteBranch:
+            let fullPath = node.referenceName ?? node.title
+            if !node.isRevisionVisible {
+                cell.toolTip = "'\(fullPath)' is not currently visible"
+            } else if node.isMerged {
+                cell.toolTip = "'\(fullPath.split(separator: "/").last.map(String.init) ?? fullPath)' is contained in the currently selected commit"
+            }
+        default:
+            break
+        }
 
         switch node.kind {
         case .branch(let branch) where branch.isCurrent:
@@ -977,7 +1001,7 @@ final class RepositoryOutlineViewController: NSViewController, NSOutlineViewData
         case .submodule(let item) where item.isCurrent:
             cell.textField?.font = AppSettingsStore.shared.applicationFont(size: 11, weight: .bold)
             cell.textField?.textColor = .labelColor
-        case .branch, .remoteBranch, .tag, .stash where !node.isRevisionVisible:
+        case _ where isHiddenRevision:
             cell.textField?.font = AppSettingsStore.shared.applicationFont(size: 11)
             cell.textField?.textColor = .tertiaryLabelColor
         case .remote(let remote) where remote.isDisabled:
@@ -1018,10 +1042,16 @@ final class RepositoryOutlineViewController: NSViewController, NSOutlineViewData
     }
 
     func outlineViewSelectionDidChange(_ notification: Notification) {
-        guard outlineView.selectedRow >= 0,
+        guard !ignoreSelectionChangedEvent, outlineView.selectedRow >= 0,
               let node = outlineView.item(atRow: outlineView.selectedRow) as? RepositoryTreeNode else { return }
 
-        if node.objectID != nil, !node.isRevisionVisible { return }
+        if node.objectID != nil, !node.isRevisionVisible {
+            switch node.kind {
+            case .branch, .remoteBranch:
+                guard TrackingBranchNavigation.canNavigate(visible: node.isRevisionVisible, alternate: NSEvent.modifierFlags.contains(.option)) else { return }
+            default: return
+            }
+        }
         onSelection?(node)
     }
 

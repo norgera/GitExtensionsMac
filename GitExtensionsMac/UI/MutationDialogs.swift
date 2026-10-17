@@ -181,13 +181,28 @@ enum MutationDialogs {
         return RepositoryCheckoutRequest(target: checkoutTarget, localChanges: localChanges)
     }
 
-    static func showError(_ error: Error, title: String, window: NSWindow) async {
+    static func showError(_ error: Error, title: String, window: NSWindow? = nil, helpURL: URL? = nil) async {
         let alert = NSAlert()
         alert.messageText = title
         alert.informativeText = error.localizedDescription
         alert.alertStyle = .warning
         alert.addButton(withTitle: "OK")
-        _ = await begin(alert: alert, for: window)
+        if helpURL != nil { alert.addButton(withTitle: "Help") }
+        else { alert.addButton(withTitle: error is GitError ? "Report issue" : "Report bug") }
+        let response = if let window { await begin(alert: alert, for: window) } else { alert.runModal() }
+        if response == .alertSecondButtonReturn {
+            if let helpURL { NSWorkspace.shared.open(helpURL) }
+            else { ApplicationErrorReporter.report(.capture(error), context: .init(isExternalOperation: error is GitError), owner: window) }
+        }
+    }
+
+    static func showValidationError(_ message: String, caption: String, window: NSWindow?) async {
+        let alert = NSAlert()
+        alert.alertStyle = .critical
+        alert.messageText = caption
+        alert.informativeText = message
+        alert.addButton(withTitle: "OK")
+        _ = if let window { await begin(alert: alert, for: window) } else { alert.runModal() }
     }
 
     static func showInformation(_ message: String, title: String, window: NSWindow) async {

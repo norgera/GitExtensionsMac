@@ -260,19 +260,21 @@ package struct SubmoduleTreeItem: Identifiable, Hashable, Sendable {
     package let removedCommits: Int?
     package let isDirty: Bool
     package let commitDescription: String
+    package let changeCounts: RevisionChangeCounts?
+    package var diffSummary: SubmoduleDiffSummary?
     package var id: String { repositoryURL.path }
 
     package init(repositoryURL: URL, parentURL: URL, path: String, localPath: String,
                  isCurrent: Bool, isTop: Bool, isInitialized: Bool, branch: String?,
                  commitID: ObjectID?, recordedID: ObjectID?, commitState: CommitState,
                  addedCommits: Int? = nil, removedCommits: Int? = nil, isDirty: Bool = false,
-                 commitDescription: String = "") {
+                 commitDescription: String = "", changeCounts: RevisionChangeCounts? = nil) {
         self.repositoryURL = repositoryURL; self.parentURL = parentURL
         self.path = path; self.localPath = localPath; self.isCurrent = isCurrent; self.isTop = isTop
         self.isInitialized = isInitialized; self.branch = branch; self.commitID = commitID
         self.recordedID = recordedID; self.commitState = commitState
         self.addedCommits = addedCommits; self.removedCommits = removedCommits
-        self.isDirty = isDirty; self.commitDescription = commitDescription
+        self.isDirty = isDirty; self.commitDescription = commitDescription; self.changeCounts = changeCounts
     }
 }
 
@@ -295,6 +297,7 @@ package struct RevisionReference: Identifiable, Hashable, Sendable {
     package let trackingRemote: String?
     package let mergeWith: String?
 
+    package var isSelectedHeadMergeSource = false
     package let isAnnotated: Bool
 
     package init(
@@ -357,6 +360,10 @@ package struct Commit: Identifiable, Hashable, Sendable {
     package let references: [RevisionReference]
     package let kind: Kind
 
+    package var isAutostash = false
+    package var isStash: Bool { references.contains { $0.kind == .stash } }
+    package var isStashLike: Bool { isStash || isAutostash }
+    package var loadsCommitInfo: Bool { !isArtificial && !isAutostash }
     package var notes: String = ""
 
     package init(
@@ -585,6 +592,17 @@ package struct DiffTextStyle: Hashable, Sendable {
     }
 }
 
+package struct DiffHunkRanges: Hashable, Sendable {
+    package struct Lines: Hashable, Sendable {
+        package let start: Int
+        package let count: Int
+        package init(start: Int, count: Int) { self.start = start; self.count = count }
+    }
+    package let parents: [Lines]
+    package let result: Lines
+    package init(parents: [Lines], result: Lines) { self.parents = parents; self.result = result }
+}
+
 package struct DiffLine: Identifiable, Hashable, Sendable {
     package enum Kind: Hashable, Sendable {
         case header
@@ -601,9 +619,13 @@ package struct DiffLine: Identifiable, Hashable, Sendable {
     package let text: String
     package let styles: [DiffTextStyle]
     package let isMixedChange: Bool
+    package let diffPrefix: String?
+    package let isMovedLine: Bool
+    package let hunkRanges: DiffHunkRanges?
 
     package init(id: String, oldLineNumber: Int?, newLineNumber: Int?, kind: Kind, text: String,
-                 styles: [DiffTextStyle] = [], isMixedChange: Bool = false) {
+                 styles: [DiffTextStyle] = [], isMixedChange: Bool = false, diffPrefix: String? = nil, isMovedLine: Bool = false,
+                 hunkRanges: DiffHunkRanges? = nil) {
         self.id = id
         self.oldLineNumber = oldLineNumber
         self.newLineNumber = newLineNumber
@@ -611,9 +633,21 @@ package struct DiffLine: Identifiable, Hashable, Sendable {
         self.text = text
         self.styles = styles
         self.isMixedChange = isMixedChange
+        self.diffPrefix = diffPrefix
+        self.isMovedLine = isMovedLine
+        self.hunkRanges = hunkRanges
     }
 
     package var isChange: Bool { kind == .addition || kind == .deletion || isMixedChange }
+    package var patchText: String {
+        if let diffPrefix { return diffPrefix + text }
+        switch kind {
+        case .addition: return "+" + text
+        case .deletion: return "-" + text
+        case .context: return " " + text
+        case .header, .hunk: return text
+        }
+    }
 }
 
 package struct FileDiff: Identifiable, Hashable, Sendable {
@@ -622,6 +656,9 @@ package struct FileDiff: Identifiable, Hashable, Sendable {
     package let lines: [DiffLine]
     package let appearance: DiffDisplayAppearance
     package let contentEncoding: String.Encoding
+    package var normalizesCopyLineEndings = false
+    package var submoduleSummary: SubmoduleDiffSummary?
+    package var isTextOnly = false
 
     package init(id: String, fileID: String, lines: [DiffLine], appearance: DiffDisplayAppearance = .patch, contentEncoding: String.Encoding = .utf8) {
         self.id = id
@@ -629,6 +666,41 @@ package struct FileDiff: Identifiable, Hashable, Sendable {
         self.lines = lines
         self.appearance = appearance
         self.contentEncoding = contentEncoding
+    }
+}
+
+package struct SubmoduleDiffSummary: Hashable, Sendable {
+    package enum Change: String, Sendable {
+        case modified = "Modified", added = "New submodule", removed = "Removed submodule"
+        case same = "Same commit", forward = "Fast Forward", rewind = "Rewind"
+        case newer = "Newer commit time", older = "Older commit time", unknown = "Unknown"
+    }
+    package struct CommitInfo: Hashable, Sendable {
+        package let id: ObjectID
+        package let date: Date
+        package let body: String
+        package init(id: ObjectID, date: Date, body: String) { self.id = id; self.date = date; self.body = body }
+    }
+    package let path: String
+    package let from: ObjectID?
+    package let to: ObjectID?
+    package let fromInfo: CommitInfo?
+    package let toInfo: CommitInfo?
+    package let change: Change
+    package let added: Int?
+    package let removed: Int?
+    package let isDirty: Bool
+    package let isInitialized: Bool
+    package let status: String
+    package let differences: String
+    package let failure: String?
+
+    package init(path: String, from: ObjectID?, to: ObjectID?, fromInfo: CommitInfo? = nil, toInfo: CommitInfo? = nil,
+                 change: Change, added: Int? = nil, removed: Int? = nil, isDirty: Bool, isInitialized: Bool,
+                 status: String = "", differences: String = "", failure: String? = nil) {
+        self.path = path; self.from = from; self.to = to; self.fromInfo = fromInfo; self.toInfo = toInfo
+        self.change = change; self.added = added; self.removed = removed; self.isDirty = isDirty
+        self.isInitialized = isInitialized; self.status = status; self.differences = differences; self.failure = failure
     }
 }
 
@@ -786,6 +858,7 @@ package struct RepositoryFileContent: Hashable, Sendable {
     package let text: String
     package let data: Data
     package let encoding: RepositoryTextEncoding?
+    package var normalizesCopyLineEndings = false
 
     package init(
         path: String,
@@ -1017,11 +1090,11 @@ package enum RevisionGPGPresentationResolver {
 
 package struct CommitRelations: Equatable, Sendable {
     package let parentIDs: [ObjectID]
-    package let childIDs: [ObjectID]
+    package let childIDs: [RevisionID]
     package let branchNames: [String]
     package let tagNames: [String]
 
-    package init(parentIDs: [ObjectID], childIDs: [ObjectID], branchNames: [String], tagNames: [String]) {
+    package init(parentIDs: [ObjectID], childIDs: [RevisionID], branchNames: [String], tagNames: [String]) {
         self.parentIDs = parentIDs
         self.childIDs = childIDs
         self.branchNames = branchNames
@@ -1033,9 +1106,11 @@ package enum CommitRelationsResolver {
     package static func resolve(commit: Commit, history: [Commit]) -> CommitRelations {
         CommitRelations(
             parentIDs: commit.parentIDs,
-            childIDs: commit.objectID.map { objectID in
-                history.filter { $0.parentIDs.contains(objectID) }.compactMap(\.objectID)
-            } ?? [],
+            childIDs: history.filter { candidate in
+                candidate.kind == .workingDirectory
+                    ? commit.kind == .index
+                    : commit.objectID.map { candidate.parentIDs.contains($0) } ?? false
+            }.map(\.id),
             branchNames: commit.references.filter {
                 $0.kind == .currentBranch || $0.kind == .localBranch || $0.kind == .remoteBranch
             }.map(\.name),
@@ -1058,7 +1133,10 @@ package struct RepositoryIdentityState: Sendable {
     package let currentRepository: Repository
     package let headID: ObjectID?
 
-    package init(repositories: [Repository], currentRepository: Repository, headID: ObjectID?) {
+    package let userEmail: String?
+
+    package init(repositories: [Repository], currentRepository: Repository, headID: ObjectID?, userEmail: String? = nil) {
+        self.userEmail = userEmail
         self.repositories = repositories
         self.currentRepository = currentRepository
         self.headID = headID
@@ -1095,7 +1173,7 @@ package struct RepositoryNavigationState: Sendable {
     }
 }
 
-package struct RevisionChangeCounts: Sendable, Equatable {
+package struct RevisionChangeCounts: Sendable, Hashable {
     package var changed: [String] = []
     package var added: [String] = []
     package var deleted: [String] = []
@@ -1105,11 +1183,15 @@ package struct RevisionChangeCounts: Sendable, Equatable {
 }
 
 package struct RepositoryStatusSummary: Sendable {
+    package let visualState: RepositoryVisualState
+    package let statusEntryCount: Int
     package let workingDirectoryChangeCount: Int
     package let worktree: RevisionChangeCounts?
     package let index: RevisionChangeCounts?
 
-    package init(workingDirectoryChangeCount: Int, worktree: RevisionChangeCounts? = nil, index: RevisionChangeCounts? = nil) {
+    package init(workingDirectoryChangeCount: Int, worktree: RevisionChangeCounts? = nil, index: RevisionChangeCounts? = nil, visualState: RepositoryVisualState = .unknown, statusEntryCount: Int? = nil) {
+        self.visualState = visualState
+        self.statusEntryCount = statusEntryCount ?? workingDirectoryChangeCount
         self.workingDirectoryChangeCount = workingDirectoryChangeCount
         self.worktree = worktree
         self.index = index
@@ -1213,5 +1295,26 @@ package struct RepositoryRevisionDetails: Sendable {
         self.diffsByFile = diffsByFile
         self.repositoryFiles = repositoryFiles
         self.gpgInfo = gpgInfo
+    }
+}
+
+package enum FilePreview<Value: Sendable>: Sendable {
+    case ready(Value)
+    case deferred(length: Int, load: @Sendable () async throws -> Value)
+
+    package static var threshold: Int { 5 * 1024 * 1024 }
+
+    package static func prepare(length: Int, defersLargeContent: Bool = true, load: @escaping @Sendable () async throws -> Value) async throws -> Self {
+        try Task.checkCancellation()
+        if defersLargeContent && length > threshold { return .deferred(length: length, load: load) }
+        return .ready(try await load())
+    }
+
+    package func resolve() async throws -> Value {
+        try Task.checkCancellation()
+        switch self {
+        case .ready(let value): return value
+        case .deferred(_, let load): return try await load()
+        }
     }
 }

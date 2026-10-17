@@ -48,6 +48,36 @@ struct AvatarPreferences: Codable, Equatable, Sendable {
     var performsIO: Bool { provider != .none || fallback != .authorInitials }
 }
 
+enum AvatarContrastColor: Equatable {
+    case black, white
+
+    var color: NSColor { self == .black ? .black : .white }
+}
+
+enum AvatarContrast {
+    static func linearize(_ channel: UInt8) -> Double {
+        let normalized = Double(channel) / 255.0
+        return normalized <= 0.04045 ? normalized / 12.92 : pow((normalized + 0.055) / 1.055, 2.4)
+    }
+
+    static func luminance(red: UInt8, green: UInt8, blue: UInt8) -> Double {
+        0.2126 * linearize(red) + 0.7152 * linearize(green) + 0.0722 * linearize(blue)
+    }
+
+    static func foreground(red: UInt8, green: UInt8, blue: UInt8, threshold: Float) -> AvatarContrastColor {
+        let midpoint: Float = 0.185
+        let cutoff = threshold * (midpoint * 2.0)
+        return luminance(red: red, green: green, blue: blue) > Double(cutoff) ? .black : .white
+    }
+
+    static func foreground(background: NSColor, threshold: Double) -> NSColor {
+        let rgb = background.usingColorSpace(.sRGB) ?? .black
+        func byte(_ component: CGFloat) -> UInt8 { UInt8((min(1, max(0, component)) * 255).rounded()) }
+        return foreground(red: byte(rgb.redComponent), green: byte(rgb.greenComponent),
+                          blue: byte(rgb.blueComponent), threshold: Float(threshold)).color
+    }
+}
+
 enum AvatarURLs {
     static func encode(_ text: String) -> String {
 
@@ -332,11 +362,9 @@ final class AuthorAvatarView: NSView, NSMenuDelegate {
         let colors = preferences.initialsPalette.split(separator: ",").map { Self.color(String($0)) }
         let color = colors.isEmpty ? NSColor.black : colors[presentation.paletteIndex % colors.count]
         color.setFill(); bounds.fill()
-        let rgb = color.usingColorSpace(.sRGB) ?? .black
-        let luminance = 0.2126 * rgb.redComponent + 0.7152 * rgb.greenComponent + 0.0722 * rgb.blueComponent
         let attributes: [NSAttributedString.Key: Any] = [
             .font: AppSettingsStore.shared.applicationFont(size: min(32, bounds.height * 0.45)),
-            .foregroundColor: luminance > preferences.luminanceThreshold ? NSColor.black : NSColor.white
+            .foregroundColor: AvatarContrast.foreground(background: color, threshold: preferences.luminanceThreshold)
         ]
         let size = presentation.initials.size(withAttributes: attributes)
         presentation.initials.draw(at: NSPoint(x: bounds.midX - size.width / 2, y: bounds.midY - size.height / 2), withAttributes: attributes)
@@ -355,6 +383,7 @@ final class AuthorAvatarView: NSView, NSMenuDelegate {
         guard commitInfoMode else { return super.menu(for: event) }
         let menu = NSMenu(); menu.autoenablesItems = false
         let clear = menu.addItem(withTitle: "Clear image cache", action: #selector(clearCache), keyEquivalent: ""); clear.target = self
+        AppKitFactory.setMenuImage("CleanupRepo", for: clear)
         let preferences = AppSettingsStore.shared.avatarPreferences
         for (title, values, selected) in [("Avatar provider", AvatarProvider.allCases.map(\.rawValue), preferences.provider.rawValue),
                                         ("Fallback generated avatar style", AvatarFallback.allCases.map(\.rawValue), preferences.fallback.rawValue)] {

@@ -33,8 +33,25 @@ struct CommandLineRequest: Equatable {
         return url.path.hasPrefix(prefix) ? String(url.path.dropFirst(prefix.count)) : value
     }
 
+    static func launchArguments(_ supplied: [String]) -> [String] {
+        var result: [String] = []
+        var index = 0
+        while index < supplied.count {
+            let argument = supplied[index]
+            if argument.hasPrefix("-psn_") {
+                index += 1
+            } else if argument != "-h", argument.range(of: "^-[A-Za-z][A-Za-z0-9_.]*$", options: .regularExpression) != nil {
+                index += 2
+            } else {
+                result.append(argument)
+                index += 1
+            }
+        }
+        return result
+    }
+
     static func parse(_ supplied: [String], currentDirectory: URL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)) throws -> Self? {
-        let args = Array(supplied.dropFirst()).filter { !$0.hasPrefix("-psn_") }
+        let args = launchArguments(Array(supplied.dropFirst()))
         guard !args.isEmpty else { return nil }
         if args.contains("--dashboard") || args.contains("--mock") { return nil }
         var repository: URL?
@@ -146,6 +163,7 @@ enum CLIError: LocalizedError, Equatable {
 
 @MainActor
 enum CommandLineSession {
+    static let willExit = Notification.Name("GitExtensionsMac.commandLineSessionWillExit")
     static var exitStatus: Int32 = 0
     static var active = false
     static var present: (_ text: String, _ caption: String) -> Void = { text, caption in
@@ -164,55 +182,47 @@ enum CommandLineSession {
     }
     static let header = "Supported commandline arguments for\nGitExtensionsMac (the executable in GitExtensionsMac.app/Contents/MacOS):"
     static let usage = """
-    Run the app executable directly, or open -n -a GitExtensionsMac --args <command>.
-    Repository discovery uses the first file/path argument, then the current directory.
-    --repository <path> explicitly selects a repository. Existing --dashboard and
-    --select-revision <ObjectID|WORKTREE|INDEX> launch arguments remain supported.
-
     [path]
-    browse [path] [-filter=<revision filter>] [--pathFilter=<filepath>]
-           [-commit=<selectedSha>[,<firstSha>]]
+    browse [path] [-filter=] [--pathFilter=<filepath>] [-commit=<selectedSha>[,<firstSha>]]
     about
-    add / addfiles [filename ...]
-    apply / applypatch [filename]
-    blame filename [line]
-    blamehistory / filehistory filename [ObjectID [--filter-by-revision]]
+    add [filename]
+    addfiles [filename]
+    apply [filename]
+    applypatch [filename]
+    blame filename
+    blamehistory filename
     branch
-    checkout / checkoutbranch
+    checkout
+    checkoutbranch
     checkoutrevision
     cherry
     cleanup
-    clone [source]
+    clone [path]
     commit [--quiet] [--message commitmessage]
     difftool filename
+    filehistory filename
     fileeditor filename
     formatpatch
     gitignore
-    help
+    help (shows this dialog)
     init [path]
     merge [--branch name]
-    mergeconflicts / mergetool [--quiet]
-    openrepo [repository-path-file] [-filter=<revision filter>]
-    pull [--rebase] [--merge] [--fetch] [--autostash] [--quiet] [--remotebranch name]
+    mergeconflicts [--quiet]
+    mergetool [--quiet]
+    openrepo [path] [-filter=]
+    pull [--rebase] [--merge] [--fetch] [--quiet] [--remotebranch name]
     push [--quiet]
     rebase [--branch name]
     remotes
-    reset [filename ...]
-    revert filename ... (reset file changes, not commit revert)
-    searchfile (prints the chosen absolute filename)
+    reset
+    revert filename
+    searchfile
     settings
     stash
-    synchronize [pull options] [--quiet] [--message commitmessage]
+    synchronize [--rebase] [--merge] [--fetch] [--quiet]
     tag
+    uninstall
     viewdiff
     viewpatch [filename]
-    uninstall (remove this application's Git editor configuration)
-
-    Commands open the existing interactive workflows. --quiet skips an empty Commit
-    or conflict dialog; Pull/Push execute immediately. Closing/cancelling a workflow
-    returns its success/failure status. A missing file or repository shows a message
-    and returns -1; an unresolved -commit prints "No commit found matching" to stderr.
-    Unknown commands show this usage, as upstream. No embedded Git console or Windows
-    shell/registry integration is installed.
     """
 }

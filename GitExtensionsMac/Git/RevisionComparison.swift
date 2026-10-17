@@ -84,3 +84,29 @@ extension GitRepositoryModule: RepositoryRevisionComparingDataSource {
         return a == 0 && b == 0 ? "=" : "(+\(a)-\(b))"
     }
 }
+
+package struct RebaseCommitChoice: Sendable {
+    package let preselect: RevisionID?
+    package let mergeBase: ObjectID?
+    package func options(_ original: RevisionGridFilter) -> RevisionGridFilter {
+        var value = original
+        value.showCurrentBranchOnly = true
+        value.byBranchFilter = false
+        value.showReflogReferences = false
+        value.lastRevisionToDisplay = mergeBase?.string
+        return value
+    }
+}
+
+extension RepositoryRevisionComparingDataSource {
+    package func rebaseCommitChoice(onto: String, from: String) async throws -> RebaseCommitChoice {
+        let preselect = try? await comparisonTarget(from.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "HEAD~" : from)
+        let head = try? await comparisonTarget("HEAD")
+        let target = try? await comparisonTarget(onto)
+        var boundary: ObjectID?
+        if let head, let target {
+            boundary = head.id == target.id ? head.objectID : try? await comparisonMergeBase(first: target.id, second: head.id, headID: head.objectID)
+        }
+        return .init(preselect: preselect?.id, mergeBase: boundary)
+    }
+}

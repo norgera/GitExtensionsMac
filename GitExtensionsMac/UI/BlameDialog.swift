@@ -18,8 +18,7 @@ final class BlameWindowController: NSWindowController, NSWindowDelegate {
         super.init(window: nil)
         infoController.source = infoSource
         split.addSplitViewItem(NSSplitViewItem(viewController: infoController))
-        split.splitViewItems[0].minimumThickness = 100
-        split.splitViewItems[0].preferredThicknessFraction = 0.3
+        split.splitViewItems[0].minimumThickness = 25
         split.addSplitViewItem(NSSplitViewItem(viewController: blameController))
         let window = NSWindow(contentViewController: split)
         window.title = "Blame (\(file))"
@@ -28,7 +27,7 @@ final class BlameWindowController: NSWindowController, NSWindowDelegate {
         window.minSize = NSSize(width: 550, height: 400)
         window.setFrameAutosaveName("GitExtensionsMac.Blame")
         window.contentView?.layoutSubtreeIfNeeded()
-        split.setRetainedPosition(180)
+        split.setRetainedPosition(160)
         window.isReleasedWhenClosed = false
         self.window = window
         window.delegate = self

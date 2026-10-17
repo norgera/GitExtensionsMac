@@ -44,16 +44,30 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
     private var graphReloadPending = false
     private var commits: [Commit] = []
     private var repositoryStatus: RepositoryStatusSummary?
-    private var highlightedAuthorEmail: String?
+    private var authorHighlighting = AuthorRevisionHighlighting()
+    private var currentUserEmail: String?
+    private var authorRepositoryID: String?
+
+    func applyAuthorIdentity(_ identity: RepositoryIdentityState) {
+        let changedRepository = authorRepositoryID != identity.currentRepository.id
+        if changedRepository { authorHighlighting = AuthorRevisionHighlighting() }
+        authorRepositoryID = identity.currentRepository.id
+        currentUserEmail = identity.userEmail
+        authorHighlighting.updateCurrentUser(currentUserEmail, selected: changedRepository ? [] : selectedCommits)
+        if isViewLoaded { tableView.reloadData() }
+    }
     private var graphRows: [RevisionGraphLayout.Row] = []
 
     private var sessionFilter = RevisionGridFilter()
+
+    func focusRevisionList() { view.window?.makeFirstResponder(tableView) }
 
     var onRefreshRequested: (() -> Void)?
 
     var onFilterChanged: ((RevisionGridFilter) -> Void)?
     private var showsTagReferences = AppSettingsStore.shared.tagPreferences.showTagsInRevisionGrid
     private var visibleRowsObserver: NSObjectProtocol?
+    private var viewportFrameObserver: NSObjectProtocol?
     private var quickSearchString = ""
     private var lastQuickSearchString = ""
     private var quickSearchTimer: Timer?
@@ -94,6 +108,9 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
         if let visibleRowsObserver {
             NotificationCenter.default.removeObserver(visibleRowsObserver)
         }
+        if let viewportFrameObserver {
+            NotificationCenter.default.removeObserver(viewportFrameObserver)
+        }
     }
 
     override func loadView() {
@@ -105,6 +122,7 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
         scrollView.drawsBackground = true
         scrollView.backgroundColor = .controlBackgroundColor
         scrollView.contentView.postsBoundsChangedNotifications = true
+        scrollView.contentView.postsFrameChangedNotifications = true
 
         tableView.headerView = nil
         tableView.rowHeight = BrowserMetrics.revisionRowHeight
@@ -142,24 +160,26 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
             pendingSelectionID = nil
             userSelectedDuringLoad = true
         }
-        tableView.registerForDraggedTypes([.fileURL])
+        tableView.registerForDraggedTypes([.fileURL, .string])
 
         addColumn("Graph", width: 54, min: 22, max: 646, resizable: false)
         addColumn("Message", width: 500, min: 25, max: 100_000, resizable: true)
 
-        addColumn("Notes", width: 50, min: 25, max: 1_600, resizable: true)
+        addColumn("Notes", width: 50, min: 25, max: 100_000, resizable: true)
 
         addColumn("Avatar", width: BrowserMetrics.revisionRowHeight, min: 16, max: 64, resizable: false)
-        addColumn("Author Name", width: 130, min: 25, max: 320, resizable: true)
+        addColumn("Author Name", width: 130, min: 25, max: 100_000, resizable: true)
 
         let dateWidth = AppSettingsStore.shared.revisionGridPreferences.relativeDate ? 130
             : ceil((RevisionGridPresentation.absoluteDate(Date()) as NSString).size(withAttributes: [.font: AppSettingsStore.shared.applicationFont(size: 11)]).width) + 8
-        addColumn("Date", width: dateWidth, min: 25, max: 220, resizable: true)
-        addColumn("Commit ID", width: 60, min: 32, max: 330, resizable: true)
+        addColumn("Date", width: dateWidth, min: 25, max: 100_000, resizable: true)
+        addColumn("Commit ID", width: 60, min: 32, max: Self.commitIDMaximumWidth(), resizable: true)
         applyColumnSettings()
-        addColumn(Self.buildColumn, width: 150, min: 16, max: 800, resizable: true)
+        addColumn(Self.buildColumn, width: 150, min: 16, max: 100_000, resizable: true)
         applyBuildStatusColumnSettings()
         tableView.action = #selector(gridClicked)
+        tableView.columnResizeChanged = { [weak self] in self?.fillLastResizableColumn() }
+        tableView.columnResizeEnded = { [weak self] in self?.fitMessageColumn() }
 
         let menu = NSMenu()
         menu.delegate = self
@@ -182,11 +202,17 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
         ])
         view = scrollView
 
+        viewportFrameObserver = NotificationCenter.default.addObserver(
+            forName: NSView.frameDidChangeNotification,
+            object: scrollView.contentView,
+            queue: .main
+        ) { [weak self] _ in self?.fitMessageColumn() }
         visibleRowsObserver = NotificationCenter.default.addObserver(
             forName: NSView.boundsDidChangeNotification,
             object: scrollView.contentView,
             queue: .main
         ) { [weak self] _ in
+            self?.fitMessageColumn()
             self?.scheduleGraphColumnWidthRefresh()
             self?.updateHoverAfterScroll()
         }
@@ -241,6 +267,8 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
                                       ("Commit ID", preferences.showObjectIDColumn)] {
             tableView.tableColumn(withIdentifier: .init(identifier))?.isHidden = !visible
         }
+        tableView.tableColumn(withIdentifier: .init("Commit ID"))?.maxWidth = Self.commitIDMaximumWidth()
+        tableView.window?.invalidateCursorRects(for: tableView)
         fitMessageColumn()
         tableView.reloadData()
     }
@@ -393,6 +421,7 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
         options.filter = currentFilter
         options.sortOrder = store.revisionGridRuntime.sortOrder
         options.showStashes = preferences.showStashes
+        options.maxStashesWithUntrackedFiles = preferences.maxStashesWithUntrackedFiles
         options.showGitNotes = preferences.showGitNotes
         options.showSessionRefs = preferences.showSessionRefs
         options.showArtificialCommits = preferences.showArtificialCommits
@@ -669,7 +698,7 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
     private func rowBackground(_ row: Int) -> NSColor {
         let preferences = AppSettingsStore.shared.colorPreferences
         if commits.indices.contains(row), !commits[row].isArtificial, preferences.highlightAuthored,
-           let email = highlightedAuthorEmail, !email.isEmpty, commits[row].authorEmail.caseInsensitiveCompare(email) == .orderedSame {
+           authorHighlighting.isHighlighted(commits[row]) {
             return ApplicationColors.color("AuthoredHighlight", fallback: NSColor.systemBlue.withAlphaComponent(0.08))
         }
         let base = ApplicationColors.color("PanelBackground", fallback: .controlBackgroundColor)
@@ -709,7 +738,9 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
                            body: RevisionGridPresentation.bodySuffix(commit, showBody: preferences.showCommitBody,
                                                                      notesInSeparateColumn: preferences.showNotesColumn),
                            toolTip: RevisionGridPresentation.messageToolTip(commit, notesInSeparateColumn: preferences.showNotesColumn,
-                                                                            aheadBehind: { context.aheadBehind($0) }),
+                                                                            aheadBehind: { context.aheadBehind($0) },
+                                                                            artificialCounts: commit.kind == .index ? repositoryStatus?.index : repositoryStatus?.worktree,
+                                                                            showArtificialCounts: AppSettingsStore.shared.browseDisplayPreferences.showArtificialRevisionCounts),
                            labels: labels)
             cell.onLabelHover = { [weak self] cell, hit in self?.labelHoverChanged(cell, hit: hit) }
             cell.changeCounts = commit.kind == .index ? repositoryStatus?.index : repositoryStatus?.worktree
@@ -726,7 +757,7 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
             return cell
         case "Author Name":
             let highlighted = !commit.isArtificial && AppSettingsStore.shared.colorPreferences.highlightAuthored
-                && highlightedAuthorEmail.map { !$0.isEmpty && commit.authorEmail.caseInsensitiveCompare($0) == .orderedSame } == true
+                && authorHighlighting.isHighlighted(commit)
             let cell = textCell(identifier, value: commit.isArtificial ? "" : commit.authorName,
                                 font: AppSettingsStore.shared.applicationFont(size: 11, weight: highlighted ? .bold : .regular), isRelative: isRelative)
             cell.toolTip = RevisionGridPresentation.authorToolTip(commit)
@@ -784,17 +815,37 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
     }
 
 
+    static func commitIDMaximumWidth() -> CGFloat {
+        let font = AppSettingsStore.shared.fontPreferences.font(.monospace, fallback: .monospacedSystemFont(ofSize: 10.5, weight: .regular))
+        return ceil((String(repeating: "1", count: 40) as NSString).size(withAttributes: [.font: font]).width) + 8
+    }
+
+    func fillLastResizableColumn() {
+        guard let column = tableView.lastVisibleResizableColumn else { return }
+        fill(column)
+    }
+
     func fitMessageColumn() {
-        guard let message = tableView.tableColumn(withIdentifier: .init("Message")),
-              let clipWidth = tableView.enclosingScrollView?.contentView.bounds.width, clipWidth > 0 else { return }
+        guard !tableView.isTrackingColumnResize, let message = tableView.tableColumn(withIdentifier: .init("Message")) else { return }
+        fill(message)
+    }
+
+    private func fill(_ message: NSTableColumn) {
+        guard let clipWidth = tableView.enclosingScrollView?.contentView.bounds.width, clipWidth > 0 else { return }
         let visible = tableView.tableColumns.filter { !$0.isHidden }
         let others = visible.filter { $0 !== message }.reduce(0) { $0 + $1.width }
-        let width = max(message.minWidth, floor(clipWidth - others - tableView.intercellSpacing.width * CGFloat(visible.count)))
+        let rects = tableView.tableColumns.enumerated().filter { !$0.element.isHidden }.map {
+            (column: $0.element, rect: tableView.rect(ofColumn: $0.offset))
+        }
+        let inset = max(0, rects.first?.rect.minX ?? 0)
+        let padding = rects.reduce(0) { $0 + max(0, $1.rect.width - $1.column.width) }
+        let width = max(message.minWidth, floor(clipWidth - others - inset * 2 - padding - tableView.intercellSpacing.width * CGFloat(visible.count)))
         if abs(message.width - width) >= 0.5 { message.width = width }
     }
     var messageColumnWidth: CGFloat { tableView.tableColumn(withIdentifier: .init("Message"))?.width ?? 0 }
 
     func tableViewColumnDidResize(_ notification: Notification) {
+        tableView.window?.invalidateCursorRects(for: tableView)
         if let column = notification.userInfo?["NSTableColumn"] as? NSTableColumn, column.identifier.rawValue != "Message" {
             fitMessageColumn()
         }
@@ -821,9 +872,7 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
             selectionOrder += selected.filter { !selectionOrder.contains($0) && $0 != latest } + [latest]
         }
         selectionChangedForNavigation()
-        if tableView.selectedRowIndexes.count <= 1 {
-            highlightedAuthorEmail = commits.indices.contains(tableView.selectedRow) ? commits[tableView.selectedRow].authorEmail : nil
-        }
+        _ = authorHighlighting.processSelection(selectedCommits, currentUserEmail: currentUserEmail)
         tableView.enumerateAvailableRowViews { rowView, row in
             (rowView as? GitExtensionsSelectionRowView)?.repositoryBackgroundColor = self.rowBackground(row)
             rowView.needsDisplay = true
@@ -1053,6 +1102,7 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
 
     var onDeleteBranch: ((String) -> Void)?
 
+    var onRepositoryDrop: ((NSPasteboard, Bool) -> Bool)? { didSet { tableView.repositoryDrop = onRepositoryDrop } }
     var onApplyPatch: ((URL) -> Void)?
 
     var onShowAdvancedFilter: (() -> Void)?
@@ -1199,11 +1249,7 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
             if let path = script.iconFilePath { item.image = NSImage(contentsOfFile: path) }
             if item.image == nil, let icon = script.icon { item.image = AppKitFactory.resourceImage(icon) }
         }
-        for (id, icon) in [("revision.copy", "CopyToClipboard"), ("revision.copy.hash", "CommitId"), ("revision.copy.message", "Message"),
-                           ("revision.copy.author", "Author"), ("revision.copy.date", "Date"), ("revision.copy.authorDate", "Date"),
-                           ("revision.copy.commitDate", "Date")] {
-            menuItem(withIdentifier: id, in: menu)?.image = AppKitFactory.resourceImage(icon)
-        }
+        AppKitFactory.applyRevisionCopyImages(to: menu)
         for id in ["revision.commit.fixup", "revision.commit.squash", "revision.commit.amend", "revision.compare.difftool", "revision.compare.base", "revision.compare.setBase", "revision.compare.worktree"] {
             guard let item = menuItem(withIdentifier: id, in: menu), let chord = ApplicationHotkeys.shared.chord(for: id),
                   let key = chord.key.first else { continue }
@@ -1307,19 +1353,20 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
     }
 
 
+    var quickSelectorAnchor: NSPoint? {
+        guard let window = view.window else { return nil }
+        let row = tableView.rect(ofRow: max(0, tableView.selectedRow))
+        return window.convertPoint(toScreen: tableView.convert(NSPoint(x: tableView.rect(ofColumn: 0).maxX, y: row.maxY), to: nil))
+    }
+
     private func chooseRef(_ refs: [RevisionReference], action: String, perform: @escaping (RevisionReference) -> Void) {
         guard !refs.isEmpty else { return }
         if refs.count == 1 { perform(refs[0]); return }
-        let menu = NSMenu(title: action)
-        let header = menu.addItem(withTitle: action, action: nil, keyEquivalent: "")
-        header.isEnabled = false
-        for reference in refs {
-            let item = ClosureMenuItem(title: reference.name) { perform(reference) }
-            item.image = AppKitFactory.resourceImage(reference.kind == .tag ? "Tag" : reference.kind == .remoteBranch ? "BranchRemote" : "BranchLocal")
-            menu.addItem(item)
-        }
-        let rect = tableView.rect(ofRow: max(0, tableView.selectedRow))
-        menu.popUp(positioning: nil, at: NSPoint(x: tableView.rect(ofColumn: 0).maxX, y: rect.maxY), in: tableView)
+        let options = ["sLocalBranch": refs.filter { $0.kind == .localBranch || $0.kind == .currentBranch }.map(\.name),
+                       "sTag": refs.filter { $0.kind == .tag }.map(\.name)]
+        let chooser = ScriptChoiceWindow(presentation: ScriptChoicePresentation(option: refs.allSatisfy { $0.kind == .tag } ? "sTag" : "sBranch",
+                                                                                values: refs.map(\.name), options: options), action: action)
+        if let index = chooser.run(owner: view.window, anchor: quickSelectorAnchor), chooser.accepted { perform(refs[index]) }
     }
 
 
@@ -1522,7 +1569,7 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
 
 
     func dropPatchFiles(_ urls: [URL]) -> Bool {
-        guard !urls.isEmpty else { return false }
+        guard urls.contains(where: { $0.pathExtension.lowercased() == "patch" }) else { return false }
         view.window?.makeKeyAndOrderFront(nil)
         if urls.count > 10 {
             RevisionGridMessages.error("For you own protection dropping more than 10 patch files at once is blocked!")
@@ -1786,7 +1833,7 @@ private final class ClosureMenuItem: NSMenuItem {
     @objc private func invoke() { handler() }
 }
 
-private final class RevisionTableView: NSTableView {
+final class RevisionTableView: NSTableView {
     var copySelectedRows: (() -> Void)?
     var handleQuickSearchKey: ((NSEvent) -> Bool)?
     var handleNavigationKey: ((String) -> Bool)?
@@ -1816,9 +1863,64 @@ private final class RevisionTableView: NSTableView {
     }
     var userInteracted: (() -> Void)?
 
+    var columnResizeChanged: (() -> Void)?
+    var columnResizeEnded: (() -> Void)?
+    private(set) var isTrackingColumnResize = false
+    static let columnSizingHotZone: CGFloat = 3
+
+    var lastVisibleResizableColumn: NSTableColumn? {
+        tableColumns.last { !$0.isHidden && $0.resizingMask.contains(.userResizingMask) }
+    }
+
+    func columnResizeIndex(at point: NSPoint) -> Int? {
+        let last = lastVisibleResizableColumn
+        return tableColumns.indices.first { index in
+            let column = tableColumns[index]
+            guard !column.isHidden, column.resizingMask.contains(.userResizingMask), column !== last else { return false }
+            return abs(point.x - rect(ofColumn: index).maxX) <= Self.columnSizingHotZone
+        }
+    }
+
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        let last = lastVisibleResizableColumn
+        for (index, column) in tableColumns.enumerated()
+        where !column.isHidden && column.resizingMask.contains(.userResizingMask) && column !== last {
+            let edge = rect(ofColumn: index).maxX
+            addCursorRect(NSRect(x: edge - Self.columnSizingHotZone, y: bounds.minY, width: Self.columnSizingHotZone * 2, height: bounds.height), cursor: .resizeLeftRight)
+        }
+    }
+
+    func trackColumnResize(_ index: Int, from start: NSPoint, events: (_ handler: (NSEvent) -> Bool) -> Void) {
+        let column = tableColumns[index]
+        let initial = column.width
+        isTrackingColumnResize = true
+        defer {
+            isTrackingColumnResize = false
+            columnResizeEnded?()
+            window?.invalidateCursorRects(for: self)
+        }
+        events { event in
+            let x = convert(event.locationInWindow, from: nil).x
+            column.width = initial + x - start.x
+            columnResizeChanged?()
+            return event.type != .leftMouseUp
+        }
+    }
+
     override func mouseDown(with event: NSEvent) {
 
         userInteracted?()
+
+        let point = convert(event.locationInWindow, from: nil)
+        if event.clickCount == 1, let index = columnResizeIndex(at: point) {
+            trackColumnResize(index, from: point) { handler in
+                window?.trackEvents(matching: [.leftMouseDragged, .leftMouseUp], timeout: .infinity, mode: .eventTracking) { event, stop in
+                    guard let event, handler(event) else { stop.pointee = true; return }
+                }
+            }
+            return
+        }
 
         if event.clickCount == 1, event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.command),
            handleAddRelatedRefClick?(event) == true {
@@ -1844,17 +1946,15 @@ private final class RevisionTableView: NSTableView {
         return urls
     }
 
+    var repositoryDrop: ((NSPasteboard, Bool) -> Bool)?
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
-        guard let urls = patchFiles(sender) else { return super.draggingEntered(sender) }
-        return urls.allSatisfy { $0.pathExtension.lowercased() == "patch" } ? .copy : []
+        if let urls = patchFiles(sender), urls.allSatisfy({ $0.pathExtension.lowercased() == "patch" }) { return .copy }
+        return repositoryDrop?(sender.draggingPasteboard, false) == true ? .move : []
     }
-    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
-        guard let urls = patchFiles(sender) else { return super.draggingUpdated(sender) }
-        return urls.allSatisfy { $0.pathExtension.lowercased() == "patch" } ? .copy : []
-    }
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation { draggingEntered(sender) }
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        guard let urls = patchFiles(sender) else { return super.performDragOperation(sender) }
-        return dropPatchFiles?(urls) ?? false
+        if let urls = patchFiles(sender), urls.allSatisfy({ $0.pathExtension.lowercased() == "patch" }) { return dropPatchFiles?(urls) ?? false }
+        return repositoryDrop?(sender.draggingPasteboard, true) ?? false
     }
 
     override func keyDown(with event: NSEvent) {
@@ -2317,7 +2417,7 @@ final class RevisionMessageCellView: NSTableCellView {
         }
 
         var subjectX = badges.last.map { $0.frame.maxX + 5 } ?? 6
-        guard subjectX < bounds.maxX else { return }
+        guard !commit.isAutostash, subjectX < bounds.maxX else { return }
         if RevisionGridPresentation.hasAutosquashMarker(commit.subject),
            let marker = AppKitFactory.resourceImage("FixupAndSquashMessageMarker", accessibilityDescription: "Autosquash") {
             marker.draw(in: NSRect(x: subjectX, y: bounds.midY - 8, width: 16, height: 16), from: .zero, operation: .sourceOver,
@@ -2503,7 +2603,10 @@ final class RevisionMessageCellView: NSTableCellView {
                              shape: .rect, offset: offset, dashed: true))
         }
 
-        if let stash = commit.references.first(where: { $0.kind == .stash }) {
+        if commit.isAutostash {
+            let label = RevisionReference(id: commit.id.description, name: commit.subject, kind: .stash)
+            append(makeBadge(hit: RevisionLabelHit(reference: label, isStash: true), name: commit.subject, kind: .stash, shape: .rect, offset: offset))
+        } else if let stash = commit.references.first(where: { $0.kind == .stash }) {
             append(makeBadge(hit: RevisionLabelHit(reference: stash, isStash: true), name: stash.name, kind: .stash, shape: .rect, offset: offset))
         }
         return result
@@ -2528,7 +2631,7 @@ final class RevisionMessageCellView: NSTableCellView {
     private func makeBadge(hit: RevisionLabelHit?, name: String, kind: RevisionReference.Kind, shape: BadgeShape, offset: CGFloat,
                            remote: String? = nil, color: NSColor? = nil, arrow: Arrow? = nil, dashed: Bool = false, bold: Bool? = nil) -> Badge {
         let isHEAD = kind == .head || kind == .currentBranch
-        let arrow = arrow ?? (isHEAD ? .filled : .none)
+        let arrow = arrow ?? (isHEAD ? .filled : hit?.reference.isSelectedHeadMergeSource == true ? .outline : .none)
         let font = AppSettingsStore.shared.applicationFont(size: 11, weight: (bold ?? isHEAD) ? .bold : .regular)
         let textSize = (name as NSString).size(withAttributes: [.font: font])
         let backgroundHeight = ceil(textSize.height) + 4 - 1

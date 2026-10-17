@@ -170,20 +170,26 @@ final class ApplicationHostViewController: NSViewController {
         guard let owner = view.window else { return }
         do {
             var location = try request.repositoryLocation()
+            var applicationEditorSource: (any RepositoryFileEditingDataSource)?
             let historyCommand = [.filehistory, .blamehistory].contains(request.verb)
             let git = GitProcess(executableURL: URL(fileURLWithPath: store.preferences.gitExecutablePath))
             if historyCommand, let candidate = location, let file = request.arguments.first,
                request.path(file).resolvingSymlinksInPath() == candidate.resolvingSymlinksInPath(),
                let parent = try await CommandLineRepository.superproject(of: candidate, git: git) { location = parent }
             if location == nil && request.opensDashboardWithoutRepository { return }
-            if !request.needsRepository, let candidate = location,
-               (try? await GitRepositoryModule(repositoryURL: candidate, git: git).loadRepositoryState()) == nil {
-                location = nil
+            if !request.needsRepository, let candidate = location {
+                let probeModule = GitRepositoryModule(repositoryURL: candidate, git: git)
+                do {
+                    _ = try await RepositoryOwnershipRecovery.load(probeModule, owner: owner)
+                    if request.verb == .fileeditor { applicationEditorSource = probeModule }
+                }
+                catch let failure as DubiousRepositoryOwnership { throw failure }
+                catch { location = nil }
             }
-            if request.needsRepository || [.fileeditor, .settings].contains(request.verb) && location != nil {
+            if request.needsRepository || request.verb == .settings && location != nil {
                 guard let location else { throw CLIError.notValidRepository }
                 let module = GitRepositoryModule(repositoryURL: location, git: git)
-                let state = try await module.loadRepositoryState()
+                let state = try await RepositoryOwnershipRecovery.load(module, owner: (isViewLoaded ? view.window : nil))
                 var selection = request.selection
                 var first: RevisionID?
                 if let argument = request.commitArgument {
@@ -226,7 +232,7 @@ final class ApplicationHostViewController: NSViewController {
                 defer { presentation.finish() }
                 presentation.successfulRead = request.succeedsOnClose
                 presentation.hidesOwner = CommandLineSession.active
-                switch try await GitUICommands.runApplicationCommandLine(request, owner: owner, openRepository: { [weak presentation] url in
+                switch try await GitUICommands.runApplicationCommandLine(request, owner: owner, fileEditingSource: applicationEditorSource, openRepository: { [weak presentation] url in
                     presentation?.successfulRead = true
                     GitUICommands.launchBrowse(url)
                 }) {
@@ -363,7 +369,7 @@ final class ApplicationHostViewController: NSViewController {
         openTask = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
-                _ = try await repositoryModule.loadRepositoryState()
+                _ = try await RepositoryOwnershipRecovery.load(repositoryModule, owner: (isViewLoaded ? view.window : nil))
                 guard !Task.isCancelled else { return }
                 store.recordOpenedRepository(url)
                 showBrowser(repositoryModule: repositoryModule, selection: selection, fileHistory: fileHistory)
@@ -434,7 +440,7 @@ final class ApplicationHostViewController: NSViewController {
             source: repositoryCreator(),
             owner: window,
             initialDirectory: context.map {
-                URL(fileURLWithPath: $0.repository.path, isDirectory: true).deletingLastPathComponent()
+                URL(fileURLWithPath: $0.repository.path, isDirectory: true)
             }
         ) { [weak self] result in
             self?.openRepository(result.repositoryURL)

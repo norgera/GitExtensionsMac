@@ -24,6 +24,7 @@ enum TagDialogs {
         initial: CreateTagDialogValue,
         revisions: [Commit],
         remote: String?,
+        source: (any RepositoryRevisionComparingDataSource)? = nil,
         window: NSWindow
     ) async -> CreateTagDialogValue? {
         let alert = NSAlert()
@@ -36,12 +37,12 @@ enum TagDialogs {
         name.placeholderString = "Tag name"
         name.widthAnchor.constraint(equalToConstant: 330).isActive = true
 
-        let target = NSComboBox()
-        target.isEditable = true
-        target.completes = true
-        target.addItems(withObjectValues: revisionTargetValues(revisions))
-        target.stringValue = initial.target
-        target.placeholderString = "Commit ID or revision"
+        let target = CommitPickerSmallControl(source: source, revisions: revisions, selected: revisions.first { $0.objectID?.string == initial.target })
+        target.errorOwner = window
+        if target.selectedCommit == nil, !initial.target.isEmpty {
+            target.field.stringValue = initial.target
+            await target.validateInput()
+        }
         target.widthAnchor.constraint(equalToConstant: 330).isActive = true
 
         let operation = NSPopUpButton()
@@ -72,8 +73,6 @@ enum TagDialogs {
         messageScroll.widthAnchor.constraint(equalToConstant: 330).isActive = true
         messageScroll.heightAnchor.constraint(equalToConstant: 92).isActive = true
 
-        let force = NSButton(checkboxWithTitle: "Force", target: nil, action: nil)
-        force.state = initial.force ? .on : .off
         let push = NSButton(
             checkboxWithTitle: remote.map { "Push tag to ‘\($0)’" } ?? "Push tag",
             target: nil,
@@ -88,10 +87,10 @@ enum TagDialogs {
         stack.spacing = 7
         stack.addArrangedSubview(row("Tag name:", name))
         stack.addArrangedSubview(row("Tag revision:", target))
-        stack.addArrangedSubview(force)
         stack.addArrangedSubview(push)
         stack.addArrangedSubview(row("Type:", operation))
-        stack.addArrangedSubview(row("Specific Key ID:", signingKey))
+        let keyRow = row("Specific Key ID:", signingKey)
+        stack.addArrangedSubview(keyRow)
         stack.addArrangedSubview(label("Message:"))
         stack.addArrangedSubview(messageScroll)
 
@@ -101,21 +100,24 @@ enum TagDialogs {
             operation: operation,
             signingKey: signingKey,
             message: message,
-            messageScroll: messageScroll
+            messageScroll: messageScroll,
+            signingKeyCaption: keyRow.subviews.compactMap { $0 as? NSTextField }.first { $0 !== signingKey }
         )
         coordinator.update()
         alert.window.initialFirstResponder = name
 
         let response = await begin(alert, window: window)
         withExtendedLifetime(coordinator) {}
-        guard response == .alertFirstButtonReturn else { return nil }
+        guard response == .alertFirstButtonReturn else { target.cancel(); return nil }
+        await target.validateInput()
+        target.cancel()
         return CreateTagDialogValue(
             name: name.stringValue,
-            target: target.stringValue,
+            target: target.selectedCommit?.objectID?.string ?? "",
             operation: RepositoryTagOperation(rawValue: operation.indexOfSelectedItem) ?? .lightweight,
             message: message.string,
             signingKey: signingKey.stringValue,
-            force: force.state == .on,
+            force: false,
             pushToRemote: push.state == .on
         )
     }
@@ -141,17 +143,18 @@ enum TagDialogs {
         tag.widthAnchor.constraint(equalToConstant: 295).isActive = true
 
         let deleteRemote = NSButton(
-            checkboxWithTitle: "Delete tag also from the following remote:",
+            checkboxWithTitle: "Delete tag also from the following remote(s):",
             target: nil,
             action: nil
         )
         deleteRemote.state = initial.deleteFromRemote ? .on : .off
-        deleteRemote.isEnabled = !remotes.isEmpty
-        let remote = NSPopUpButton()
-        remote.addItems(withTitles: remotes.map(\.name))
-        remote.selectItem(withTitle: initial.remote)
-        if remote.indexOfSelectedItem < 0 { remote.selectItem(at: 0) }
-        remote.widthAnchor.constraint(equalToConstant: 220).isActive = true
+        let remote = NSComboBox()
+        remote.isEditable = true
+        remote.completes = true
+        remote.addItems(withObjectValues: remotes.map(\.name))
+        remote.stringValue = initial.remote
+        remote.setAccessibilityIdentifier("DeleteTag.Remote")
+        remote.widthAnchor.constraint(equalToConstant: 295).isActive = true
         let coordinator = DeleteTagRemoteControlCoordinator(toggle: deleteRemote, remote: remote)
         coordinator.update()
 
@@ -159,9 +162,19 @@ enum TagDialogs {
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 9
-        stack.addArrangedSubview(row("Tag:", tag))
+        stack.addArrangedSubview(row("Select tag", tag))
+        stack.addArrangedSubview(NSTextField(labelWithString: "This will delete the selected tag from the (local) repository."))
         stack.addArrangedSubview(deleteRemote)
-        stack.addArrangedSubview(row("Remote:", remote))
+        stack.addArrangedSubview(remote)
+        let help = DeleteTagHelpLink(title: "Help", target: nil, action: nil)
+        help.isBordered = false
+        help.contentTintColor = .linkColor
+        help.setAccessibilityIdentifier("DeleteTag.Help")
+        help.target = help
+        help.action = #selector(DeleteTagHelpLink.openManual)
+        let helpRow = NSStackView(views: [help, NSTextField(labelWithString: "(includes information about deleting tags which are already pushed)")])
+        helpRow.spacing = 6
+        stack.addArrangedSubview(helpRow)
         alert.accessoryView = enclosing(stack, minimumWidth: 420)
         alert.window.initialFirstResponder = tag
 
@@ -171,7 +184,7 @@ enum TagDialogs {
         return DeleteTagDialogValue(
             name: tag.stringValue,
             deleteFromRemote: deleteRemote.state == .on,
-            remote: remote.titleOfSelectedItem ?? ""
+            remote: remote.stringValue.trimmingCharacters(in: .whitespaces)
         )
     }
 
@@ -241,12 +254,14 @@ private final class TagOperationControlCoordinator: NSObject {
     private let signingKey: NSTextField
     private let message: NSTextView
     private let messageScroll: NSScrollView
+    private let signingKeyCaption: NSTextField?
 
-    init(operation: NSPopUpButton, signingKey: NSTextField, message: NSTextView, messageScroll: NSScrollView) {
+    init(operation: NSPopUpButton, signingKey: NSTextField, message: NSTextView, messageScroll: NSScrollView, signingKeyCaption: NSTextField?) {
         self.operation = operation
         self.signingKey = signingKey
         self.message = message
         self.messageScroll = messageScroll
+        self.signingKeyCaption = signingKeyCaption
         super.init()
         operation.target = self
         operation.action = #selector(update)
@@ -260,15 +275,16 @@ private final class TagOperationControlCoordinator: NSObject {
         messageScroll.borderType = canMessage ? .bezelBorder : .noBorder
         let specific = selected == .signWithSpecificKey
         signingKey.isEnabled = specific
+        signingKeyCaption?.textColor = specific ? .labelColor : .disabledControlTextColor
     }
 }
 
 @MainActor
 private final class DeleteTagRemoteControlCoordinator: NSObject {
     private let toggle: NSButton
-    private let remote: NSPopUpButton
+    private let remote: NSComboBox
 
-    init(toggle: NSButton, remote: NSPopUpButton) {
+    init(toggle: NSButton, remote: NSComboBox) {
         self.toggle = toggle
         self.remote = remote
         super.init()
@@ -277,7 +293,7 @@ private final class DeleteTagRemoteControlCoordinator: NSObject {
     }
 
     @objc func update() {
-        remote.isEnabled = toggle.state == .on && remote.numberOfItems > 0
+        remote.isEnabled = toggle.state == .on
     }
 }
 
@@ -309,4 +325,9 @@ private final class TagSigningKeyFormatter: Formatter {
     ) -> Bool {
         partialString.count <= maximumLength
     }
+}
+
+final class DeleteTagHelpLink: NSButton {
+    static let manualURL = URL(string: ApplicationShellLinks.documentationURL.absoluteString + "tag#delete-tag")!
+    @objc func openManual() { NSWorkspace.shared.open(Self.manualURL) }
 }

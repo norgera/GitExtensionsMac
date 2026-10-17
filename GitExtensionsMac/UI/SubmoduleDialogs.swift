@@ -20,21 +20,23 @@ enum SubmoduleDialogs {
         await withCheckedContinuation { continuation in
             let controller = SubmoduleConflictViewController(source: source, path: path) { continuation.resume(returning: $0) }
             controller.scriptHooks = scriptHooks
-            let panel = NSPanel(contentViewController: controller)
+            let panel = SubmoduleConflictPanel(contentViewController: controller)
             panel.title = "Submodule conflict"; panel.styleMask = [.titled, .closable, .resizable]
-            panel.setContentSize(NSSize(width: 595, height: 300)); panel.minSize = NSSize(width: 595, height: 280)
+            panel.setContentSize(NSSize(width: 595, height: 254)); panel.minSize = NSSize(width: 595, height: 254)
             controller.panel = panel; panel.delegate = controller
             owner.beginSheet(panel)
         }
     }
     static func manage(source: any RepositorySubmoduleManagingDataSource, owner: NSWindow,
                        changed: @escaping () -> Void, open: @escaping (Submodule, Bool) -> Void,
+                       pullRepository: (() -> Void)? = nil,
                        closed: @escaping () -> Void) -> NSWindowController {
         let controller = SubmoduleManagerViewController(source: source, changed: changed, open: open, closed: closed)
+        controller.pullRepository = pullRepository
         let window = NSWindow(contentViewController: controller)
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
         window.title = "Submodules"; window.setContentSize(NSSize(width: 782, height: 372))
-        window.minSize = NSSize(width: 650, height: 340)
+        window.contentMinSize = NSSize(width: 694, height: 311)
         window.isReleasedWhenClosed = false; window.delegate = controller
         window.setFrameOrigin(NSPoint(x: owner.frame.midX - window.frame.width / 2, y: owner.frame.midY - window.frame.height / 2))
         window.setFrameAutosaveName("SubmoduleManagement")
@@ -65,6 +67,7 @@ private final class SubmoduleProcessViewController: NSViewController, NSWindowDe
     private let keepOpen = NSButton(checkboxWithTitle: "Keep dialog open", target: nil, action: nil)
     private let abort = NSButton(title: "Abort", target: nil, action: nil)
     private let close = NSButton(title: "OK", target: nil, action: nil)
+    let processInput = ProcessInputController()
     private var task: Task<Void, Never>?
     private var result: RepositorySubmoduleResult?
     private var finished = false
@@ -85,30 +88,37 @@ private final class SubmoduleProcessViewController: NSViewController, NSWindowDe
         abort.target = self; abort.action = #selector(abortOperation)
         close.target = self; close.action = #selector(finish); close.keyEquivalent = "\r"; close.isEnabled = false
         let header = NSStackView(views: [progress, status]); header.spacing = 8
-        let footer = NSStackView(views: [keepOpen, NSView(), abort, close]); footer.spacing = 8
-        for child in [header, scroll, footer] { root.addSubview(child); child.translatesAutoresizingMaskIntoConstraints = false }
+        let footer = NSStackView(views: [keepOpen, processInput.toggle, NSView(), abort, close]); footer.spacing = 8
+        let bottom = processInput.bottomStack(footer: footer)
+        for child in [header, scroll, bottom] { root.addSubview(child); child.translatesAutoresizingMaskIntoConstraints = false }
         NSLayoutConstraint.activate([
             header.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12), header.topAnchor.constraint(equalTo: root.topAnchor, constant: 12), header.trailingAnchor.constraint(lessThanOrEqualTo: root.trailingAnchor, constant: -12),
             progress.widthAnchor.constraint(equalToConstant: 92), scroll.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12), scroll.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12),
-            scroll.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 10), scroll.bottomAnchor.constraint(equalTo: footer.topAnchor, constant: -10),
-            footer.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12), footer.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12), footer.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -12)
+            scroll.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 10), scroll.bottomAnchor.constraint(equalTo: bottom.topAnchor, constant: -10),
+            bottom.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12), bottom.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12), bottom.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -12)
         ])
         view = root
     }
     func start() {
         progress.startAnimation(nil)
+        processInput.window = panel
+        let processInput = processInput
         task = Task { @MainActor in
             do {
                 result = try await OutputHistoryRecording.perform {
+                    try await processInput.perform {
                     try await operation { [weak self] event in
                         Task { @MainActor in
                             guard let self, !self.finished else { return }
+                            self.processInput.observeOutput(event.text)
                             self.output.textStorage?.append(NSAttributedString(string: event.text, attributes: [.foregroundColor: event.stream == .standardError ? NSColor.systemRed : NSColor.textColor, .font: AppSettingsStore.shared.fontPreferences.font(.monospace, fallback: .monospacedSystemFont(ofSize: 11, weight: .regular))]))
                             self.output.scrollToEndOfDocument(nil)
                         }
                     }
+                    }
                 }
             } catch { result = .init(succeeded: false, changed: false, output: error.localizedDescription) }
+            processInput.finish()
             task = nil; progress.stopAnimation(nil); abort.isEnabled = false; close.isEnabled = true
             status.stringValue = result?.succeeded == true ? "Completed successfully" : "Operation failed or was aborted"
             if output.string.isEmpty { output.string = result?.output ?? "" }
@@ -131,13 +141,28 @@ private final class SubmoduleProcessViewController: NSViewController, NSWindowDe
 }
 
 @MainActor
-private final class SubmoduleConflictViewController: NSViewController, NSWindowDelegate {
+final class SubmoduleConflictPanel: NSPanel {
+    override func cancelOperation(_ sender: Any?) {
+        contentViewController?.cancelOperation(sender)
+    }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if event.keyCode == 53, event.modifierFlags.intersection(.deviceIndependentFlagsMask).isEmpty {
+            cancelOperation(nil)
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+}
+
+@MainActor
+final class SubmoduleConflictViewController: NSViewController, NSWindowDelegate {
     var scriptHooks: ((any RepositoryBrowsingDataSource) -> ApplicationScriptHooks)?
     weak var panel: NSPanel?
     private let source: any RepositorySubmoduleManagingDataSource
     private let path: String
     private let completion: (Bool) -> Void
-    private let details = NSTextField(wrappingLabelWithString: "")
+    private let revisionFields = ["Base", "Local", "Remote", "Current"].map { _ in NSTextField() }
     private let status = NSTextField(wrappingLabelWithString: "")
     private let checkout = NSButton(title: "Checkout Branch", target: nil, action: nil)
     private let stage = NSButton(title: "Stage Current", target: nil, action: nil)
@@ -154,19 +179,69 @@ private final class SubmoduleConflictViewController: NSViewController, NSWindowD
     required init?(coder: NSCoder) { nil }
     override func loadView() {
         let root = NSView()
-        details.isSelectable = true; details.maximumNumberOfLines = 0; details.font = AppSettingsStore.shared.fontPreferences.font(.monospace, fallback: .monospacedSystemFont(ofSize: 12, weight: .regular))
-        let open = NSButton(title: "Open submodule", target: self, action: #selector(openRepository))
-        let refresh = NSButton(title: "Refresh", target: self, action: #selector(reload))
-        let close = NSButton(title: "Close", target: self, action: #selector(closeForm)); close.keyEquivalent = "\u{1b}"
-        checkout.target = self; checkout.action = #selector(checkoutBranch)
-        stage.target = self; stage.action = #selector(stageCurrent); stage.keyEquivalent = "\r"
-        let actions = NSStackView(views: [open, refresh, checkout, stage, close]); actions.spacing = 8
-        let stack = NSStackView(views: [NSTextField(labelWithString: "There is a conflict on the submodule: \(path)"), details, status, actions])
-        stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 16
-        root.addSubview(stack); stack.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([stack.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12), stack.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12), stack.topAnchor.constraint(equalTo: root.topAnchor, constant: 12), details.widthAnchor.constraint(equalTo: stack.widthAnchor), status.widthAnchor.constraint(equalTo: stack.widthAnchor)])
-        view = root; reload()
+        for (index, field) in revisionFields.enumerated() {
+            field.isEditable = false
+            field.isSelectable = true
+            field.font = AppSettingsStore.shared.fontPreferences.font(.monospace, fallback: .monospacedSystemFont(ofSize: 12, weight: .regular))
+            field.setAccessibilityIdentifier("SubmoduleConflict." + ["Base", "Local", "Remote", "Current"][index])
+        }
+        let open = LeadingImageButton(title: "Open submodule", target: self, action: #selector(openRepository))
+        open.image = AppKitFactory.resourceImage("FolderSubmodule", accessibilityDescription: "Open submodule")
+        open.imagePosition = .imageLeft
+        open.keyEquivalent = "\r"
+        let refresh = AppKitFactory.resourceButton("ReloadRevisions", tooltip: "Refresh", target: self, action: #selector(reload))
+        refresh.title = ""
+        refresh.imagePosition = .imageOnly
+        refresh.setAccessibilityLabel("Refresh")
+        checkout.target = self
+        checkout.action = #selector(checkoutBranch)
+        checkout.isEnabled = false
+        stage.target = self
+        stage.action = #selector(stageCurrent)
+        stage.isEnabled = false
+        let rows = NSGridView(views: [
+            [NSTextField(labelWithString: "Base:"), revisionFields[0], NSGridCell.emptyContentView],
+            [NSTextField(labelWithString: "Local:"), revisionFields[1], NSGridCell.emptyContentView],
+            [NSTextField(labelWithString: "Remote:"), revisionFields[2], NSGridCell.emptyContentView],
+            [NSTextField(labelWithString: "Current:"), revisionFields[3], refresh]
+        ])
+        rows.column(at: 1).xPlacement = .fill
+        rows.column(at: 0).xPlacement = .leading
+        rows.rowSpacing = 8
+        rows.columnSpacing = 8
+        rows.yPlacement = .center
+        let actions = NSStackView(views: [open, checkout, stage])
+        actions.distribution = .fillEqually
+        actions.spacing = 8
+        status.isHidden = true
+        let stack = NSStackView(views: [NSTextField(labelWithString: "There is a conflict on the submodule: \(path)"), rows, status, actions])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 16
+        root.addSubview(stack)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12),
+            stack.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12),
+            stack.topAnchor.constraint(equalTo: root.topAnchor, constant: 12),
+            stack.bottomAnchor.constraint(lessThanOrEqualTo: root.bottomAnchor, constant: -12),
+            rows.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            actions.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            status.widthAnchor.constraint(equalTo: stack.widthAnchor)
+        ])
+        view = root
+        reload()
     }
+
+    func apply(conflict: RepositoryConflict, currentID: ObjectID?) {
+        revisionFields[0].stringValue = conflict.base?.objectID.string ?? "deleted"
+        revisionFields[1].stringValue = conflict.local?.objectID.string ?? "deleted"
+        revisionFields[2].stringValue = conflict.remote?.objectID.string ?? "deleted"
+        revisionFields[3].stringValue = currentID?.string ?? ""
+        checkout.isEnabled = conflict.base != nil && conflict.remote != nil
+        stage.isEnabled = currentID != nil
+    }
+
     @objc private func reload() {
         guard !busy else { return }
         Task { @MainActor in
@@ -174,10 +249,9 @@ private final class SubmoduleConflictViewController: NSViewController, NSWindowD
                 let value = try await source.loadSubmoduleConflict(path: path)
                 guard !finished else { return }; context = value
                 if initialContext == nil { initialContext = value }
-                details.stringValue = "Base:     \(value.conflict.base?.objectID.string ?? "deleted")\n\nLocal:    \(value.conflict.local?.objectID.string ?? "deleted")\n\nRemote:   \(value.conflict.remote?.objectID.string ?? "deleted")\n\nCurrent:  \(value.currentID?.string ?? "")"
-                checkout.isEnabled = value.conflict.base != nil && value.conflict.remote != nil && value.conflict.local != nil && value.currentID != nil
-                stage.isEnabled = value.currentID != nil
-            } catch { status.stringValue = error.localizedDescription; checkout.isEnabled = false; stage.isEnabled = false }
+                status.isHidden = true
+                apply(conflict: value.conflict, currentID: value.currentID)
+            } catch { status.isHidden = false; status.stringValue = error.localizedDescription; checkout.isEnabled = false; stage.isEnabled = false }
         }
     }
     @objc private func stageCurrent() {
@@ -187,8 +261,8 @@ private final class SubmoduleConflictViewController: NSViewController, NSWindowD
                 let result = try await source.performSubmoduleAction(.stageCurrent(path: path), output: { _ in })
                 changed = changed || result.changed; busy = false
                 if result.succeeded { finish(); return }
-                status.stringValue = result.output
-            } catch { status.stringValue = error.localizedDescription; busy = false }
+                status.isHidden = false; status.stringValue = result.output
+            } catch { status.isHidden = false; status.stringValue = error.localizedDescription; busy = false }
             reload()
         }
     }
@@ -197,7 +271,7 @@ private final class SubmoduleConflictViewController: NSViewController, NSWindowD
         let configuration = NSWorkspace.OpenConfiguration(); configuration.createsNewApplicationInstance = true
         configuration.arguments = ["--repository", context.repositoryURL.path]
         NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: configuration) { _, error in
-            if let error { Task { @MainActor in self.status.stringValue = error.localizedDescription } }
+            if let error { Task { @MainActor in self.status.isHidden = false; self.status.stringValue = error.localizedDescription } }
         }
     }
     @objc private func checkoutBranch() {
@@ -207,13 +281,13 @@ private final class SubmoduleConflictViewController: NSViewController, NSWindowD
                 let value = try await source.loadSubmoduleConflictCheckout(path: path)
                 guard let child = value.source as? any RepositoryCheckoutBranchDataSource else { return }
                 guard !value.branches.branches.isEmpty || value.branches.remotes.contains(where: { !$0.branches.isEmpty }) else {
-                    status.stringValue = "No branch contains both the local and remote commits. Open the submodule to resolve it, then Stage Current."; return
+                    status.isHidden = false; status.stringValue = "No branch contains both the local and remote commits. Open the submodule to resolve it, then Stage Current."; return
                 }
                 coordinator = CheckoutBranchWorkflowCoordinator(source: child,
                     stashSource: value.source as? any RepositoryStashDataSource, pullSource: value.source as? any RepositoryPullingDataSource,
                     context: value.branches, revisions: [], owner: panel,
                     onRepositoryChanged: { [weak self] _ in self?.reload() },
-                    onStatus: { [weak self] in self?.status.stringValue = $0 },
+                    onStatus: { [weak self] in self?.status.isHidden = false; self?.status.stringValue = $0 },
                     onConflicts: { [weak self] in
                         guard let resolver = value.source as? any RepositoryConflictResolutionDataSource else { return }
                         Task { @MainActor in
@@ -225,9 +299,10 @@ private final class SubmoduleConflictViewController: NSViewController, NSWindowD
                     onCheckoutCompleted: { [weak self] in self?.stageCurrent() })
                 coordinator?.scriptHooks = scriptHooks?(value.source)
                 coordinator?.checkoutBranch(initialTarget: nil)
-            } catch { status.stringValue = error.localizedDescription }
+            } catch { status.isHidden = false; status.stringValue = error.localizedDescription }
         }
     }
+    override func cancelOperation(_ sender: Any?) { closeForm() }
     @objc private func closeForm() { if !busy { finish() } }
     func windowShouldClose(_ sender: NSWindow) -> Bool { closeForm(); return false }
     private func finish() {
@@ -248,13 +323,17 @@ private final class SubmoduleManagerViewController: NSViewController, NSTableVie
     private let closed: () -> Void
     private let table = NSTableView()
     private let split = NSSplitView()
-    private let details = NSTextField(wrappingLabelWithString: "")
+    private let splitterManager = SplitterManager(settingsPath: "FormSubmodules")
+    private var didRestoreSplitter = false
+    private var detailFields: [String: NSTextField] = [:]
     private let output = NSTextField(wrappingLabelWithString: "")
     private var buttons: [NSButton] = []
     private var context: RepositorySubmoduleContext?
     private var busy = false
     private var operation: Task<Void, Never>?
     private var generation = 0
+
+    var pullRepository: (() -> Void)?
 
     init(source: any RepositorySubmoduleManagingDataSource, changed: @escaping () -> Void, open: @escaping (Submodule, Bool) -> Void, closed: @escaping () -> Void) {
         self.source = source; self.changed = changed; self.open = open; self.closed = closed
@@ -272,29 +351,78 @@ private final class SubmoduleManagerViewController: NSViewController, NSTableVie
         table.dataSource = self; table.delegate = self
         table.allowsMultipleSelection = false; table.rowSizeStyle = .medium
         let scroll = NSScrollView(); scroll.documentView = table; scroll.hasVerticalScroller = true; scroll.hasHorizontalScroller = true
-        details.isSelectable = true; details.maximumNumberOfLines = 0
-        let box = NSBox(); box.title = "Details"; box.contentView = details
         output.isSelectable = true; output.maximumNumberOfLines = 4
-        split.isVertical = true; split.dividerStyle = .thin; split.autosaveName = "SubmodulesSplitter"
-        split.addArrangedSubview(scroll); split.addArrangedSubview(box)
         let actions: [(String, Selector)] = [("Add submodule", #selector(add)), ("Update", #selector(update)), ("Synchronize", #selector(synchronize)), ("Pull", #selector(pull)), ("Remove", #selector(remove))]
-        buttons = actions.map { NSButton(title: $0.0, target: self, action: $0.1) }
-        let refresh = NSButton(title: "Refresh", target: self, action: #selector(refreshList))
-        let bar = NSStackView(views: buttons + [refresh]); bar.spacing = 8
-        for child in [split, output, bar] { root.addSubview(child); child.translatesAutoresizingMaskIntoConstraints = false }
+        buttons = actions.map { LeadingImageButton(title: $0.0, target: self, action: $0.1) }
+        for (index, image) in [(1, "SubmodulesUpdate"), (2, "SubmodulesSync")] {
+            buttons[index].image = AppKitFactory.resourceImage(image, accessibilityDescription: buttons[index].title)
+            buttons[index].imagePosition = .imageLeft
+        }
+        let left = NSStackView(views: [scroll, buttons[0]]); left.orientation = .vertical; left.alignment = .leading
+        var rows: [[NSView]] = []
+        for (key, caption) in SubmodulesPresentation.detailFields {
+            let field = NSTextField(string: "")
+            field.isEditable = false; field.isSelectable = true; field.isBezeled = true
+            field.setAccessibilityIdentifier("Submodules.Detail.\(key)")
+            field.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            field.widthAnchor.constraint(greaterThanOrEqualToConstant: 160).isActive = true
+            detailFields[key] = field
+            let value: NSView = key == "branch" ? NSStackView(views: [field, buttons[3]]) : field
+            rows.append([NSTextField(labelWithString: caption), value])
+        }
+        let grid = NSGridView(views: rows)
+        grid.column(at: 0).width = 90
+        grid.column(at: 1).xPlacement = .fill
+        grid.rowSpacing = 6; grid.columnSpacing = 8
+        let details = NSView()
+        grid.translatesAutoresizingMaskIntoConstraints = false
+        details.addSubview(grid)
+        NSLayoutConstraint.activate([
+            grid.leadingAnchor.constraint(equalTo: details.leadingAnchor), grid.trailingAnchor.constraint(equalTo: details.trailingAnchor),
+            grid.topAnchor.constraint(equalTo: details.topAnchor), grid.bottomAnchor.constraint(lessThanOrEqualTo: details.bottomAnchor)
+        ])
+        let box = AppKitFactory.titledBox("Details", details)
+        box.setAccessibilityIdentifier("Submodules.Details")
+        let rightSpacer = NSView(); rightSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let rightActions = NSStackView(views: [rightSpacer, buttons[2], buttons[1], buttons[4]]); rightActions.spacing = 8
+        rightActions.setAccessibilityIdentifier("Submodules.DetailActions")
+        rightActions.setHuggingPriority(.required, for: .vertical)
+        box.setContentHuggingPriority(.defaultLow - 1, for: .vertical)
+        let right = NSView()
+        for child in [box, rightActions] as [NSView] { child.translatesAutoresizingMaskIntoConstraints = false; right.addSubview(child) }
+        NSLayoutConstraint.activate([
+            box.topAnchor.constraint(equalTo: right.topAnchor), box.leadingAnchor.constraint(equalTo: right.leadingAnchor),
+            box.bottomAnchor.constraint(equalTo: rightActions.topAnchor, constant: -8),
+            rightActions.leadingAnchor.constraint(equalTo: right.leadingAnchor), rightActions.bottomAnchor.constraint(equalTo: right.bottomAnchor)
+        ])
+        for (index, width) in [(1, 144), (2, 144), (4, 144), (0, 202)] as [(Int, CGFloat)] {
+            let constraint = buttons[index].widthAnchor.constraint(equalToConstant: width)
+            constraint.priority = .required - 1
+            constraint.isActive = true
+        }
+        split.isVertical = true; split.dividerStyle = .thin
+        split.addArrangedSubview(left); split.addArrangedSubview(right)
+        right.heightAnchor.constraint(equalTo: split.heightAnchor).isActive = true
+        left.heightAnchor.constraint(equalTo: split.heightAnchor).isActive = true
+        splitterManager.addSplitter(split, name: "splitContainer1", fixedPanel: .fixedLeadingPane, defaultDistance: 222)
+        for child in [split, output] { root.addSubview(child); child.translatesAutoresizingMaskIntoConstraints = false }
         NSLayoutConstraint.activate([
             split.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12), split.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12),
             split.topAnchor.constraint(equalTo: root.topAnchor, constant: 12), split.bottomAnchor.constraint(equalTo: output.topAnchor, constant: -8),
-            scroll.widthAnchor.constraint(greaterThanOrEqualToConstant: 220), box.widthAnchor.constraint(greaterThanOrEqualToConstant: 260),
+            scroll.widthAnchor.constraint(equalTo: left.widthAnchor), left.widthAnchor.constraint(greaterThanOrEqualToConstant: 220),
+            box.widthAnchor.constraint(equalTo: right.widthAnchor), rightActions.widthAnchor.constraint(equalTo: right.widthAnchor),
+            right.widthAnchor.constraint(greaterThanOrEqualToConstant: 260),
             output.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12), output.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12),
-            output.heightAnchor.constraint(equalToConstant: 34), output.bottomAnchor.constraint(equalTo: bar.topAnchor, constant: -8),
-            bar.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12), bar.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -12), bar.heightAnchor.constraint(equalToConstant: 30)
+            output.heightAnchor.constraint(equalToConstant: 34), output.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -12)
         ])
         view = root; selectionChanged(); reload()
     }
     override func viewDidAppear() {
         super.viewDidAppear()
-        if UserDefaults.standard.object(forKey: "NSSplitView SubmodulesSplitter") == nil { split.setPosition(222, ofDividerAt: 0) }
+        guard !didRestoreSplitter else { return }
+        didRestoreSplitter = true
+        view.layoutSubtreeIfNeeded()
+        splitterManager.restoreSplitters()
     }
     func windowDidBecomeKey(_ notification: Notification) { if !busy, isViewLoaded { reload() } }
     private var selected: Submodule? {
@@ -313,10 +441,13 @@ private final class SubmoduleManagerViewController: NSViewController, NSTableVie
     }
     func tableViewSelectionDidChange(_ notification: Notification) { selectionChanged() }
     private func selectionChanged() {
-        for (index, button) in buttons.enumerated() { button.isEnabled = !busy && (index == 0 || selected != nil) }
-        if buttons.count > 3 { buttons[3].isEnabled = !busy && selected != nil && selected?.state != .uninitialized }
-        guard let selected else { details.stringValue = ""; return }
-        details.stringValue = "Name:  \(selected.name)\n\nRemote path:  \(selected.url ?? "")\n\nLocal path:  \(selected.path)\n\nCommit:  \(selected.commitID?.string ?? "")\n\nBranch:  \(context?.branches[selected.path] ?? "")\n\nStatus:  \(status(selected))"
+        for button in buttons { button.isEnabled = !busy }
+        if buttons.count > 3 { buttons[3].isEnabled = !busy && selected?.state != .uninitialized }
+        let values = selected.map { selected in
+            ["name": selected.name, "remote": selected.url ?? "", "local": selected.path, "commit": selected.commitID?.string ?? "",
+             "branch": context?.branches[selected.path] ?? "", "status": status(selected)]
+        } ?? [:]
+        for (key, field) in detailFields { field.stringValue = values[key] ?? "" }
     }
     private func reload() {
         generation += 1; let current = generation; let path = selected?.path
@@ -332,15 +463,14 @@ private final class SubmoduleManagerViewController: NSViewController, NSTableVie
             } catch { output.stringValue = error.localizedDescription }
         }
     }
-    @objc private func refreshList() { if !busy { reload() } }
     @objc private func add() {
         guard let owner = view.window else { return }
         Task { @MainActor in await SubmoduleDialogs.add(source: source, owner: owner, changed: changed); reload() }
     }
-    @objc private func update() { if let selected { perform(.update(path: selected.path)) } }
-    @objc private func synchronize() { if let selected { perform(.synchronize(path: selected.path)) } }
+    @objc private func update() { perform(.update(path: selected?.path)) }
+    @objc private func synchronize() { perform(.synchronize(path: selected?.path)) }
     @objc private func pull() {
-        if let selected { open(selected, true) }
+        if let selected { open(selected, true) } else { pullRepository?() }
     }
     @objc private func remove() {
         guard let selected, let owner = view.window else { return }
@@ -362,7 +492,7 @@ private final class SubmoduleManagerViewController: NSViewController, NSTableVie
         }
     }
     func windowShouldClose(_ sender: NSWindow) -> Bool { if busy { operation?.cancel(); return false }; return true }
-    func windowWillClose(_ notification: Notification) { generation += 1; operation?.cancel(); closed() }
+    func windowWillClose(_ notification: Notification) { splitterManager.saveSplitters(); generation += 1; operation?.cancel(); closed() }
 }
 
 @MainActor
@@ -391,7 +521,7 @@ private final class AddSubmoduleViewController: NSViewController, NSTextFieldDel
         let root = NSView(); remote.delegate = self; branch.delegate = self
         let settings = AppSettingsStore.shared
         var seen: Set<String> = []
-        remote.addItems(withObjectValues: (settings.repositoryCreationPreferences.recentSources + settings.pullPreferences.recentURLs + settings.pushPreferences.recentURLs).filter { seen.insert($0).inserted })
+        remote.addItems(withObjectValues: settings.remoteRepositoryHistory)
         let browse = NSButton(title: "Browse…", target: self, action: #selector(browseSource))
         let sourceRow = NSStackView(views: [remote, browse]); sourceRow.spacing = 8
         let grid = NSGridView(views: [[NSTextField(labelWithString: "Path to submodule"), sourceRow], [NSTextField(labelWithString: "Local path"), path], [NSTextField(labelWithString: "Branch"), branch]])
@@ -435,8 +565,7 @@ private final class AddSubmoduleViewController: NSViewController, NSTextFieldDel
     @objc private func accept() {
         guard !busy, let panel else { return }
         guard !remote.stringValue.isEmpty, !path.stringValue.isEmpty else {
-            output.stringValue = "A remote path and local path are required."
-            panel.makeFirstResponder(remote.stringValue.isEmpty ? remote : path)
+            Task { @MainActor in await MutationDialogs.showValidationError("A remote path and local path are required", caption: "Add submodule", window: panel) }
             return
         }
         busy = true; add.isEnabled = false; remote.isEnabled = false; path.isEnabled = false; branch.isEnabled = false; force.isEnabled = false
@@ -445,7 +574,7 @@ private final class AddSubmoduleViewController: NSViewController, NSTextFieldDel
             let source = self.source
             let result = await SubmoduleDialogs.run(title: "Add submodule", owner: panel) { output in try await source.addSubmodule(request, output: output) }
             if result.changed { changed() }
-            if result.succeeded { busy = false; finish(); return }
+            if result.succeeded { AppSettingsStore.shared.recordRemoteURL(request.source); busy = false; finish(); return }
             output.stringValue = result.output
             busy = false; add.isEnabled = true; remote.isEnabled = true; path.isEnabled = true; branch.isEnabled = true; force.isEnabled = true
         }
@@ -453,4 +582,8 @@ private final class AddSubmoduleViewController: NSViewController, NSTextFieldDel
     @objc private func cancelForm() { if busy { operation?.cancel() } else { finish() } }
     func windowShouldClose(_ sender: NSWindow) -> Bool { cancelForm(); return false }
     private func finish() { guard !completed else { return }; completed = true; branchLoad?.cancel(); if let panel { panel.sheetParent?.endSheet(panel); panel.orderOut(nil) }; completion() }
+}
+
+enum SubmodulesPresentation {
+    static let detailFields: [(String, String)] = [("name", "Name"), ("remote", "Remote path"), ("local", "Local path"), ("commit", "Commit"), ("branch", "Branch"), ("status", "Status")]
 }

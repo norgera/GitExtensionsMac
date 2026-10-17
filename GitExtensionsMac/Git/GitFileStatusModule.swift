@@ -24,8 +24,9 @@ extension GitRepositoryModule: RepositoryFileStatusDataSource {
         return repository.rootURL
     }
 
-    private func run(_ command: GitCommand, input: Data? = nil) async throws -> GitCommandResult {
-        try await git.run(command, in: try fileStatusRoot(), standardInput: input)
+    private func run(_ command: GitCommand, input: Data? = nil, cache: Bool = false, outputEncoding: String.Encoding? = .utf8) async throws -> GitCommandResult {
+        if cache, input == nil { return try await git.runCached(command, in: try fileStatusRoot(), outputEncoding: outputEncoding) }
+        return try await git.run(command, in: try fileStatusRoot(), standardInput: input)
     }
 
     private func runChecked(_ arguments: [String], changes: Bool = true, input: Data? = nil) async throws -> GitCommandResult {
@@ -131,27 +132,54 @@ extension GitRepositoryModule: RepositoryFileStatusDataSource {
     }
 
     package func loadFileStatusDiff(group: FileStatusGroup, file: ChangedFile, options: FileDiffOptions, grep: GitGrepOptions) async throws -> FileStatusContent {
-        if file.isStatusOnly { return .text(file.path) }
+        try await fileStatusPreview(group: group, file: file, options: options, grep: grep, defersLargeContent: false).resolve()
+    }
+
+    package func prepareFileStatusPreview(group: FileStatusGroup, file: ChangedFile, options: FileDiffOptions, grep: GitGrepOptions) async throws -> FilePreview<FileStatusContent> {
+        try await fileStatusPreview(group: group, file: file, options: options, grep: grep, defersLargeContent: true)
+    }
+
+    private func fileStatusPreview(group: FileStatusGroup, file: ChangedFile, options: FileDiffOptions, grep: GitGrepOptions, defersLargeContent: Bool) async throws -> FilePreview<FileStatusContent> {
+        if file.isStatusOnly { return .ready(.text(file.path)) }
         if file.isRangeDiff, let first = file.rangeDiffFirst, let second = file.rangeDiffSecond {
             let result = try await run(FileStatusCommands.rangeDiff(first.string, second.string, path: nil))
-            return .text(result.succeeded ? result.standardOutputString : result.standardErrorString)
+            let text = result.succeeded ? result.standardOutputString : result.standardErrorString
+            return try await FilePreview.prepare(length: text.utf16.count, defersLargeContent: defersLargeContent) { .text(text) }
         }
         if group.isGrep, let text = file.grepString, !text.isEmpty {
             let command = try FileStatusCommands.grepFile(try FileStatusCommands.grepArguments(for: text), revision: group.second,
                                                           path: file.path, options: grep, viewer: options)
             let result = try await run(command)
             guard result.succeeded else {
-                return .text("\(result.standardErrorString)\nGit command (exit code: \(result.exitStatus)): git \(result.arguments.joined(separator: " "))\n")
+                return .ready(.text("\(result.standardErrorString)\nGit command (exit code: \(result.exitStatus)): git \(result.arguments.joined(separator: " "))\n"))
             }
             let encoding = try await diffContentEncoding(options)
             let text = encoding == .utf8 ? result.standardOutputString : (String(data: result.standardOutput, encoding: encoding) ?? result.standardOutputString)
-            return .diff(FileDiff(id: file.id, fileID: file.id, lines: FileStatusCommands.parseGrepFile(text), contentEncoding: encoding))
+            let normalize = try await copyNormalizesLineEndings(in: fileStatusRoot())
+            return try await FilePreview.prepare(length: text.utf16.count, defersLargeContent: defersLargeContent) {
+                var diff = FileDiff(id: file.id, fileID: file.id, lines: FileStatusCommands.parseGrepFile(text), contentEncoding: encoding)
+                diff.isTextOnly = true
+                diff.normalizesCopyLineEndings = normalize
+                return .diff(diff)
+            }
+        }
+        if file.isSubmodule, group.kind != .combined {
+            let status = try await fileStatusSubmodule(group: group, file: file)
+            guard let summary = status?.summary else { return .ready(.text("Failed to get status for submodule \"\(file.path)\"")) }
+            let lines = SubmoduleDiffPresentation.text(summary).components(separatedBy: "\n").enumerated().map {
+                DiffLine(id: "\(file.id):\($0.offset)", oldLineNumber: nil, newLineNumber: nil, kind: .header, text: $0.element)
+            }
+            var diff = FileDiff(id: file.id, fileID: file.id, lines: lines)
+            diff.submoduleSummary = summary
+            diff.isTextOnly = true
+            return .ready(.diff(diff))
         }
         var seen = Set<String>()
         let paths = [file.oldPath, file.path].compactMap { $0 }.filter { seen.insert($0).inserted }
+        let encoding = try await diffContentEncoding(options)
         let output: GitCommandResult
         if group.kind == .combined, case .object(let merge) = group.second {
-            output = try await run(FileStatusCommands.combinedDiff(merge, path: file.path, options: options))
+            output = try await run(FileStatusCommands.combinedDiff(merge, path: file.path, options: options), cache: true, outputEncoding: encoding)
         } else {
             let root = try fileStatusRoot()
             let arguments: [String]
@@ -169,16 +197,34 @@ extension GitRepositoryModule: RepositoryFileStatusDataSource {
                     + options.gitArguments + revisions + ["--"] + paths
                 difftastic = { (revisions, paths, false) }
             }
-            if let diff = try await appearanceDiff(file: file, options: options, patchArguments: arguments, difftastic: difftastic, directory: root) {
-                return .diff(diff)
+            let immutable = file.isTracked && group.second.objectID != nil && (group.first == nil || group.first?.objectID != nil)
+            if let preview = try await appearancePreview(file: file, options: options, patchArguments: arguments, difftastic: difftastic, directory: root, defersLargeContent: defersLargeContent, cacheCommands: immutable) {
+                let normalize = try await copyNormalizesLineEndings(in: root)
+                switch preview {
+                case .ready(var diff):
+                    diff?.normalizesCopyLineEndings = normalize
+                    return .ready(.diff(diff))
+                case .deferred(let length, let load):
+                    return .deferred(length: length) {
+                        var diff = try await load()
+                        diff?.normalizesCopyLineEndings = normalize
+                        return .diff(diff)
+                    }
+                }
             }
-            output = try await run(GitCommand(arguments: arguments, accessesRemote: false, changesRepositoryState: false))
+            output = try await run(GitCommand(arguments: arguments, accessesRemote: false, changesRepositoryState: false), cache: immutable, outputEncoding: encoding)
         }
         guard output.succeeded || output.exitStatus == 1 else {
             throw GitError.commandFailed(arguments: output.arguments, status: output.exitStatus, stderr: output.standardErrorString)
         }
-        let parsed = GitOutputParser.parseUnifiedDiff(output.standardOutput, files: [file], contentEncoding: try await diffContentEncoding(options))
-        return .diff(parsed[file.id] ?? parsed.values.first)
+        let normalize = try await copyNormalizesLineEndings(in: fileStatusRoot())
+        let length = (String(data: output.standardOutput, encoding: encoding) ?? output.standardOutputString).utf16.count
+        return try await FilePreview.prepare(length: length, defersLargeContent: defersLargeContent) {
+            let parsed = GitOutputParser.parseUnifiedDiff(output.standardOutput, files: [file], contentEncoding: encoding)
+            var diff = parsed[file.id] ?? parsed.values.first
+            diff?.normalizesCopyLineEndings = normalize
+            return .diff(diff)
+        }
     }
 
     package func loadFileData(path: String, at revision: RevisionID) async throws -> Data {
@@ -189,9 +235,9 @@ extension GitRepositoryModule: RepositoryFileStatusDataSource {
             guard url.path.hasPrefix(root.standardizedFileURL.path + "/") else { throw GitError.fileUnavailable(path) }
             return try Data(contentsOf: url)
         case .index:
-            return try await runChecked(["show", ":\(path)"], changes: false).standardOutput
+            return try await materializedBlob(":\(path)", in: root)
         case .object(let id):
-            return try await runChecked(["show", "\(id.string):\(path)"], changes: false).standardOutput
+            return try await materializedBlob("\(id.string):\(path)", in: root, immutable: !FileContentDecoder.hasImageExtension(path), outputEncoding: nil)
         }
     }
 
@@ -378,6 +424,12 @@ extension GitRepositoryModule: RepositoryFileStatusDataSource {
     }
 
     package func fileStatusSubmodule(group: FileStatusGroup, file: ChangedFile) async throws -> FileStatusSubmodule? {
+        guard var status = try await fileStatusSubmoduleState(group: group, file: file) else { return nil }
+        status.summary = try await submoduleDiffSummary(path: file.path, child: fileStatusRoot().appendingPathComponent(file.path), status: status)
+        return status
+    }
+
+    private func fileStatusSubmoduleState(group: FileStatusGroup, file: ChangedFile) async throws -> FileStatusSubmodule? {
         guard file.isSubmodule, group.kind != .combined, !group.isGrep else { return nil }
         var arguments: [String]
         if group.first == nil, let revision = group.second.objectID {
@@ -415,6 +467,51 @@ extension GitRepositoryModule: RepositoryFileStatusDataSource {
             }
         }
         return status
+    }
+
+    func submoduleDiffSummary(path: String, child: URL, status: FileStatusSubmodule,
+                             knownDetails: [ObjectID: SubmoduleDiffSummary.CommitInfo]? = nil, knownStatus: String? = nil) async throws -> SubmoduleDiffSummary {
+        let initialized = FileManager.default.fileExists(atPath: child.appendingPathComponent(".git").path)
+        var details = knownDetails ?? [:]
+        if initialized && knownDetails == nil {
+            for id in Set([status.first, status.second].compactMap { $0 }) {
+                let result = try await git.run(GitCommand(arguments: ["show", "--no-notes", "-s", "--format=%ct%x00%B", id.string],
+                                                        accessesRemote: false, changesRepositoryState: false).logMetadata(), in: child)
+                let fields = result.standardOutputString.split(separator: "\0", maxSplits: 1, omittingEmptySubsequences: false)
+                if result.succeeded, fields.count == 2, let time = TimeInterval(fields[0]) {
+                    details[id] = .init(id: id, date: Date(timeIntervalSince1970: time), body: String(fields[1]))
+                }
+            }
+        }
+        let change: SubmoduleDiffSummary.Change
+        if status.first == nil { change = .added }
+        else if status.second == nil { change = .removed }
+        else if status.first == status.second { change = .same }
+        else {
+            change = switch status.state {
+            case .same: .same
+            case .ahead: .forward
+            case .behind: .rewind
+            case .newer: .newer
+            case .older: .older
+            default: .modified
+            }
+        }
+        var ownStatus = knownStatus ?? "", differences = ""
+        if initialized, let first = status.first, let second = status.second {
+            if status.isDirty && knownStatus == nil {
+                let result = try await git.run(GitCommand(arguments: ["status", "-s"], accessesRemote: false, changesRepositoryState: false), in: child)
+                if result.succeeded { ownStatus = result.standardOutputString }
+            }
+            let result = try await git.run(GitCommand(arguments: ["diff", "--no-ext-diff", "--find-renames", "--find-copies", "--name-status", first.string, second.string],
+                                                    accessesRemote: false, changesRepositoryState: false), in: child)
+            if result.succeeded { differences = result.standardOutputString }
+        }
+        return SubmoduleDiffSummary(path: path, from: status.first, to: status.second,
+                                   fromInfo: status.first.flatMap { details[$0] }, toInfo: status.second.flatMap { details[$0] },
+                                   change: change, added: change == .same && initialized ? 0 : status.added,
+                                   removed: change == .same && initialized ? 0 : status.removed, isDirty: status.isDirty,
+                                   isInitialized: initialized, status: ownStatus, differences: differences)
     }
 
     @discardableResult package func deleteFiles(_ items: [ChangedFile]) async throws -> Bool {
@@ -475,22 +572,18 @@ extension GitRepositoryModule: RepositoryFileStatusDataSource {
 
 
     package func loadDiffTools() async throws -> [String] {
-        let result = try await run(GitCommand(arguments: ["config", "--get-regexp", "^(difftool\\..*\\.(cmd|path)|diff\\.tool)$"],
-                                              accessesRemote: false, changesRepositoryState: false))
-        var names: [String] = []
-        for line in result.standardOutputString.split(separator: "\n") {
-            let parts = line.split(separator: " ", maxSplits: 1)
-            guard let key = parts.first else { continue }
-            let name: String
-            if key == "diff.tool" {
-                name = parts.count > 1 ? String(parts[1]) : ""
-            } else {
-                let components = key.split(separator: ".")
-                guard components.count >= 3 else { continue }
-                name = components.dropFirst().dropLast().joined(separator: ".")
-            }
-            if !name.isEmpty, !names.contains(name) { names.append(name) }
+        if let task = diffToolDiscoveryTask { return await task.value }
+        let root = try fileStatusRoot()
+        let task = Task { [git] in
+            do {
+                let selected = try await git.run(GitCommand(arguments: ["config", "--get", "diff.tool"], accessesRemote: false, changesRepositoryState: false), in: root)
+                let result = try await git.run(GitCommand(arguments: ["difftool", "--tool-help"], accessesRemote: false, changesRepositoryState: false), in: root)
+                guard result.succeeded else { return [String]() }
+                return MergeToolInvocation.availableTools(output: result.standardOutputString,
+                    defaultTool: selected.standardOutputString.trimmingCharacters(in: .whitespacesAndNewlines))
+            } catch { return [String]() }
         }
-        return names
+        diffToolDiscoveryTask = task
+        return await task.value
     }
 }

@@ -40,60 +40,173 @@ enum ApplicationThemeReader {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("GitExtensionsMac/Themes", isDirectory: true)
     }
-    static func availableThemes() -> [String] {
-        let user = (try? FileManager.default.contentsOfDirectory(at: userDirectory, includingPropertiesForKeys: nil)) ?? []
+    static func availableThemes(user directory: URL = userDirectory) -> [String] {
+        let user = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
         return ["invariant.css", "light+.css", "dark.css", "dark+.css"]
             + user.filter { $0.pathExtension.lowercased() == "css" }.map { "user/" + $0.lastPathComponent }.sorted()
     }
+    static func resolve(_ name: String, bundled: URL = bundledDirectory, user: URL = userDirectory) -> URL {
+        let isUser = name.hasPrefix("user/") || name.hasPrefix("{UserAppData}/")
+        var relative = isUser ? String(name.dropFirst(name.hasPrefix("user/") ? 5 : 14)) : name
+        if relative.lowercased().hasSuffix(".css") { relative = String(relative.dropLast(4)) }
+        if !isUser && ["light", "invariant"].contains(relative.lowercased()) { relative = "invariant" }
+        return (isUser ? user : bundled).appendingPathComponent(relative + ".css")
+    }
+
+    static let applicationColorNames: [String] = [
+        "PanelBackground", "EditorBackground", "LineNumberBackground", "AuthoredHighlight", "Selection",
+        "HighlightAllOccurences", "InactiveSelectionHighlight",
+        "GraphBranch1", "GraphBranch2", "GraphBranch3", "GraphBranch4", "GraphBranch5", "GraphBranch6", "GraphBranch7", "GraphBranch8",
+        "GraphNonRelativeBranch", "Branch", "RemoteBranch", "Tag", "OtherTag", "DiffSection"
+    ] + ["Black", "Red", "Green", "Yellow", "Blue", "Magenta", "Cyan", "White"].flatMap { color in
+        ["ForeNormal", "BackNormal", "ForeBold", "BackBold"].map { "AnsiTerminal" + color + $0 }
+    }
+
+    static let systemColorNames = "ActiveBorder,ActiveCaption,ActiveCaptionText,AppWorkspace,Control,ControlDark,ControlDarkDark,ControlLight,ControlLightLight,ControlText,Desktop,GrayText,Highlight,HighlightText,HotTrack,InactiveBorder,InactiveCaption,InactiveCaptionText,Info,InfoText,Menu,MenuText,ScrollBar,Window,WindowFrame,WindowText,ButtonFace,ButtonHighlight,ButtonShadow,GradientActiveCaption,GradientInactiveCaption,MenuBar,MenuHighlight,RebeccaPurple".split(separator: ",").map(String.init)
+
+    private static let knownColorNames: Set<String> = Set("ActiveBorder,ActiveCaption,ActiveCaptionText,AppWorkspace,Control,ControlDark,ControlDarkDark,ControlLight,ControlLightLight,ControlText,Desktop,GrayText,Highlight,HighlightText,HotTrack,InactiveBorder,InactiveCaption,InactiveCaptionText,Info,InfoText,Menu,MenuText,ScrollBar,Window,WindowFrame,WindowText,Transparent,AliceBlue,AntiqueWhite,Aqua,Aquamarine,Azure,Beige,Bisque,Black,BlanchedAlmond,Blue,BlueViolet,Brown,BurlyWood,CadetBlue,Chartreuse,Chocolate,Coral,CornflowerBlue,Cornsilk,Crimson,Cyan,DarkBlue,DarkCyan,DarkGoldenrod,DarkGray,DarkGreen,DarkKhaki,DarkMagenta,DarkOliveGreen,DarkOrange,DarkOrchid,DarkRed,DarkSalmon,DarkSeaGreen,DarkSlateBlue,DarkSlateGray,DarkTurquoise,DarkViolet,DeepPink,DeepSkyBlue,DimGray,DodgerBlue,Firebrick,FloralWhite,ForestGreen,Fuchsia,Gainsboro,GhostWhite,Gold,Goldenrod,Gray,Green,GreenYellow,Honeydew,HotPink,IndianRed,Indigo,Ivory,Khaki,Lavender,LavenderBlush,LawnGreen,LemonChiffon,LightBlue,LightCoral,LightCyan,LightGoldenrodYellow,LightGray,LightGreen,LightPink,LightSalmon,LightSeaGreen,LightSkyBlue,LightSlateGray,LightSteelBlue,LightYellow,Lime,LimeGreen,Linen,Magenta,Maroon,MediumAquamarine,MediumBlue,MediumOrchid,MediumPurple,MediumSeaGreen,MediumSlateBlue,MediumSpringGreen,MediumTurquoise,MediumVioletRed,MidnightBlue,MintCream,MistyRose,Moccasin,NavajoWhite,Navy,OldLace,Olive,OliveDrab,Orange,OrangeRed,Orchid,PaleGoldenrod,PaleGreen,PaleTurquoise,PaleVioletRed,PapayaWhip,PeachPuff,Peru,Pink,Plum,PowderBlue,Purple,Red,RosyBrown,RoyalBlue,SaddleBrown,Salmon,SandyBrown,SeaGreen,SeaShell,Sienna,Silver,SkyBlue,SlateBlue,SlateGray,Snow,SpringGreen,SteelBlue,Tan,Teal,Thistle,Tomato,Turquoise,Violet,Wheat,White,WhiteSmoke,Yellow,YellowGreen,ButtonFace,ButtonHighlight,ButtonShadow,GradientActiveCaption,GradientInactiveCaption,MenuBar,MenuHighlight,RebeccaPurple".split(separator: ",").map(String.init))
+
     static func load(_ name: String, colorblind: Bool, bundled: URL = bundledDirectory, user: URL = userDirectory) throws -> [String: Int] {
-        struct Entry { let specificity: Int; let value: Int? }
+        struct Entry { let specificity: Int; let value: Int }
         var entries: [String: Entry] = [:]
-        func resolve(_ name: String) throws -> URL {
-            let isUser = name.hasPrefix("user/") || name.hasPrefix("{UserAppData}/")
-            let relative = name.replacingOccurrences(of: "{UserAppData}/", with: "").replacingOccurrences(of: "user/", with: "")
-            guard !relative.isEmpty, (relative as NSString).lastPathComponent == relative, relative.hasSuffix(".css") else {
-                throw ApplicationThemeError.invalid("Invalid theme import: \(name)")
-            }
-            return (isUser ? user : bundled).appendingPathComponent(relative)
-        }
-        func read(_ name: String, chain: Set<URL>) throws {
-            let url = try resolve(name).resolvingSymlinksInPath()
-            guard !chain.contains(url), chain.count < 32 else { throw ApplicationThemeError.invalid("Cyclic theme import: \(name)") }
+        func read(_ name: String, chain: Set<String>) throws {
+            let url = resolve(name, bundled: bundled, user: user).resolvingSymlinksInPath()
+            let identity = url.path.lowercased()
+            guard !chain.contains(identity), chain.count < 32 else { throw ApplicationThemeError.invalid("Cycling CSS import: \(name)") }
             let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
-            guard (attributes[.size] as? NSNumber)?.intValue ?? 0 <= 1_048_576 else { throw ApplicationThemeError.invalid("Theme exceeds 1 MB: \(name)") }
-            var text = try String(contentsOf: url, encoding: .utf8)
-            let comments = try NSRegularExpression(pattern: #"/\*[\s\S]*?\*/"#)
+            guard (attributes[.size] as? NSNumber)?.intValue ?? 0 <= 1_048_576 else {
+                throw ApplicationThemeError.invalid("Theme file size exceeds 1,048,576 bytes: \(name)")
+            }
+            let data = try Data(contentsOf: url)
+            let encoding: String.Encoding = data.starts(with: [0xFF, 0xFE, 0, 0]) || data.starts(with: [0, 0, 0xFE, 0xFF]) ? .utf32
+                : data.starts(with: [0xFF, 0xFE]) || data.starts(with: [0xFE, 0xFF]) ? .utf16 : .utf8
+            guard var text = String(data: data, encoding: encoding) else { throw ApplicationThemeError.invalid("Invalid theme encoding: \(name)") }
+            if text.first == "\u{FEFF}" { text.removeFirst() }
+            let comments = try NSRegularExpression(pattern: #"/\*[\s\S]*?(?:\*/|$)"#)
             text = comments.stringByReplacingMatches(in: text, range: NSRange(text.startIndex..., in: text), withTemplate: "")
-            let imports = try NSRegularExpression(pattern: #"@import\s+url\(\s*["']?([^"')]+)["']?\s*\)\s*;"#)
+            let imports = try NSRegularExpression(pattern: #"@import\s+(?:url\(\s*["']?([^"')]+?)["']?\s*\)|["']([^"']+)["'])[^;]*;"#)
             for match in imports.matches(in: text, range: NSRange(text.startIndex..., in: text)) {
-                try read((text as NSString).substring(with: match.range(at: 1)), chain: chain.union([url]))
+                let range = match.range(at: 1).location == NSNotFound ? match.range(at: 2) : match.range(at: 1)
+                try read((text as NSString).substring(with: range).trimmingCharacters(in: .whitespacesAndNewlines), chain: chain.union([identity]))
             }
             text = imports.stringByReplacingMatches(in: text, range: NSRange(text.startIndex..., in: text), withTemplate: "")
-            let rules = try NSRegularExpression(pattern: #"([^{}]+)\{([^{}]*)\}"#)
+            let rules = try NSRegularExpression(pattern: #"([^{}]+)\{([^{}]*)(?:\}|$)"#)
             for match in rules.matches(in: text, range: NSRange(text.startIndex..., in: text)) {
                 let selector = (text as NSString).substring(with: match.range(at: 1)).trimmingCharacters(in: .whitespacesAndNewlines)
-                let body = (text as NSString).substring(with: match.range(at: 2)).trimmingCharacters(in: .whitespacesAndNewlines)
-                guard selector.hasPrefix("."), !selector.contains(where: { $0.isWhitespace }) else { throw ApplicationThemeError.invalid("Invalid theme selector: \(selector)") }
+                let body = (text as NSString).substring(with: match.range(at: 2))
+                let value = try ruleColor(body, selector: selector)
+                guard selector.hasPrefix(".") else { throw ApplicationThemeError.invalid("Invalid CSS rule '\(selector)'") }
                 let classes = selector.dropFirst().split(separator: ".").map(String.init)
-                guard let key = classes.first else { continue }
+                guard let key = classes.first else { throw ApplicationThemeError.invalid("Invalid CSS rule '\(selector)'") }
                 guard classes.dropFirst().allSatisfy({ $0 == "colorblind" && colorblind }) else { continue }
                 if let previous = entries[key], previous.specificity > classes.count { continue }
-                let value: Int?
-                if body.isEmpty && key.hasPrefix("GraphBranch") { value = nil }
-                else {
-                    let declaration = try NSRegularExpression(pattern: #"(?:^|;)\s*color\s*:\s*([^;]+)"#)
-                    guard let color = declaration.firstMatch(in: body, range: NSRange(body.startIndex..., in: body)),
-                          let parsed = parseColor((body as NSString).substring(with: color.range(at: 1))) else {
-                        throw ApplicationThemeError.invalid("Invalid theme color: \(selector)")
-                    }
-                    value = parsed
+                if key == "Graph" { continue }
+                guard applicationColorNames.contains(key) || knownColorNames.contains(key) else {
+                    throw ApplicationThemeError.invalid("Unknown color name \"\(key)\"")
                 }
                 entries[key] = Entry(specificity: classes.count, value: value)
             }
         }
-        try read(name, chain: [])
-        return entries.mapValues { $0.value ?? -1 }
+        do { try read(name, chain: []) }
+        catch { throw ApplicationThemeError.invalid("Failed to load \(name): \(error.localizedDescription)") }
+        return entries.mapValues(\.value)
     }
+
+    private enum CSSColor {
+        case rgb(Int), unsupported, invalid
+    }
+
+    private static func cssColor(_ source: String) -> CSSColor {
+        let value = source.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if value.hasPrefix("#") {
+            let digits = String(value.dropFirst())
+            guard [3, 6].contains(digits.count), digits.allSatisfy({ $0.isASCII && $0.isHexDigit }) else { return .invalid }
+            return .rgb(Int(digits.count == 3 ? digits.map { "\($0)\($0)" }.joined() : digits, radix: 16)!)
+        }
+        if let named = namedColors[value] ?? cssSystemColors[value] { return .rgb(named) }
+        if value.hasPrefix("rgb("), value.hasSuffix(")") {
+            let fields = value.dropFirst(4).dropLast().split(separator: ",", omittingEmptySubsequences: false)
+            guard fields.count == 3 else { return .invalid }
+            var components: [Int] = []
+            for field in fields {
+                let component = field.trimmingCharacters(in: .whitespacesAndNewlines)
+                if component.hasSuffix("%") {
+                    let number = String(component.dropLast())
+                    guard number.range(of: #"^[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)$"#, options: .regularExpression) != nil,
+                          let percent = Float(number), percent.isFinite else { return .invalid }
+                    let scaled = Double(255 * (percent * 0.01))
+                    guard scaled.isFinite else { return .invalid }
+                    components.append((Int(scaled.truncatingRemainder(dividingBy: 256)) + 256) % 256)
+                } else {
+                    guard let byte = Int32(component), byte >= 0 else { return .invalid }
+                    components.append(Int(min(byte, 255)))
+                }
+            }
+            return .rgb(components[0] << 16 | components[1] << 8 | components[2])
+        }
+        if ["transparent", "inherit", "initial"].contains(value) { return .unsupported }
+        if value.hasPrefix("hsl("), parseColor(value) != nil { return .unsupported }
+        if value.hasPrefix("rgba(") || value.hasPrefix("hsla(") {
+            let fields = value.dropFirst(5).dropLast().split(separator: ",", omittingEmptySubsequences: false)
+            guard value.hasSuffix(")"), fields.count == 4, let alpha = Double(fields[3].trimmingCharacters(in: .whitespacesAndNewlines)), alpha.isFinite else { return .invalid }
+            let base = (value.hasPrefix("rgba(") ? "rgb(" : "hsl(") + fields.prefix(3).joined(separator: ",") + ")"
+            if parseColor(base) != nil { return .unsupported }
+        }
+        return .invalid
+    }
+
+    private static let cssSystemColors: [String: Int] = [
+        "background": 0x6363CE,
+        "buttontext": 0x000000,
+        "captiontext": 0x000000,
+        "infobackground": 0xFBFCC5,
+        "threeddarkshadow": 0x666666,
+        "threedface": 0xFFFFFF,
+        "threedhighlight": 0xDDDDDD,
+        "threedlightshadow": 0xC0C0C0,
+        "threedshadow": 0x888888,
+        "activeborder": 0xFFFFFF,
+        "activecaption": 0xCCCCCC,
+        "appworkspace": 0xFFFFFF,
+        "graytext": 0x808080,
+        "highlight": 0xB5D5FF,
+        "highlighttext": 0x000000,
+        "inactiveborder": 0xFFFFFF,
+        "inactivecaption": 0xFFFFFF,
+        "inactivecaptiontext": 0x7F7F7F,
+        "infotext": 0x000000,
+        "menu": 0xF7F7F7,
+        "menutext": 0x000000,
+        "scrollbar": 0xFFFFFF,
+        "window": 0xFFFFFF,
+        "windowframe": 0xCCCCCC,
+        "windowtext": 0x000000,
+        "buttonface": 0xDDDDDD,
+        "buttonhighlight": 0xDDDDDD,
+        "buttonshadow": 0x888888
+    ]
+
+    private static func ruleColor(_ body: String, selector: String) throws -> Int {
+        var selected: CSSColor = .invalid
+        var important = false
+        for declaration in body.split(separator: ";", omittingEmptySubsequences: false) {
+            guard let colon = declaration.firstIndex(of: ":"), declaration[..<colon].trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "color" else { continue }
+            var value = String(declaration[declaration.index(after: colon)...]).trimmingCharacters(in: .whitespacesAndNewlines)
+            let priority = value.hasSuffix("!important")
+            if priority { value = String(value.dropLast(10)).trimmingCharacters(in: .whitespacesAndNewlines) }
+            let parsed = cssColor(value)
+            if case .invalid = parsed { continue }
+            if important && !priority { continue }
+            selected = parsed; important = priority
+        }
+        switch selected {
+        case .rgb(let value): return value
+        case .invalid where selector.hasPrefix(".GraphBranch"): return -1
+        default: throw ApplicationThemeError.invalid("Invalid CSS rule '\(selector)'")
+        }
+    }
+
+    static func formatColor(_ value: Int) -> String { String(format: "#%06x", (value == -1 ? 0 : value) & 0xFFFFFF) }
 
     static func parseColor(_ value: String) -> Int? {
         let value = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -292,33 +405,120 @@ enum ApplicationThemeReader {
     ]
 }
 
-@MainActor
-enum ApplicationColors {
-    private static var cache: [String: [String: Int]] = [:]
-    private(set) static var generation = 0
-    static func invalidate() { cache = [:]; generation &+= 1 }
-    private static func colors(_ name: String, colorblind: Bool) -> [String: Int]? {
-        let key = name + String(colorblind)
-        if let cached = cache[key] { return cached }
-        guard let loaded = try? ApplicationThemeReader.load(name, colorblind: colorblind) else { return nil }
-        cache[key] = loaded
-        return loaded
+struct ApplicationThemeFailure: LocalizedError, Hashable {
+    static let helpURL = URL(string: "https://github.com/gitextensions/gitextensions/wiki/Dark-Mode")!
+    let themeFile: String
+    let colorblind: Bool
+    let invariant: Bool
+    let detail: String
+
+    var isBuiltin: Bool { !themeFile.hasPrefix("user/") && !themeFile.hasPrefix("{UserAppData}/") }
+    var themeName: String { ((themeFile as NSString).lastPathComponent as NSString).deletingPathExtension }
+    var errorDescription: String? {
+        let identity = invariant ? "invariant theme" : "\(isBuiltin ? "preinstalled" : "user-defined") theme \(themeName)\(colorblind ? ".colorblind" : "")"
+        return "Failed to load \(identity): \(detail)\n\nSee also \(Self.helpURL.absoluteString)"
     }
-    static func color(_ name: String, fallback: NSColor) -> NSColor {
-        let preferences = AppSettingsStore.shared.colorPreferences
-        guard !preferences.themeFile.isEmpty || preferences.colorblind else { return fallback }
-        if preferences.themeFile.isEmpty, AppSettingsStore.shared.preferences.theme == .system {
-            let light = colors("invariant.css", colorblind: preferences.colorblind)?[name]
-            let dark = colors("dark.css", colorblind: preferences.colorblind)?[name]
-            return NSColor(name: nil) { appearance in
-                guard let value = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? dark : light else { return fallback }
-                if value < 0 { return .clear }
-                return NSColor(calibratedRed: CGFloat((value >> 16) & 255) / 255, green: CGFloat((value >> 8) & 255) / 255, blue: CGFloat(value & 255) / 255, alpha: 1)
+}
+
+struct ApplicationThemeLoadResult: Equatable {
+    let themeFile: String
+    let colors: [String: Int]
+    let resetSelectedTheme: Bool
+    let nativeFallback: Bool
+    let failures: [ApplicationThemeFailure]
+}
+
+enum ApplicationThemeRecovery {
+    static let defaultThemeFile = "invariant.css"
+
+    static func load(_ selected: String, colorblind: Bool,
+                     reader: (String, Bool) throws -> [String: Int]) -> ApplicationThemeLoadResult {
+        let invariant: [String: Int]
+        do { invariant = try reader(defaultThemeFile, false) }
+        catch {
+            return ApplicationThemeLoadResult(themeFile: selected, colors: [:], resetSelectedTheme: false, nativeFallback: true,
+                failures: [ApplicationThemeFailure(themeFile: defaultThemeFile, colorblind: false, invariant: true, detail: error.localizedDescription)])
+        }
+        do {
+            let values = selected == defaultThemeFile && !colorblind ? invariant : try reader(selected, colorblind)
+            return ApplicationThemeLoadResult(themeFile: selected, colors: values, resetSelectedTheme: false, nativeFallback: false, failures: [])
+        } catch {
+            let failure = ApplicationThemeFailure(themeFile: selected, colorblind: colorblind, invariant: false, detail: error.localizedDescription)
+            if selected == defaultThemeFile || !colorblind {
+                return ApplicationThemeLoadResult(themeFile: defaultThemeFile, colors: invariant, resetSelectedTheme: true, nativeFallback: false, failures: [failure])
+            }
+            do {
+                let values = try reader(defaultThemeFile, colorblind)
+                return ApplicationThemeLoadResult(themeFile: defaultThemeFile, colors: values, resetSelectedTheme: true, nativeFallback: false, failures: [failure])
+            } catch {
+                let fallbackFailure = ApplicationThemeFailure(themeFile: defaultThemeFile, colorblind: colorblind, invariant: true, detail: error.localizedDescription)
+                return ApplicationThemeLoadResult(themeFile: defaultThemeFile, colors: [:], resetSelectedTheme: true, nativeFallback: true, failures: [failure, fallbackFailure])
             }
         }
-        let selected = preferences.themeFile.isEmpty ? (AppSettingsStore.shared.preferences.theme == .dark ? "dark.css" : "invariant.css") : preferences.themeFile
-        guard let values = colors(selected, colorblind: preferences.colorblind) else { return fallback }
-        guard let value = values[name] else { return fallback }
+    }
+}
+
+@MainActor
+final class ApplicationThemeRuntime {
+    private struct Key: Hashable { let name: String; let colorblind: Bool }
+    private let reader: (String, Bool) throws -> [String: Int]
+    private let report: (ApplicationThemeFailure) -> Void
+    private var values: [Key: [String: Int]] = [:]
+    private var results: [Key: ApplicationThemeLoadResult] = [:]
+    private var reported: Set<ApplicationThemeFailure> = []
+
+    init(reader: @escaping (String, Bool) throws -> [String: Int], report: @escaping (ApplicationThemeFailure) -> Void) {
+        self.reader = reader; self.report = report
+    }
+
+    func load(_ name: String, colorblind: Bool) -> ApplicationThemeLoadResult {
+        let key = Key(name: name, colorblind: colorblind)
+        if let cached = results[key] { return cached }
+        let result = ApplicationThemeRecovery.load(name, colorblind: colorblind) { name, variation in
+            let key = Key(name: name, colorblind: variation)
+            if let cached = self.values[key] { return cached }
+            let loaded = try self.reader(name, variation)
+            self.values[key] = loaded
+            return loaded
+        }
+        results[key] = result
+        if result.resetSelectedTheme {
+            results[Key(name: result.themeFile, colorblind: colorblind)] = ApplicationThemeLoadResult(
+                themeFile: result.themeFile, colors: result.colors, resetSelectedTheme: false,
+                nativeFallback: result.nativeFallback, failures: [])
+        }
+        for failure in result.failures where reported.insert(failure).inserted { report(failure) }
+        return result
+    }
+
+    func invalidate() { values = [:]; results = [:]; reported = [] }
+}
+
+@MainActor
+enum ApplicationColors {
+    private(set) static var generation = 0
+    static func invalidate() { generation &+= 1 }
+    static func color(_ name: String, fallback: NSColor) -> NSColor {
+        color(name, fallback: fallback, store: .shared)
+    }
+    static func color(_ name: String, fallback: NSColor, store: AppSettingsStore) -> NSColor {
+        var preferences = store.colorPreferences
+        guard !preferences.themeFile.isEmpty || preferences.colorblind else { return fallback }
+        if preferences.themeFile.isEmpty, store.preferences.theme == .system {
+            let light = store.loadTheme("invariant.css").colors[name]
+            let dark = store.loadTheme("dark.css").colors[name]
+            preferences = store.colorPreferences
+            if !preferences.themeFile.isEmpty { return color(name, fallback: fallback, store: store) }
+            return NSColor(name: nil) { appearance in
+                guard let value = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? dark : light else { return fallback }
+                return fixedColor(value)
+            }
+        }
+        let selected = preferences.themeFile.isEmpty ? (store.preferences.theme == .dark ? "dark.css" : "invariant.css") : preferences.themeFile
+        guard let value = store.loadTheme(selected).colors[name] else { return fallback }
+        return fixedColor(value)
+    }
+    private static func fixedColor(_ value: Int) -> NSColor {
         if value < 0 { return .clear }
         return NSColor(calibratedRed: CGFloat((value >> 16) & 255) / 255, green: CGFloat((value >> 8) & 255) / 255, blue: CGFloat(value & 255) / 255, alpha: 1)
     }

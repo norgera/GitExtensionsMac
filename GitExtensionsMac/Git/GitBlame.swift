@@ -64,7 +64,11 @@ package struct BlameLine: Sendable {
 
 package struct BlameResult: Sendable {
     package let lines: [BlameLine]
-    package init(lines: [BlameLine]) { self.lines = lines }
+    package let contentEncoding: String.Encoding
+    package init(lines: [BlameLine], contentEncoding: String.Encoding = .utf8) {
+        self.lines = lines
+        self.contentEncoding = contentEncoding
+    }
 }
 
 
@@ -178,7 +182,7 @@ package enum BlameCommands {
             else if let v = value("summary") { summary = v; hasHeader = true }
             else if let v = value("filename") { fileName = PatchPreviewParser.unquote(v); hasHeader = true }
         }
-        return BlameResult(lines: lines)
+        return BlameResult(lines: lines, contentEncoding: contentEncoding)
     }
 
 

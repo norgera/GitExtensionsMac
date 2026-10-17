@@ -136,7 +136,9 @@ enum RevisionGridPresentation {
 
 
     static func messageToolTip(_ commit: Commit, notesInSeparateColumn: Bool,
-                               aheadBehind: (RevisionReference) -> AheadBehindData? = { _ in nil }) -> String? {
+                               aheadBehind: (RevisionReference) -> AheadBehindData? = { _ in nil },
+                               artificialCounts: RevisionChangeCounts? = nil, showArtificialCounts: Bool = true) -> String? {
+        if commit.isArtificial { return showArtificialCounts ? artificialCounts?.summary : nil }
         let references = commit.references.filter { $0.kind != .stash }
         guard !commit.isArtificial, !commit.body.isEmpty || !references.isEmpty else { return nil }
         var text = summary(fullMessage(commit, notesInSeparateColumn: notesInSeparateColumn)) ?? commit.subject
@@ -158,7 +160,8 @@ enum RevisionGridPresentation {
         references.sorted { rank($0) == rank($1) ? $0.name.utf8.lexicographicallyPrecedes($1.name.utf8) : rank($0) < rank($1) }
     }
     private static func rank(_ reference: RevisionReference) -> Int {
-        switch reference.kind {
+        if reference.isSelectedHeadMergeSource { return 2 }
+        return switch reference.kind {
         case .bisectGood, .bisectBad: 0
         case .currentBranch, .head: 1
         case .localBranch: 3
@@ -257,5 +260,48 @@ enum RevisionGridPresentation {
 
     static func hasAutosquashMarker(_ subject: String) -> Bool {
         subject.hasPrefix("fixup!") || subject.hasPrefix("squash!") || subject.hasPrefix("amend!")
+    }
+}
+
+
+struct AuthorRevisionHighlighting {
+    private(set) var authorEmailToHighlight: String?
+
+    mutating func processSelection(_ revisions: [Commit], currentUserEmail: String?) -> Bool {
+        guard revisions.count <= 1 else { return false }
+        let selectedEmail = revisions.first?.authorEmail
+        guard !Self.equals(selectedEmail, authorEmailToHighlight) else { return false }
+        authorEmailToHighlight = revisions.isEmpty ? currentUserEmail : selectedEmail
+        return true
+    }
+
+    mutating func updateCurrentUser(_ email: String?, selected: [Commit]) {
+        if selected.isEmpty { authorEmailToHighlight = email }
+        else { _ = processSelection(selected, currentUserEmail: email) }
+    }
+
+    func isHighlighted(_ revision: Commit?) -> Bool {
+        guard let email = revision?.authorEmail, !email.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+        return Self.equals(email, authorEmailToHighlight)
+    }
+
+    private static func equals(_ left: String?, _ right: String?) -> Bool {
+        switch (left, right) {
+        case (nil, nil): true
+        case let (left?, right?): left.caseInsensitiveCompare(right) == .orderedSame
+        default: false
+        }
+    }
+}
+
+enum TrackingBranchNavigation {
+    static func canNavigate(visible: Bool, alternate: Bool) -> Bool { visible || alternate }
+    static func target(branch: Branch, data: [String: AheadBehindData], alternate: Bool) -> String {
+        guard alternate else { return branch.id }
+        if branch.isRemote {
+            guard let related = data.values.sorted(by: { $0.branch < $1.branch }).first(where: { $0.remoteRef == branch.id }) else { return branch.id }
+            return "refs/heads/" + related.branch
+        }
+        return data[branch.name]?.remoteRef ?? branch.id
     }
 }

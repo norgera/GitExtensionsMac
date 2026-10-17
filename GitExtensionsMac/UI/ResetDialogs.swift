@@ -177,8 +177,9 @@ private final class ResetCurrentBranchViewController: NSViewController, NSWindow
 
         let modeStack = NSStackView(views: modes)
         modeStack.orientation = .vertical
-        modeStack.alignment = .leading
+        modeStack.alignment = .width
         modeStack.spacing = 8
+        modes.forEach { $0.widthAnchor.constraint(equalTo: modeStack.widthAnchor).isActive = true }
         let modeBox = NSBox()
         modeBox.title = "Reset type"
         modeBox.contentView = resetPadded(modeStack, x: 12, y: 10)
@@ -200,7 +201,7 @@ private final class ResetCurrentBranchViewController: NSViewController, NSWindow
         content.spacing = 10
         resetPin(content, in: root, inset: 14)
         summary.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
-        summary.heightAnchor.constraint(equalToConstant: 132).isActive = true
+        summary.heightAnchor.constraint(greaterThanOrEqualToConstant: 150).isActive = true
         modeBox.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
         buttons.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
         view = root
@@ -262,6 +263,24 @@ private final class ResetCurrentBranchViewController: NSViewController, NSWindow
 }
 
 @MainActor
+enum ResetBranchDropdown {
+    static func opensAfterKeyUp(_ keyCode: UInt16, isOpen: Bool) -> Bool {
+        !isOpen && ![36, 53, 58, 61, 76].contains(keyCode)
+    }
+
+    @discardableResult
+    static func open(_ combo: NSComboBox) -> Bool {
+        guard let window = combo.window, window.makeFirstResponder(combo),
+              let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],
+                  timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                  context: nil, characters: "\u{f701}", charactersIgnoringModifiers: "\u{f701}",
+                  isARepeat: false, keyCode: 125) else { return false }
+        window.sendEvent(event)
+        return true
+    }
+}
+
+@MainActor
 private final class ResetAnotherBranchViewController: NSViewController, NSWindowDelegate, NSComboBoxDelegate {
     weak var panel: NSPanel?
     private let source: any RepositoryResettingDataSource
@@ -270,11 +289,14 @@ private final class ResetAnotherBranchViewController: NSViewController, NSWindow
     private let target: Commit
     private let completion: (ResetAnotherBranchDialogValue?) -> Void
     private let selector = NSComboBox()
+    private var keyUpMonitor: Any?
+    private var isDropdownOpen = false
+    private var pendingDropdownSelection: (String, NSRange)?
     private let summary = CommitSummaryView()
     private let checkout = NSButton(checkboxWithTitle: "Checkout branch after reset", target: nil, action: nil)
     private let force = NSButton(checkboxWithTitle: "Force reset for a non-fast-forward reset", target: nil, action: nil)
     private let validation = NSTextField(wrappingLabelWithString: "")
-    private let reset = NSButton(title: "Reset", target: nil, action: nil)
+    private let reset = NSButton(title: "OK", target: nil, action: nil)
     private var validationTask: Task<Void, Never>?
     private var completed = false
 
@@ -305,15 +327,19 @@ private final class ResetAnotherBranchViewController: NSViewController, NSWindow
     }
 
     required init?(coder: NSCoder) { nil }
-    deinit { validationTask?.cancel() }
+    deinit {
+        validationTask?.cancel()
+        if let keyUpMonitor { NSEvent.removeMonitor(keyUpMonitor) }
+    }
 
     override func loadView() {
         let root = NSView()
-        let warning = NSTextField(wrappingLabelWithString: "⚠︎ You can only reset a branch safely if there is a direct path from it to the selected revision. Forcing a reset may leave commits unreachable.")
+        let warning = NSTextField(wrappingLabelWithString: "⚠︎ You can only reset a branch safely if there is a direct path from it to selected revision.\nForcing a branch to reset if it has not been merged might leave some commits unreachable.")
         warning.textColor = .systemOrange
         selector.addItems(withObjectValues: branches.map(\.name))
         selector.completes = true
         selector.delegate = self
+        selector.setAccessibilityIdentifier("ResetAnotherBranch.Branches")
         selector.widthAnchor.constraint(greaterThanOrEqualToConstant: 350).isActive = true
         if let preferredBranchName {
             selector.stringValue = preferredBranchName
@@ -333,12 +359,13 @@ private final class ResetAnotherBranchViewController: NSViewController, NSWindow
         cancel.keyEquivalent = "\u{1b}"
         let spacer = NSView()
         spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let buttons = NSStackView(views: [validation, spacer, cancel, reset])
+        let buttons = NSStackView(views: [spacer, reset, cancel])
         buttons.orientation = .horizontal
         buttons.spacing = 8
         let content = NSStackView(views: [
             warning,
-            resetLabeled("Reset local branch:", selector),
+            NSTextField(labelWithString: "Reset local branch:"),
+            selector,
             summary,
             checkout,
             force,
@@ -350,9 +377,10 @@ private final class ResetAnotherBranchViewController: NSViewController, NSWindow
         resetPin(content, in: root, inset: 14)
         warning.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
         summary.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
-        summary.heightAnchor.constraint(equalToConstant: 132).isActive = true
+        summary.heightAnchor.constraint(greaterThanOrEqualToConstant: 150).isActive = true
         buttons.widthAnchor.constraint(equalTo: content.widthAnchor).isActive = true
         view = root
+        installBranchMonitor()
         validateSelection()
     }
 
@@ -360,11 +388,41 @@ private final class ResetAnotherBranchViewController: NSViewController, NSWindow
         super.viewDidAppear()
         panel?.delegate = self
         panel?.makeFirstResponder(selector)
-        if selector.stringValue.isEmpty { selector.performClick(nil) }
+        installBranchMonitor()
+        if selector.stringValue.isEmpty { ResetBranchDropdown.open(selector) }
+    }
+
+    private func installBranchMonitor() {
+        if keyUpMonitor == nil {
+            keyUpMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyUp) { [weak self] event in
+                guard let self, let panel, event.window === panel,
+                      let editor = selector.currentEditor() as? NSTextView,
+                      ResetBranchDropdown.opensAfterKeyUp(event.keyCode, isOpen: isDropdownOpen) else { return event }
+                DispatchQueue.main.async { [weak self, weak editor] in
+                    guard let self, let editor, !completed, selector.currentEditor() === editor,
+                          !isDropdownOpen else { return }
+                    pendingDropdownSelection = (editor.string, editor.selectedRange())
+                    ResetBranchDropdown.open(selector)
+                    pendingDropdownSelection = nil
+                }
+                return event
+            }
+        }
     }
 
     func controlTextDidChange(_ obj: Notification) { validateSelection() }
     func comboBoxSelectionDidChange(_ notification: Notification) { validateSelection() }
+
+    func comboBoxWillPopUp(_ notification: Notification) {
+        isDropdownOpen = true
+        if let (text, range) = pendingDropdownSelection, let editor = selector.currentEditor() as? NSTextView {
+            selector.stringValue = text
+            editor.string = text
+            editor.setSelectedRange(range)
+        }
+    }
+
+    func comboBoxWillDismiss(_ notification: Notification) { isDropdownOpen = false }
 
     @objc private func validateSelection() {
         validationTask?.cancel()
@@ -428,6 +486,7 @@ private final class ResetAnotherBranchViewController: NSViewController, NSWindow
         guard !completed else { return }
         completed = true
         validationTask?.cancel()
+        if let keyUpMonitor { NSEvent.removeMonitor(keyUpMonitor); self.keyUpMonitor = nil }
         if let panel, let owner = panel.sheetParent { owner.endSheet(panel) }
         completion(value)
     }

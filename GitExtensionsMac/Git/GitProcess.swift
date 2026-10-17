@@ -26,6 +26,8 @@ package struct GitCommand: Sendable, Equatable {
     }
 
     package var executionClass: ExecutionClass { accessesRemote ? .remote : .local }
+
+    package var processArguments: [String] { GitCommandConfiguration.default.apply(to: arguments) }
 }
 
 package struct GitCommandResult: Sendable {
@@ -159,7 +161,7 @@ package extension GitCommandRunning {
             recordsOutput: ProcessOutputHistory.recordsOutput && command.changesRepositoryState, environment: environment)
         do {
             let result = try await CommandLogContext.entryID.withValue(logID) { try await run(
-                arguments: command.arguments,
+                arguments: command.processArguments,
                 in: directory,
                 standardInput: standardInput,
                 environment: environment
@@ -169,7 +171,7 @@ package extension GitCommandRunning {
                 ? GitLogOutputEncoding.transcode(result.standardOutput, from: await logOutputEncoding(in: directory))
                 : result.standardOutput
             return GitCommandResult(
-                arguments: result.arguments,
+                arguments: command.arguments,
                 standardOutput: output,
                 standardError: result.standardError,
                 exitStatus: result.exitStatus,
@@ -189,9 +191,14 @@ package extension GitCommandRunning {
         output: @escaping GitOutputHandler
     ) async throws -> GitCommandResult {
         let logID = CommandLog.shared.start(command, directory: directory, recordsOutput: ProcessOutputHistory.recordsOutput, environment: environment)
+        if ProcessOutputHistory.presentsCommands.wrappedValue,
+           var entry = CommandLog.shared.snapshot().first(where: { $0.id == logID }) {
+            entry.executable = (self as? GitProcess)?.commandExecutablePath ?? entry.executable
+            output(GitOutputEvent(stream: .standardOutput, data: Data((entry.commandLine + "\n").utf8)))
+        }
         do {
             let result = try await CommandLogContext.entryID.withValue(logID) { try await runStreaming(
-                arguments: command.arguments,
+                arguments: command.processArguments,
                 in: directory,
                 standardInput: standardInput,
                 environment: environment,
@@ -202,7 +209,7 @@ package extension GitCommandRunning {
             ) }
             CommandLog.shared.finish(logID, result: result)
             return GitCommandResult(
-                arguments: result.arguments,
+                arguments: command.arguments,
                 standardOutput: result.standardOutput,
                 standardError: result.standardError,
                 exitStatus: result.exitStatus,
@@ -238,6 +245,7 @@ package extension GitCommandRunning {
 
 package final class GitProcess: GitCommandRunning, @unchecked Sendable {
     private let executableURL: URL
+    fileprivate var commandExecutablePath: String { executableURL.path }
     private let executionQueue = DispatchQueue(label: "com.gitextensions.mac.git-process", qos: .userInitiated, attributes: .concurrent)
     private let ioQueue = DispatchQueue(label: "com.gitextensions.mac.git-process-io", qos: .userInitiated, attributes: .concurrent)
 
@@ -299,6 +307,7 @@ package final class GitProcess: GitCommandRunning, @unchecked Sendable {
             ioQueue: ioQueue,
             logID: CommandLogContext.entryID.wrappedValue,
             outputHandler: output,
+            interaction: started == nil ? GitInteractiveSession.current.wrappedValue : nil,
             started: started
         )
 
@@ -333,7 +342,13 @@ private final class BackgroundProcessLaunch: @unchecked Sendable {
     }
 }
 
-private enum GitProcessEnvironment {
+package enum GitSshEnvironment {
+    package static func apply(_ path: String) {
+        if path.isEmpty { unsetenv("GIT_SSH") } else { setenv("GIT_SSH", path, 1) }
+    }
+}
+
+enum GitProcessEnvironment {
     private static let packageManagerPaths = [
         "/opt/homebrew/bin",
         "/opt/homebrew/sbin",
@@ -343,20 +358,24 @@ private enum GitProcessEnvironment {
         "/opt/local/sbin"
     ]
 
-    static func make(overrides: [String: String]) -> [String: String] {
-        var environment = ProcessInfo.processInfo.environment
-        let inheritedPaths = (environment["PATH"] ?? "")
+    static func executableSearchPaths(inherited: String? = ProcessInfo.processInfo.environment["PATH"]) -> [String] {
+        let inheritedPaths = (inherited ?? "")
             .split(separator: ":", omittingEmptySubsequences: true)
             .map(String.init)
-        let paths = (packageManagerPaths + inheritedPaths).reduce(into: [String]()) { paths, path in
+        return (packageManagerPaths + inheritedPaths).reduce(into: [String]()) { paths, path in
             guard !paths.contains(path) else { return }
             paths.append(path)
         }
-        environment["PATH"] = paths.joined(separator: ":")
+    }
+
+    static func make(overrides: [String: String], interaction: GitInteractiveSession? = nil) -> [String: String] {
+        var environment = ProcessInfo.processInfo.environment
+        environment["PATH"] = executableSearchPaths(inherited: environment["PATH"]).joined(separator: ":")
         environment["LC_ALL"] = "C"
         environment["LANG"] = "C"
         environment["GIT_OPTIONAL_LOCKS"] = "0"
         environment["GIT_TERMINAL_PROMPT"] = "0"
+        interaction?.environment(inherited: environment).forEach { environment[$0.key] = $0.value }
         overrides.forEach { environment[$0.key] = $0.value }
         return environment
     }
@@ -373,6 +392,7 @@ private final class GitProcessExecution: @unchecked Sendable {
     private let executionQueue: DispatchQueue
     private let ioQueue: DispatchQueue
     private let outputHandler: GitOutputHandler?
+    private let interaction: GitInteractiveSession?
     private let lock = NSLock()
     private var process: Process?
     private var isCancelled = false
@@ -387,8 +407,10 @@ private final class GitProcessExecution: @unchecked Sendable {
         ioQueue: DispatchQueue,
         logID: UUID?,
         outputHandler: GitOutputHandler?,
+        interaction: GitInteractiveSession? = nil,
         started: (@Sendable (Int32) -> Void)? = nil
     ) {
+        self.interaction = interaction
         self.executableURL = executableURL
         self.arguments = arguments
         self.directory = directory
@@ -428,7 +450,7 @@ private final class GitProcessExecution: @unchecked Sendable {
         let process = Process()
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
-        let stdinPipe = standardInput == nil ? nil : Pipe()
+        let stdinPipe = standardInput == nil && interaction == nil ? nil : Pipe()
         process.executableURL = executableURL
         process.arguments = arguments
         process.currentDirectoryURL = directory
@@ -444,7 +466,7 @@ private final class GitProcessExecution: @unchecked Sendable {
             process.standardInput = stdinPipe
         }
 
-        process.environment = GitProcessEnvironment.make(overrides: environmentOverrides)
+        process.environment = GitProcessEnvironment.make(overrides: environmentOverrides, interaction: interaction)
 
         lock.lock()
         if isCancelled {
@@ -467,6 +489,11 @@ private final class GitProcessExecution: @unchecked Sendable {
         lock.unlock()
         if cancelledImmediatelyAfterLaunch, process.isRunning {
             Self.terminateProcessTree(process)
+        }
+
+        var interactiveInput: UUID?
+        if standardInput == nil, let interaction, let stdinPipe {
+            interactiveInput = interaction.attachInput(stdinPipe.fileHandleForWriting.fileDescriptor)
         }
 
         let outputGroup = DispatchGroup()
@@ -510,6 +537,10 @@ private final class GitProcessExecution: @unchecked Sendable {
         }
 
         process.waitUntilExit()
+        if let interactiveInput, let interaction, let stdinPipe {
+            interaction.detachInput(interactiveInput)
+            try? stdinPipe.fileHandleForWriting.close()
+        }
         outputGroup.wait()
         clearProcess()
 

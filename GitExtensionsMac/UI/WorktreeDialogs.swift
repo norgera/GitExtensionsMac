@@ -115,7 +115,7 @@ private final class CreateWorktreeViewController: NSViewController, NSTextFieldD
         ])
         view = root; updatePath()
     }
-    override func viewDidAppear() { super.viewDidAppear(); panel?.delegate = self; panel?.makeFirstResponder(existing.isEnabled ? branches : name) }
+    override func viewDidAppear() { super.viewDidAppear(); panel?.delegate = self; panel?.makeFirstResponder(existing.isEnabled ? existing : name) }
     @objc private func modeChanged(_ sender: NSButton) { existing.state = sender === existing ? .on : .off; new.state = sender === new ? .on : .off; updatePath() }
     @objc private func branchChanged() { updatePath() }
     private var branch: String { new.state == .on ? name.stringValue : branches.titleOfSelectedItem ?? "" }
@@ -210,13 +210,20 @@ private final class ManageWorktreesViewController: NSViewController, NSTableView
         for (key, title, width) in [("path", "Path", 280.0), ("type", "Type", 70.0), ("branch", "Branch", 165.0), ("sha", "SHA-1", 90.0)] {
             let column = NSTableColumn(identifier: .init(key)); column.title = title; column.width = width; table.addTableColumn(column)
         }
+        table.tableColumns.last?.minWidth = 90
+        table.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
         table.dataSource = self; table.delegate = self; table.rowHeight = 30; table.usesAlternatingRowBackgroundColors = true
         table.allowsMultipleSelection = false; table.target = self; table.doubleAction = #selector(openSelected)
         table.onReturn = { [weak self] in self?.openSelected() }
         let scroll = NSScrollView(); scroll.documentView = table; scroll.hasVerticalScroller = true; scroll.hasHorizontalScroller = true
         for (button, action) in [(create, #selector(createWorktree)), (prune, #selector(pruneWorktrees)), (delete, #selector(deleteSelected)), (open, #selector(openSelected))] { button.target = self; button.action = action }
-        let buttons = NSStackView(views: [create, prune, delete, open]); buttons.spacing = 8
-        let stack = NSStackView(views: [scroll, status, buttons]); stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 8
+        let tableSpacer = NSView(); tableSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let tableActions = NSStackView(views: [tableSpacer, delete, open]); tableActions.spacing = 8
+        let bandSpacer = NSView(); bandSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let band = NSStackView(views: [prune, bandSpacer, create]); band.spacing = 8
+        let separator = NSBox(); separator.boxType = .separator
+        let stack = NSStackView(views: [scroll, tableActions, status, separator, band]); stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 8
+        [tableActions, separator, band].forEach { $0.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true }
         root.addSubview(stack); stack.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 8), stack.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -8),
@@ -253,6 +260,7 @@ private final class ManageWorktreesViewController: NSViewController, NSTableView
         Task { @MainActor in
             do {
                 worktrees = try await source.loadWorktreeContext().worktrees; table.reloadData()
+                AppKitFactory.autosizeColumns(table, ["path", "type", "branch"], includeHeader: true); table.sizeLastColumnToFit()
                 if let index = worktrees.firstIndex(where: { $0.path == selectedPath }) { table.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false) }
                 else if !worktrees.isEmpty { table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false) }
                 status.stringValue = ""

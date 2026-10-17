@@ -8,8 +8,6 @@ package enum FileContentDecoder {
         requestedEncoding: RepositoryTextEncoding,
         configuredEncoding: RepositoryTextEncoding? = nil
     ) -> RepositoryFileContent {
-        let requestedEncoding = requestedEncoding == .automatic && !hasTextPreamble(data)
-            ? (configuredEncoding ?? requestedEncoding) : requestedEncoding
         if isImage(data, path: path) {
             return RepositoryFileContent(path: path, kind: .image, data: data)
         }
@@ -18,30 +16,36 @@ package enum FileContentDecoder {
             return RepositoryFileContent(
                 path: path,
                 kind: .binary,
-                text: hexDump(data),
+                text: hexDump(data, path: path),
                 data: data
             )
         }
 
+        if let decoded = decodedText(data, requestedEncoding: requestedEncoding, configuredEncoding: configuredEncoding) {
+            return RepositoryFileContent(path: path, kind: .text, text: decoded.text, data: data, encoding: decoded.encoding)
+        }
+
+        return RepositoryFileContent(path: path, kind: .binary, text: hexDump(data, path: path), data: data)
+    }
+
+    package static func decodedText(_ data: Data, requestedEncoding: RepositoryTextEncoding,
+                                    configuredEncoding: RepositoryTextEncoding? = nil) -> (text: String, encoding: RepositoryTextEncoding, preambleCodeUnits: Int)? {
+        let requestedEncoding = requestedEncoding == .automatic && !hasTextPreamble(data)
+            ? (configuredEncoding ?? requestedEncoding) : requestedEncoding
         let candidates = encodings(for: data, requested: requestedEncoding)
         for candidate in candidates {
             if let value = String(data: dataWithoutPreamble(data, encoding: candidate), encoding: foundationEncoding(candidate)) {
-                return RepositoryFileContent(
-                    path: path,
-                    kind: .text,
-                    text: value,
-                    data: data,
-                    encoding: candidate
-                )
+                return (value, candidate, preambleByteCount(data, encoding: candidate) > 0 ? 1 : 0)
             }
         }
 
-        return RepositoryFileContent(
-            path: path,
-            kind: .binary,
-            text: hexDump(data),
-            data: data
-        )
+        return nil
+    }
+
+    private static let previewAnsiCodes = try! NSRegularExpression(pattern: #"\x1b[\x40-\x5f][^\n]*?[\x40-\x7e]"#)
+    package static func previewText(_ text: String, path: String, historical: Bool) -> String {
+        guard historical, !path.lowercased().hasSuffix(".diff"), !path.lowercased().hasSuffix(".patch") else { return text }
+        return previewAnsiCodes.stringByReplacingMatches(in: text, range: NSRange(location: 0, length: text.utf16.count), withTemplate: "")
     }
 
     private static func encodings(
@@ -68,6 +72,11 @@ package enum FileContentDecoder {
         _ data: Data,
         encoding: RepositoryTextEncoding
     ) -> Data {
+        let count = preambleByteCount(data, encoding: encoding)
+        return count == 0 ? data : data.dropFirst(count)
+    }
+
+    private static func preambleByteCount(_ data: Data, encoding: RepositoryTextEncoding) -> Int {
         let count: Int
         switch encoding {
         case _ where encoding.ianaName == "utf-32le" && data.starts(with: [0xFF, 0xFE, 0x00, 0x00]): count = 4
@@ -77,7 +86,7 @@ package enum FileContentDecoder {
         case .utf16BigEndian where data.starts(with: [0xFE, 0xFF]): count = 2
         default: count = 0
         }
-        return count == 0 ? data : data.dropFirst(count)
+        return count
     }
 
     private static func foundationEncoding(_ encoding: RepositoryTextEncoding) -> String.Encoding {
@@ -111,16 +120,34 @@ package enum FileContentDecoder {
         return Double(controls) / Double(sample.count) > 0.10
     }
 
-    private static func hexDump(_ data: Data) -> String {
-        var lines = ["Binary file (\(data.count) bytes)", ""]
-        for offset in stride(from: 0, to: data.count, by: 16) {
-            let bytes = data[offset..<min(offset + 16, data.count)]
-            let hex = bytes.map { String(format: "%02x", $0) }.joined(separator: " ")
-            let padded = hex.padding(toLength: 47, withPad: " ", startingAt: 0)
-            let ascii = bytes.map { (0x20...0x7E).contains($0) ? Character(UnicodeScalar($0)) : "." }.map(String.init).joined()
-            lines.append(String(format: "%08x  %@  |%@|", offset, padded, ascii))
+    package static func hexDump(_ data: Data, path: String) -> String {
+        guard !data.isEmpty else { return "" }
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        formatter.maximumFractionDigits = 0
+        let size = formatter.string(from: NSNumber(value: data.count)) ?? String(data.count)
+        let mb = Double(data.count) / 1_048_576
+        formatter.minimumFractionDigits = 1; formatter.maximumFractionDigits = 1
+        let megabytes = mb >= 0.1 ? (formatter.string(from: NSNumber(value: mb)) ?? String(format: "%.1f", mb)) + " MB / " : ""
+        var text = "Binary file: \(path)\n\n\(megabytes)\(size) bytes:\n\n"
+        let bytes = Array(data.prefix(4096))
+        var rows: [String] = []
+        for offset in stride(from: 0, to: bytes.count, by: 16) {
+            func byte(_ index: Int) -> UInt8? { index < bytes.count ? bytes[index] : nil }
+            let hex = (0..<2).map { column in
+                (0..<8).map { byte(offset + column * 8 + $0).map { String(format: "%02X", $0) } ?? "  " }.joined(separator: " ")
+            }.joined(separator: "  ")
+            let characters = (0..<2).map { column in
+                (0..<8).map { index -> String in
+                    guard let value = byte(offset + column * 8 + index) else { return " " }
+                    return value < 32 || (127...159).contains(value) ? "." : String(UnicodeScalar(value))
+                }.joined()
+            }.joined(separator: " ")
+            rows.append(String(format: "%04X   ", offset) + hex + "   " + characters)
         }
-        return lines.joined(separator: "\n")
+        text += rows.joined(separator: "\n")
+        if data.count > 4096 { text += "\n[Truncated]" }
+        return text
     }
 }
 

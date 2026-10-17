@@ -106,7 +106,20 @@ package actor RevisionReader {
                     case .revisions(let revisions):
                         session.publish(revisions)
                     case .repository(let git, let directory):
-                        let options = context.options
+                        var prepared = context
+                        if context.options.showStashes && !context.showReflogReferences {
+                            let candidates = context.stashes.filter { $0.parentIDs.count >= 3 }.prefix(max(0, context.options.maxStashesWithUntrackedFiles))
+                            let ids = Array(Set(candidates.map { $0.parentIDs[2] })).sorted()
+                            if !ids.isEmpty {
+                                let result = try await git.run(RevisionLogCommands.log(sortOrder: .gitDefault, revisionArguments: ids.map(\.string), paths: ["."]).logMetadata(), in: directory)
+                                guard result.succeeded else { throw GitError.commandFailed(arguments: result.arguments, status: result.exitStatus, stderr: result.standardErrorString) }
+                                let revisions = Dictionary(uniqueKeysWithValues: try GitOutputParser.parseLog(result.standardOutput).map { ($0.objectID, RevisionCommitBuilder.revision($0, references: [])) })
+                                for stash in candidates { prepared.untrackedByStashID[stash.objectID] = revisions[stash.parentIDs[2]] }
+                            }
+                        }
+                        try Task.checkCancellation()
+                        session.prepare(prepared)
+                        let options = prepared.options
                         var paths = options.filter.pathArguments
                         if options.followRenames, options.filter.followsRenames {
 
@@ -161,7 +174,7 @@ package actor RevisionReader {
 
 private final class RevisionStreamSession: @unchecked Sendable {
     private let lock = NSLock()
-    private let context: RevisionReadContext
+    private var context: RevisionReadContext
     private let batching: RevisionBatchPolicy
     private var firstBatch = true
     private var lastPublication = ProcessInfo.processInfo.systemUptime
@@ -194,6 +207,15 @@ private final class RevisionStreamSession: @unchecked Sendable {
         streamingEnabled = requiredStashIDs.isEmpty
         fieldCount = context.options.loadNotes ? 10 : 9
         incrementalBuilder = RevisionIncrementalCommitBuilder(context: context, knownHistoryIDs: [])
+    }
+
+    func prepare(_ context: RevisionReadContext) {
+        lock.withLock {
+            guard !cancelled else { return }
+            self.context = context
+            incrementalBuilder = RevisionIncrementalCommitBuilder(context: context, knownHistoryIDs: [])
+            if context.options.showStashes, let autostash = context.autostash { publish([autostash], locked: true) }
+        }
     }
 
     func receive(_ data: Data) {
@@ -320,12 +342,13 @@ private struct RevisionIncrementalCommitBuilder {
     private let stashByID: [ObjectID: GitStashRecord]
     private let stashByBase: [ObjectID: [GitStashRecord]]
     private var insertedArtificial = false
+    private var emittedIDs = Set<RevisionID>()
 
     init(context: RevisionReadContext, knownHistoryIDs: Set<ObjectID>) {
         self.context = context
         historyIDs = knownHistoryIDs
         stashByID = Dictionary(uniqueKeysWithValues: context.effectiveStashes.map { ($0.objectID, $0) })
-        stashByBase = Dictionary(grouping: context.effectiveStashes.compactMap { stash in
+        stashByBase = Dictionary(grouping: (context.showReflogReferences ? [] : context.effectiveStashes).compactMap { stash in
             stash.parentIDs.first.map { ($0, stash) }
         }, by: \.0).mapValues { $0.map(\.1) }
     }
@@ -333,17 +356,18 @@ private struct RevisionIncrementalCommitBuilder {
     mutating func append(_ records: [GitLogRecord]) -> [Commit] {
         var revisions: [Commit] = []
         for record in records {
+            if context.options.showStashes, record.objectID == context.autostash?.objectID { continue }
             if record.objectID == context.headID { appendArtificial(to: &revisions) }
-            for stash in stashByBase[record.objectID] ?? [] where !historyIDs.contains(stash.objectID) {
-                revisions.append(RevisionCommitBuilder.stashRevision(stash))
+            for stash in stashByBase[record.objectID] ?? [] where !historyIDs.contains(stash.objectID) && stash.objectID != context.autostash?.objectID {
+                revisions.append(contentsOf: RevisionCommitBuilder.insertedStash(stash, context: context))
             }
             if let stash = stashByID[record.objectID] {
-                revisions.append(RevisionCommitBuilder.stashRevision(stash))
+                revisions.append(RevisionCommitBuilder.historyStash(record, stash: stash, context: context))
                 continue
             }
             revisions.append(RevisionCommitBuilder.revision(record, references: context.referencesByCommit[record.objectID] ?? []))
         }
-        return revisions
+        return revisions.filter { emittedIDs.insert($0.id).inserted }
     }
 
     mutating func finish() -> [Commit] { [] }
@@ -367,6 +391,7 @@ package struct RevisionReadOptions: Sendable, Equatable {
     package var sortOrder: RevisionSortOrder = .gitDefault
 
     package var showStashes = true
+    package var maxStashesWithUntrackedFiles = 10
     package var showGitNotes = false
     package var showSessionRefs = false
     package var showArtificialCommits = true
@@ -382,6 +407,8 @@ package struct RevisionReadOptions: Sendable, Equatable {
 
 package struct RevisionReadContext: Sendable {
     package let stashes: [GitStashRecord]
+    package var untrackedByStashID: [ObjectID: Commit] = [:]
+    package var autostash: Commit?
     package let referencesByCommit: [ObjectID: [RevisionReference]]
     package let headID: ObjectID?
     package let includeArtificial: Bool
@@ -393,9 +420,11 @@ package struct RevisionReadContext: Sendable {
         referencesByCommit: [ObjectID: [RevisionReference]],
         headID: ObjectID?,
         includeArtificial: Bool,
-        showReflogReferences: Bool = false
+        showReflogReferences: Bool = false,
+        autostash: Commit? = nil
     ) {
         self.stashes = stashes
+        self.autostash = autostash
         self.referencesByCommit = referencesByCommit
         self.headID = headID
         self.includeArtificial = includeArtificial
@@ -487,7 +516,18 @@ package enum RevisionCommitBuilder {
         )
     }
 
-    package static func stashRevision(_ stash: GitStashRecord) -> Commit {
+    package static func historyStash(_ record: GitLogRecord, stash: GitStashRecord, context: RevisionReadContext) -> Commit {
+        revision(record, references: (context.referencesByCommit[record.objectID] ?? [])
+            + [RevisionReference(id: stash.selector, name: stash.selector, kind: .stash)])
+    }
+
+    package static func insertedStash(_ stash: GitStashRecord, context: RevisionReadContext) -> [Commit] {
+        let untracked = context.untrackedByStashID[stash.objectID]
+        let parents = Array(stash.parentIDs.prefix(1)) + (untracked?.objectID.map { [$0] } ?? [])
+        return [stashRevision(stash, parentIDs: parents)] + (untracked.map { [$0] } ?? [])
+    }
+
+    package static func stashRevision(_ stash: GitStashRecord, parentIDs: [ObjectID]? = nil) -> Commit {
         Commit(
             id: .object(stash.objectID),
             shortID: stash.objectID.shortString,
@@ -499,7 +539,7 @@ package enum RevisionCommitBuilder {
             committerName: stash.committerName,
             committerEmail: stash.committerEmail,
             commitDate: stash.commitDate,
-            parentIDs: Array(stash.parentIDs.prefix(1)),
+            parentIDs: parentIDs ?? Array(stash.parentIDs.prefix(1)),
             references: [RevisionReference(id: stash.selector, name: stash.selector, kind: .stash)]
         )
     }
@@ -525,7 +565,7 @@ package enum RevisionCommitBuilder {
     package static func build(history: [GitLogRecord], context: RevisionReadContext) -> [Commit] {
         let historyIDs = Set(history.map(\.objectID))
         let byID = Dictionary(uniqueKeysWithValues: context.effectiveStashes.map { ($0.objectID, $0) })
-        let byBase = Dictionary(grouping: context.effectiveStashes.compactMap { stash in stash.parentIDs.first.map { ($0, stash) } }, by: \.0).mapValues { $0.map(\.1) }
+        let byBase = Dictionary(grouping: (context.showReflogReferences ? [] : context.effectiveStashes).compactMap { stash in stash.parentIDs.first.map { ($0, stash) } }, by: \.0).mapValues { $0.map(\.1) }
         var commits: [Commit] = []; var inserted = false
         func artificial() {
             guard context.showsArtificial, !inserted else { return }
@@ -533,16 +573,21 @@ package enum RevisionCommitBuilder {
             commits.append(contentsOf: artificialRevisions(headID: context.headID))
         }
         for record in history {
+            if context.options.showStashes, record.objectID == context.autostash?.objectID { continue }
             if record.objectID == context.headID { artificial() }
-            for value in byBase[record.objectID] ?? [] where !historyIDs.contains(value.objectID) { commits.append(stashRevision(value)) }
-            if let value = byID[record.objectID] { commits.append(stashRevision(value)); continue }
+            for value in byBase[record.objectID] ?? [] where !historyIDs.contains(value.objectID) && value.objectID != context.autostash?.objectID { commits.append(contentsOf: insertedStash(value, context: context)) }
+            if let value = byID[record.objectID] { commits.append(historyStash(record, stash: value, context: context)); continue }
             commits.append(revision(record, references: context.referencesByCommit[record.objectID] ?? []))
         }
-        return commits
+        var emittedIDs = Set<RevisionID>()
+        return commits.filter { emittedIDs.insert($0.id).inserted }
     }
 }
 
 package actor GitRepositoryModule: RepositoryOpeningDataSource {
+    var diffToolDiscoveryTask: Task<[String], Never>?
+    var pendingOwnershipFailure: DubiousRepositoryOwnership?
+    var sharedStatus: [URL: [GitStatusRecord]] = [:]
     package let git: any GitCommandRunning
     private var requestedURL: URL
     package var resolvedRepository: ResolvedGitRepository?
@@ -550,6 +595,7 @@ package actor GitRepositoryModule: RepositoryOpeningDataSource {
     private var detailsCache: [RevisionID: RepositoryRevisionDetails] = [:]
     private var treeCache: [RevisionID: [RepositoryFileEntry]] = [:]
     private var diffCache: [String: FileDiff] = [:]
+    private var diffCacheLengths: [String: Int] = [:]
     private var difftasticEnabled: Bool?
     private var diffColorConfiguredKeys: Set<String>?
     package var pendingCherryPickItems: [RepositoryCherryPickItem] = []
@@ -565,10 +611,12 @@ package actor GitRepositoryModule: RepositoryOpeningDataSource {
     package func openRepository(at url: URL) async throws -> RepositoryLoadState {
         requestedURL = url.standardizedFileURL
         resolvedRepository = nil
+        diffToolDiscoveryTask = nil
         statusRecords = []
         detailsCache = [:]
         treeCache = [:]
         diffCache = [:]
+        diffCacheLengths = [:]
         difftasticEnabled = nil
         diffColorConfiguredKeys = nil
         pendingCherryPickItems = []
@@ -579,14 +627,22 @@ package actor GitRepositoryModule: RepositoryOpeningDataSource {
     }
 
     package func loadRepositoryState() async throws -> RepositoryLoadState {
+        diffToolDiscoveryTask = nil
         try Task.checkCancellation()
         detailsCache = [:]
         treeCache = [:]
         diffCache = [:]
+        diffCacheLengths = [:]
         diffColorConfiguredKeys = nil
+        sharedStatus = [:]
+        pendingOwnershipFailure = nil
         let repository = try await resolveRepository(at: requestedURL)
         resolvedRepository = repository
 
+        async let userEmailOutput = checked(
+            GitCommand(arguments: ["config", "--get", "user.email"], accessesRemote: false, changesRepositoryState: false),
+            directory: repository.rootURL, acceptedStatuses: [0, 1]
+        )
         async let currentBranchOutput = checked(
             GitCommand(arguments: ["branch", "--show-current"], accessesRemote: false, changesRepositoryState: false),
             directory: repository.rootURL
@@ -633,6 +689,7 @@ package actor GitRepositoryModule: RepositoryOpeningDataSource {
         let stashRecords = repository.isBare ? [] : try await loadStashes(repository: repository)
         let parsedStatus = repository.isBare ? [] : try await loadStatus(repository: repository)
         statusRecords = parsedStatus
+        sharedStatus[repository.rootURL] = parsedStatus
         let workingDirectoryChangeCount = parsedStatus.filter { record in
             record.indexStatus != "." && record.indexStatus != " "
                 || record.worktreeStatus != "." && record.worktreeStatus != " "
@@ -657,7 +714,8 @@ package actor GitRepositoryModule: RepositoryOpeningDataSource {
             stashes: stashRecords,
             referencesByCommit: refModels.referencesByCommit,
             headID: headID,
-            includeArtificial: !repository.isBare
+            includeArtificial: !repository.isBare,
+            autostash: repository.isBare ? nil : rebaseAutostash(repository)
         )
         let revisionReadRequest = RevisionReadRequest(
             context: revisionContext,
@@ -676,10 +734,12 @@ package actor GitRepositoryModule: RepositoryOpeningDataSource {
             isBare: repository.isBare
         )
 
+        let userEmail = try await userEmailOutput
         let identity = RepositoryIdentityState(
             repositories: [repositoryModel],
             currentRepository: repositoryModel,
-            headID: headID
+            headID: headID,
+            userEmail: userEmail.succeeded ? userEmail.standardOutputString.trimmingCharacters(in: .newlines) : nil
         )
         let references = RepositoryReferenceState(
             branches: branches,
@@ -696,14 +756,18 @@ package actor GitRepositoryModule: RepositoryOpeningDataSource {
         let status = RepositoryStatusSummary(
             workingDirectoryChangeCount: workingDirectoryChangeCount,
             worktree: GitStatusRecord.revisionChangeCounts(parsedStatus, staged: false),
-            index: GitStatusRecord.revisionChangeCounts(parsedStatus, staged: true)
+            index: GitStatusRecord.revisionChangeCounts(parsedStatus, staged: true),
+            visualState: GitStatusRecord.visualState(parsedStatus),
+            statusEntryCount: GitStatusRecord.entryCount(parsedStatus)
         )
         return RepositoryLoadState(
             identity: identity,
             references: references,
             navigation: navigation,
             status: status,
-            revisionReadRequest: revisionReadRequest
+            revisionReadRequest: revisionReadRequest,
+            aheadBehind: await aheadBehindData(),
+            monitoringURLs: Self.monitoringURLs(repository: repository, submodules: submoduleTree)
         )
     }
 
@@ -723,7 +787,7 @@ package actor GitRepositoryModule: RepositoryOpeningDataSource {
         switch commit.kind {
         case .revision:
             guard let objectID = commit.objectID else { throw RepositoryDataSourceError.unavailable }
-            let isStash = commit.references.contains { $0.kind == .stash }
+            let isStash = commit.isStashLike
             let commands = revisionDiffArguments(commit: commit)
             let nameArguments = isStash
                 ? ["stash", "show", "--include-untracked", "--name-status", "-z", objectID.string]
@@ -733,24 +797,20 @@ package actor GitRepositoryModule: RepositoryOpeningDataSource {
                 : commands.numstat
             async let namesResult = checked(
                 GitCommand(arguments: nameArguments, accessesRemote: false, changesRepositoryState: false),
-                directory: repository.rootURL
+                directory: repository.rootURL, cache: true
             )
             async let countsResult = checked(
                 GitCommand(arguments: numstatArguments, accessesRemote: false, changesRepositoryState: false),
-                directory: repository.rootURL
+                directory: repository.rootURL, cache: true
             )
             changedPaths = try GitOutputParser.parseNameStatus(try await namesResult.standardOutput)
             numstat = GitOutputParser.parseNumstat(try await countsResult.standardOutput)
         case .index:
-            async let namesResult = checked(
-                GitCommand(arguments: diffBaseArguments() + ["--cached", "--name-status", "-z"], accessesRemote: false, changesRepositoryState: false),
-                directory: repository.rootURL
-            )
+            changedPaths = changedPathsFromStatus(index: true)
             async let countsResult = checked(
                 GitCommand(arguments: diffBaseArguments() + ["--cached", "--numstat", "-z"], accessesRemote: false, changesRepositoryState: false),
                 directory: repository.rootURL
             )
-            changedPaths = try GitOutputParser.parseNameStatus(try await namesResult.standardOutput)
             numstat = GitOutputParser.parseNumstat(try await countsResult.standardOutput)
         case .workingDirectory:
             changedPaths = changedPathsFromStatus(index: false)
@@ -763,7 +823,7 @@ package actor GitRepositoryModule: RepositoryOpeningDataSource {
 
         let files = changedPaths.map { path in
             let counts = numstat[path.path] ?? (0, 0)
-            return ChangedFile(
+            var file = ChangedFile(
                 id: path.path,
                 path: path.path,
                 oldPath: path.oldPath,
@@ -771,6 +831,10 @@ package actor GitRepositoryModule: RepositoryOpeningDataSource {
                 additions: counts.0,
                 deletions: counts.1
             )
+            if commit.kind != .revision, let record = statusRecords.first(where: { $0.path == path.path }) {
+                file.isConflict = (commit.kind == .index ? record.indexStatus : record.worktreeStatus) == "U"
+            }
+            return file
         }
         let details = RepositoryRevisionDetails(
             files: files,
@@ -821,13 +885,22 @@ package actor GitRepositoryModule: RepositoryOpeningDataSource {
         return try await configuredFileEncoding()?.foundationEncoding ?? .utf8
     }
 
-    func appearanceDiff(
+    func appearanceDiff(file: ChangedFile, options: FileDiffOptions, patchArguments: [String],
+                        difftastic: () async throws -> (revisions: [String], paths: [String], noIndex: Bool), directory: URL) async throws -> FileDiff? {
+        try await appearancePreview(file: file, options: options, patchArguments: patchArguments, difftastic: difftastic,
+                                    directory: directory, defersLargeContent: false)?.resolve()
+    }
+
+    func appearancePreview(
         file: ChangedFile,
         options: FileDiffOptions,
         patchArguments: [String],
         difftastic: () async throws -> (revisions: [String], paths: [String], noIndex: Bool),
-        directory: URL
-    ) async throws -> FileDiff? {
+        directory: URL,
+        defersLargeContent: Bool,
+        cacheKey: String? = nil,
+        cacheCommands: Bool = false
+    ) async throws -> FilePreview<FileDiff?>? {
         guard !file.isSubmodule else { return nil }
         let contentEncoding = try await diffContentEncoding(options)
         switch options.appearance {
@@ -842,9 +915,16 @@ package actor GitRepositoryModule: RepositoryOpeningDataSource {
             }
             var arguments = patchArguments.filter { $0 != "--no-color" }
             arguments.insert("--color=always", at: min(1, arguments.count))
-            let result = try await git.run(GitCommand(arguments: GitDiffAppearance.colorConfiguration(configured: configured, reverse: options.reverseGitColoring) + arguments, accessesRemote: false, changesRepositoryState: false), in: directory)
+            let command = GitCommand(arguments: GitDiffAppearance.colorConfiguration(configured: configured, reverse: options.reverseGitColoring) + arguments, accessesRemote: false, changesRepositoryState: false)
+            let result: GitCommandResult
+            if cacheCommands { result = try await git.runCached(command, in: directory, outputEncoding: contentEncoding) }
+            else { result = try await git.run(command, in: directory) }
             guard result.succeeded || result.exitStatus == 1 else { throw GitError.commandFailed(arguments: result.arguments, status: result.exitStatus, stderr: result.standardErrorString) }
-            return GitDiffAppearance.parseColoredPatch(result.standardOutput, file: file, contentEncoding: contentEncoding)
+            let length = (String(data: result.standardOutput, encoding: contentEncoding) ?? result.standardOutputString).utf16.count
+            if let cacheKey { diffCacheLengths[cacheKey] = length }
+            return try await FilePreview.prepare(length: length, defersLargeContent: defersLargeContent) {
+                GitDiffAppearance.parseColoredPatch(result.standardOutput, file: file, contentEncoding: contentEncoding, reverse: options.reverseGitColoring)
+            }
         case .difftastic:
             guard await isDifftasticEnabled() else { return nil }
             let target = try await difftastic()
@@ -857,7 +937,11 @@ package actor GitRepositoryModule: RepositoryOpeningDataSource {
             guard result.succeeded || (target.noIndex && result.exitStatus == 1) else {
                 throw GitError.commandFailed(arguments: result.arguments, status: result.exitStatus, stderr: result.standardErrorString)
             }
-            return GitDiffAppearance.parseDifftastic(result.standardOutput, file: file, width: options.difftasticWidth, reverse: options.reverseGitColoring)
+            let length = (String(data: result.standardOutput, encoding: contentEncoding) ?? result.standardOutputString).utf16.count
+            if let cacheKey { diffCacheLengths[cacheKey] = length }
+            return try await FilePreview.prepare(length: length, defersLargeContent: defersLargeContent) {
+                GitDiffAppearance.parseDifftastic(result.standardOutput, file: file, width: options.difftasticWidth, reverse: options.reverseGitColoring)
+            }
         case .gitWordDiff:
             let configured: Set<String>
             if let diffColorConfiguredKeys {
@@ -871,26 +955,50 @@ package actor GitRepositoryModule: RepositoryOpeningDataSource {
                 configured = result.succeeded ? GitDiffAppearance.configuredKeys(fromGetRegexp: result.standardOutputString) : []
                 diffColorConfiguredKeys = configured
             }
-            let result = try await git.run(
-                GitCommand(arguments: GitDiffAppearance.wordDiffCommand(patchArguments, configured: configured, reverse: options.reverseGitColoring),
-                           accessesRemote: false, changesRepositoryState: false),
-                in: directory
-            )
+            let command = GitCommand(arguments: GitDiffAppearance.wordDiffCommand(patchArguments, configured: configured, reverse: options.reverseGitColoring), accessesRemote: false, changesRepositoryState: false)
+            let result: GitCommandResult
+            if cacheCommands { result = try await git.runCached(command, in: directory, outputEncoding: contentEncoding) }
+            else { result = try await git.run(command, in: directory) }
             guard result.succeeded || result.exitStatus == 1 else {
                 throw GitError.commandFailed(arguments: result.arguments, status: result.exitStatus, stderr: result.standardErrorString)
             }
-            return GitDiffAppearance.parseWordDiff(result.standardOutput, file: file, contentEncoding: contentEncoding)
+            let length = (String(data: result.standardOutput, encoding: contentEncoding) ?? result.standardOutputString).utf16.count
+            if let cacheKey { diffCacheLengths[cacheKey] = length }
+            return try await FilePreview.prepare(length: length, defersLargeContent: defersLargeContent) {
+                GitDiffAppearance.parseWordDiff(result.standardOutput, file: file, contentEncoding: contentEncoding)
+            }
         }
     }
 
     package func loadDiff(for commit: Commit, file: ChangedFile, options: FileDiffOptions) async throws -> FileDiff? {
+        try await diffPreview(for: commit, file: file, options: options, defersLargeContent: false).resolve()
+    }
+
+    package func prepareDiff(for commit: Commit, file: ChangedFile, options: FileDiffOptions) async throws -> FilePreview<FileDiff?> {
+        try await diffPreview(for: commit, file: file, options: options, defersLargeContent: true)
+    }
+
+    private func cacheDiff(_ diff: FileDiff?, key: String, length: Int) {
+        guard !Task.isCancelled else { return }
+        if let diff { diffCache[key] = diff; diffCacheLengths[key] = length }
+    }
+
+    private func diffPreview(for commit: Commit, file: ChangedFile, options: FileDiffOptions, defersLargeContent: Bool) async throws -> FilePreview<FileDiff?> {
         let cacheKey = "\(commit.id.description)\u{0}\(file.id)\u{0}\(options.hashValue)"
-        if let cached = diffCache[cacheKey] { return cached }
+        if let cached = diffCache[cacheKey] {
+            return try await FilePreview.prepare(length: diffCacheLengths[cacheKey] ?? 0, defersLargeContent: defersLargeContent) { cached }
+        }
         guard let repository = resolvedRepository else {
             throw RepositoryDataSourceError.unavailable
         }
 
         var seenPaths = Set<String>()
+        if file.isSubmodule {
+            let first: RevisionID? = commit.kind == .workingDirectory ? .index : commit.parentIDs.first.map(RevisionID.object)
+            let group = FileStatusGroup(first: first, second: commit.id, summary: "", files: [file])
+            if case .diff(let diff) = try await loadFileStatusDiff(group: group, file: file, options: options, grep: GitGrepOptions()) { return .ready(diff) }
+            return .ready(nil)
+        }
         let paths = [file.oldPath, file.path].compactMap { $0 }.filter { seenPaths.insert($0).inserted }
         let arguments: [String]
         var acceptedStatuses: Set<Int32> = [0]
@@ -932,21 +1040,38 @@ package actor GitRepositoryModule: RepositoryOpeningDataSource {
                 difftastic = { ([], paths, false) }
             }
         }
-        if let diff = try await appearanceDiff(file: file, options: options, patchArguments: arguments,
-                                               difftastic: difftastic, directory: repository.rootURL) {
-            diffCache[cacheKey] = diff
-            return diff
+        if let preview = try await appearancePreview(file: file, options: options, patchArguments: arguments,
+                                                   difftastic: difftastic, directory: repository.rootURL, defersLargeContent: defersLargeContent, cacheKey: cacheKey, cacheCommands: commit.kind == .revision) {
+            let normalize = try await copyNormalizesLineEndings(in: repository.rootURL)
+            switch preview {
+            case .ready(var diff):
+                diff?.normalizesCopyLineEndings = normalize
+                if let diff { diffCache[cacheKey] = diff }
+                return .ready(diff)
+            case .deferred(let length, let load):
+                return .deferred(length: length) { [self] in
+                    var diff = try await load()
+                    diff?.normalizesCopyLineEndings = normalize
+                    await cacheDiff(diff, key: cacheKey, length: length)
+                    return diff
+                }
+            }
         }
+        let encoding = try await diffContentEncoding(options)
         let output = try await checked(
             GitCommand(arguments: arguments, accessesRemote: false, changesRepositoryState: false),
             directory: repository.rootURL,
-            acceptedStatuses: acceptedStatuses
+            acceptedStatuses: acceptedStatuses, cache: commit.kind == .revision, cacheEncoding: encoding
         )
-
-        let parsed = GitOutputParser.parseUnifiedDiff(output.standardOutput, files: [file], contentEncoding: try await diffContentEncoding(options))
-        let diff = parsed[file.id] ?? parsed.values.first
-        if let diff { diffCache[cacheKey] = diff }
-        return diff
+        let normalize = try await copyNormalizesLineEndings(in: repository.rootURL)
+        let length = (String(data: output.standardOutput, encoding: encoding) ?? output.standardOutputString).utf16.count
+        return try await FilePreview.prepare(length: length, defersLargeContent: defersLargeContent) { [self] in
+            let parsed = GitOutputParser.parseUnifiedDiff(output.standardOutput, files: [file], contentEncoding: encoding)
+            var diff = parsed[file.id] ?? parsed.values.first
+            diff?.normalizesCopyLineEndings = normalize
+            await cacheDiff(diff, key: cacheKey, length: length)
+            return diff
+        }
     }
 
     package func loadFileContent(for commit: Commit, file: RepositoryFileEntry) async throws -> RepositoryFileEntry {
@@ -963,14 +1088,50 @@ package actor GitRepositoryModule: RepositoryOpeningDataSource {
         )
     }
 
+    package func prepareFilePresentation(for commit: Commit, file: RepositoryFileEntry, encoding: RepositoryTextEncoding) async throws -> FilePreview<RepositoryFileContent> {
+        try Task.checkCancellation()
+        guard let repository = resolvedRepository else { throw RepositoryDataSourceError.unavailable }
+        if commit.kind == .workingDirectory {
+            let url = repository.rootURL.appendingPathComponent(file.path).standardizedFileURL
+            guard url.path.hasPrefix(repository.rootURL.standardizedFileURL.path + "/") else { throw GitError.fileUnavailable(file.path) }
+            let length = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+            if length > FilePreview<RepositoryFileContent>.threshold {
+                return .deferred(length: length) { [self] in try await loadFilePresentation(for: commit, file: file, encoding: encoding) }
+            }
+        }
+        let configured = encoding == .automatic ? try await configuredFileEncoding() : nil
+        let data = try await loadFileData(for: commit, file: file, encoding: configured ?? encoding)
+        try Task.checkCancellation()
+        let historical = commit.kind != .workingDirectory
+        if FileContentDecoder.hasImageExtension(file.path) {
+            return .ready(try await filePresentation(data: data, path: file.path, encoding: encoding, configured: configured, historical: historical))
+        }
+        let decoded = FileContentDecoder.decodedText(data, requestedEncoding: encoding, configuredEncoding: configured)
+        let rawText = decoded?.text ?? String(decoding: data, as: UTF8.self)
+        let length = FileContentDecoder.previewText(rawText, path: file.path, historical: historical).utf16.count
+            + (historical ? decoded?.preambleCodeUnits ?? 0 : 0)
+        return try await FilePreview.prepare(length: length) { [self] in
+            try await filePresentation(data: data, path: file.path, encoding: encoding, configured: configured, historical: historical)
+        }
+    }
+
     package func loadFilePresentation(
         for commit: Commit,
         file: RepositoryFileEntry,
         encoding: RepositoryTextEncoding
     ) async throws -> RepositoryFileContent {
-        let data = try await loadFileData(for: commit, file: file)
         let configured = encoding == .automatic ? try await configuredFileEncoding() : nil
-        return FileContentDecoder.decode(data, path: file.path, requestedEncoding: encoding, configuredEncoding: configured)
+        let data = try await loadFileData(for: commit, file: file, encoding: configured ?? encoding)
+        return try await filePresentation(data: data, path: file.path, encoding: encoding, configured: configured, historical: commit.kind != .workingDirectory)
+    }
+
+    private func filePresentation(data: Data, path: String, encoding: RepositoryTextEncoding,
+                                  configured: RepositoryTextEncoding?, historical: Bool) async throws -> RepositoryFileContent {
+        try Task.checkCancellation()
+        var content = FileContentDecoder.decode(data, path: path, requestedEncoding: encoding, configuredEncoding: configured)
+        if content.kind == .text { content = RepositoryFileContent(path: content.path, kind: content.kind, text: FileContentDecoder.previewText(content.text, path: path, historical: historical), data: content.data, encoding: content.encoding) }
+        if let repository = resolvedRepository { content.normalizesCopyLineEndings = try await copyNormalizesLineEndings(in: repository.rootURL) }
+        return content
     }
 
     package func openWithDifftool(for commit: Commit, file: ChangedFile, customToolPath: String?) async throws {
@@ -984,7 +1145,7 @@ package actor GitRepositoryModule: RepositoryOpeningDataSource {
         )
     }
 
-    private func loadFileData(for commit: Commit, file: RepositoryFileEntry) async throws -> Data {
+    private func loadFileData(for commit: Commit, file: RepositoryFileEntry, encoding: RepositoryTextEncoding = .automatic) async throws -> Data {
         guard let repository = resolvedRepository else {
             throw RepositoryDataSourceError.unavailable
         }
@@ -1001,13 +1162,8 @@ package actor GitRepositoryModule: RepositoryOpeningDataSource {
             }
         } else if file.gitObjectType == "commit" {
             data = Data("Submodule commit \(file.gitObjectID?.string ?? "unknown")\n".utf8)
-        } else if let objectID = file.gitObjectID, FileContentDecoder.hasImageExtension(file.path) {
-            data = try await materializedBlob(objectID.string, in: repository.rootURL)
         } else if let objectID = file.gitObjectID {
-            data = try await checked(
-                GitCommand(arguments: ["cat-file", "blob", objectID.string], accessesRemote: false, changesRepositoryState: false),
-                directory: repository.rootURL
-            ).standardOutput
+            data = try await materializedBlob(objectID.string, in: repository.rootURL, immutable: !FileContentDecoder.hasImageExtension(file.path), outputEncoding: encoding == .automatic ? nil : encoding.foundationEncoding)
         } else {
             throw GitError.fileUnavailable(file.path)
         }
@@ -1023,6 +1179,13 @@ package actor GitRepositoryModule: RepositoryOpeningDataSource {
 
         let probe = await result(GitCommand(arguments: ["rev-parse", "--absolute-git-dir"], accessesRemote: false, changesRepositoryState: false), directory: url)
         if !probe.succeeded {
+            if let failure = DubiousRepositoryOwnership.recognize(probe.standardErrorString, accessing: url) {
+                pendingOwnershipFailure = failure
+                throw failure
+            }
+            if probe.standardErrorString.hasPrefix("fatal: detected dubious ownership") || probe.standardErrorString.hasPrefix("fatal: unsafe repository") {
+                throw GitError.commandFailed(arguments: probe.arguments, status: probe.exitStatus, stderr: probe.standardErrorString)
+            }
             let children = (try? FileManager.default.contentsOfDirectory(
                 at: url,
                 includingPropertiesForKeys: [.isDirectoryKey],
@@ -1049,7 +1212,10 @@ package actor GitRepositoryModule: RepositoryOpeningDataSource {
         if isBare {
             rootURL = url.standardizedFileURL
         } else {
-            let rootResult = try await checked(GitCommand(arguments: ["rev-parse", "--show-toplevel"], accessesRemote: false, changesRepositoryState: false), directory: url)
+            let metadataURL = URL(fileURLWithPath: gitDirectoryPath, isDirectory: true)
+            let workingDirectory = url.lastPathComponent == ".git" && url.resolvingSymlinksInPath() == metadataURL.resolvingSymlinksInPath()
+                ? url.deletingLastPathComponent() : url
+            let rootResult = try await checked(GitCommand(arguments: ["rev-parse", "--show-toplevel"], accessesRemote: false, changesRepositoryState: false), directory: workingDirectory)
             let rootPath = rootResult.standardOutputString.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !rootPath.isEmpty else { throw GitError.invalidRepository(url.path) }
             rootURL = URL(fileURLWithPath: rootPath, isDirectory: true).standardizedFileURL
@@ -1172,8 +1338,9 @@ package actor GitRepositoryModule: RepositoryOpeningDataSource {
             let initialized = inside && module.state != .uninitialized && FileManager.default.fileExists(atPath: childURL.appendingPathComponent(".git").path)
             var dirty = false
             if initialized {
-                let status = try await git.run(GitCommand(arguments: ["status", "--porcelain=v1", "-z", "--untracked-files=all"], accessesRemote: false, changesRepositoryState: false), in: childURL)
+                let status = try await git.run(GitCommand(arguments: ["--no-optional-locks", "status", "--porcelain=v2", "-z", "--untracked-files=all"], accessesRemote: false, changesRepositoryState: false), in: childURL)
                 dirty = status.succeeded && !status.standardOutput.isEmpty
+                if status.succeeded { sharedStatus[childURL] = try GitOutputParser.parsePorcelainV2(status.standardOutput) }
             }
             result.append(Submodule(id: path, name: module.name, path: path, url: module.url, commitID: module.commitID,
                 description: module.description, state: module.state, parentPath: parentPath, localPath: module.path, isDirty: dirty, expectedCommitID: expected[module.path]))
@@ -1273,6 +1440,17 @@ package actor GitRepositoryModule: RepositoryOpeningDataSource {
                 behind: trackingLocal.ahead,
                 sortMetadata: remoteBranch.sortMetadata
             )
+        }
+
+        if let selected = references.values.flatMap({ $0 }).first(where: { $0.kind == .currentBranch }),
+           let tracked = references.values.flatMap({ $0 }).first(where: selected.tracks) {
+            for id in Array(references.keys) {
+                references[id] = references[id]?.map { reference in
+                    var reference = reference
+                    reference.isSelectedHeadMergeSource = reference.id == tracked.id
+                    return reference
+                }
+            }
         }
 
         return (
@@ -1392,6 +1570,7 @@ package actor GitRepositoryModule: RepositoryOpeningDataSource {
         statusRecords.compactMap { record in
             let status = index ? record.indexStatus : record.worktreeStatus
             guard status != "." && status != " " else { return nil }
+            if index, record.isConflict, record.indexStatus == "U", record.worktreeStatus == "U" { return nil }
             return GitChangedPath(
                 path: record.path,
                 oldPath: record.oldPath,
@@ -1407,7 +1586,7 @@ package actor GitRepositoryModule: RepositoryOpeningDataSource {
             guard let objectID = commit.objectID else { throw RepositoryDataSourceError.unavailable }
             let output = try await checked(
                 GitCommand(arguments: ["ls-tree", "-r", "-z", "--long", objectID.string], accessesRemote: false, changesRepositoryState: false),
-                directory: repository.rootURL
+                directory: repository.rootURL, cache: true
             )
             records = try GitOutputParser.parseTree(output.standardOutput)
         case .index:
@@ -1471,9 +1650,13 @@ package actor GitRepositoryModule: RepositoryOpeningDataSource {
     private func checked(
         _ command: GitCommand,
         directory: URL,
-        acceptedStatuses: Set<Int32> = [0]
+        acceptedStatuses: Set<Int32> = [0],
+        cache: Bool = false,
+        cacheEncoding: String.Encoding? = .utf8
     ) async throws -> GitCommandResult {
-        let commandResult = try await git.run(command, in: directory)
+        let commandResult: GitCommandResult
+        if cache { commandResult = try await git.runCached(command, in: directory, outputEncoding: cacheEncoding) }
+        else { commandResult = try await git.run(command, in: directory) }
         guard acceptedStatuses.contains(commandResult.exitStatus) else {
             throw GitError.commandFailed(
                 arguments: command.arguments,
@@ -1496,5 +1679,25 @@ package actor GitRepositoryModule: RepositoryOpeningDataSource {
 private extension String {
     func dropPrefix(_ prefix: String) -> Substring {
         hasPrefix(prefix) ? dropFirst(prefix.count) : self[...]
+    }
+}
+
+extension GitRepositoryModule {
+    static func monitoringURLs(repository: ResolvedGitRepository, submodules: [SubmoduleTreeItem]) -> [URL] {
+        var urls = [repository.rootURL, repository.gitDirectoryURL]
+        for item in submodules where item.isInitialized {
+            urls.append(item.repositoryURL)
+            let link = item.repositoryURL.appendingPathComponent(".git")
+            if let text = try? String(contentsOf: link, encoding: .utf8), text.hasPrefix("gitdir: ") {
+                let path = String(text.dropFirst(8)).trimmingCharacters(in: .whitespacesAndNewlines)
+                urls.append(URL(fileURLWithPath: path, relativeTo: item.repositoryURL).standardizedFileURL)
+            } else { urls.append(link) }
+        }
+        for directory in urls {
+            if let common = try? String(contentsOf: directory.appendingPathComponent("commondir"), encoding: .utf8) {
+                urls.append(URL(fileURLWithPath: common.trimmingCharacters(in: .whitespacesAndNewlines), relativeTo: directory).standardizedFileURL)
+            }
+        }
+        return Array(Set(urls))
     }
 }

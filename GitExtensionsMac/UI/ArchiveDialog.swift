@@ -7,9 +7,9 @@ import UniformTypeIdentifiers
 final class ArchiveWindowController: NSWindowController, NSWindowDelegate {
     private let controller: ArchiveViewController
     private let closed: () -> Void
-    init(source: any RepositoryArchivingDataSource, repositoryName: String, history: [Commit], selected: [Commit], closed: @escaping () -> Void) {
+    init(source: any RepositoryArchivingDataSource, repositoryName: String, selected: [Commit], chooseCommit: @escaping (RevisionID?, NSWindow) async -> Commit?, closed: @escaping () -> Void) {
         self.closed = closed
-        controller = ArchiveViewController(source: source, repositoryName: repositoryName, history: history, selected: selected)
+        controller = ArchiveViewController(source: source, repositoryName: repositoryName, selected: selected, chooseCommit: chooseCommit)
         let window = NSWindow(contentViewController: controller)
         window.title = "Archive"
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
@@ -29,27 +29,27 @@ final class ArchiveWindowController: NSWindowController, NSWindowDelegate {
 private final class ArchiveViewController: NSViewController {
     let source: any RepositoryArchivingDataSource
     let repositoryName: String
-    let history: [Commit]
+    private let chooseCommit: (RevisionID?, NSWindow) async -> Commit?
     var revision: Commit?
     var comparison: Commit?
-    private let summary = NSTextField(wrappingLabelWithString: "")
+    private let summary = CommitSummaryView()
     private let comparisonSummary = NSTextField(wrappingLabelWithString: "...")
     private let zip = NSButton(radioButtonWithTitle: "zip", target: nil, action: nil)
     private let tar = NSButton(radioButtonWithTitle: "tar", target: nil, action: nil)
     private let pathFilter = NSButton(checkboxWithTitle: "Archive specific paths only", target: nil, action: nil)
-    private let revisionFilter = NSButton(checkboxWithTitle: "Archive files changed between these revisions", target: nil, action: nil)
+    private let revisionFilter = NSButton(checkboxWithTitle: "Take the files that have changed from the revision above to this one and archive only those", target: nil, action: nil)
     private let paths = NSTextView()
-    private let chooseComparison = NSButton(title: "Choose comparison revision…", target: nil, action: nil)
-    private let chooseTarget = NSButton(title: "Choose another revision…", target: nil, action: nil)
-    private let save = NSButton(title: "Save as…", target: nil, action: nil)
+    private let chooseComparison = NSButton(image: AppKitFactory.resourceImage("SelectRevision", accessibilityDescription: "Choose revision to compare with first") ?? NSImage(), target: nil, action: nil)
+    private let chooseTarget = NSButton(image: AppKitFactory.resourceImage("SelectRevision", accessibilityDescription: "Choose another revision") ?? NSImage(), target: nil, action: nil)
+    private let save = LeadingImageButton(title: "Save as...", target: nil, action: nil)
     private let close = NSButton(title: "Close", target: nil, action: nil)
     private let keepOpen = NSButton(checkboxWithTitle: "Keep dialog open", target: nil, action: nil)
     private let output = NSTextView()
     private var operation: Task<Void, Never>?
     var isBusy: Bool { operation != nil }
 
-    init(source: any RepositoryArchivingDataSource, repositoryName: String, history: [Commit], selected: [Commit]) {
-        self.source = source; self.repositoryName = repositoryName; self.history = history
+    init(source: any RepositoryArchivingDataSource, repositoryName: String, selected: [Commit], chooseCommit: @escaping (RevisionID?, NSWindow) async -> Commit?) {
+        self.source = source; self.repositoryName = repositoryName; self.chooseCommit = chooseCommit
         revision = selected.first; comparison = selected.count == 2 ? selected[1] : nil
         super.init(nibName: nil, bundle: nil)
     }
@@ -63,47 +63,63 @@ private final class ArchiveViewController: NSViewController {
             stack.topAnchor.constraint(equalTo: root.topAnchor, constant: 12),
             stack.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -12)])
         stack.addArrangedSubview(NSTextField(labelWithString: "This revision will be archived:"))
-        stack.addArrangedSubview(summary)
-        summary.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         chooseTarget.target = self; chooseTarget.action = #selector(chooseRevision)
-        stack.addArrangedSubview(chooseTarget)
+        chooseTarget.setAccessibilityIdentifier("Archive.ChooseRevision")
+        let chooseTargetColumn = NSStackView(views: [NSTextField(labelWithString: "Choose another\nrevision:"), chooseTarget])
+        chooseTargetColumn.orientation = .vertical; chooseTargetColumn.alignment = .leading
+        let targetRow = NSStackView(views: [summary, chooseTargetColumn]); targetRow.alignment = .top
+        summary.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        chooseTargetColumn.setContentHuggingPriority(.required, for: .horizontal)
+        stack.addArrangedSubview(targetRow)
+        targetRow.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         for button in [zip, tar] { button.target = self; button.action = #selector(formatChanged(_:)) }
         zip.state = .on
-        stack.addArrangedSubview(NSStackView(views: [NSTextField(labelWithString: "Archive format"), zip, tar]))
         pathFilter.target = self; pathFilter.action = #selector(filterChanged(_:))
         revisionFilter.target = self; revisionFilter.action = #selector(filterChanged(_:))
-        stack.addArrangedSubview(NSTextField(labelWithString: "Filter files"))
-        stack.addArrangedSubview(pathFilter)
-        stack.addArrangedSubview(NSTextField(labelWithString: "Separate each new path by a new line"))
         paths.isRichText = false; paths.font = AppSettingsStore.shared.fontPreferences.font(.monospace, fallback: .monospacedSystemFont(ofSize: 12, weight: .regular))
         let pathScroll = NSScrollView(); pathScroll.documentView = paths; pathScroll.hasVerticalScroller = true
-        pathScroll.borderType = .bezelBorder; stack.addArrangedSubview(pathScroll)
+        pathScroll.borderType = .bezelBorder
         pathScroll.heightAnchor.constraint(equalToConstant: 75).isActive = true
-        pathScroll.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
-        stack.addArrangedSubview(revisionFilter)
+        let pathHint = NSTextField(labelWithString: "separate each new path by new line")
+        pathHint.textColor = .secondaryLabelColor
         chooseComparison.target = self; chooseComparison.action = #selector(chooseDiffRevision)
-        stack.addArrangedSubview(chooseComparison); stack.addArrangedSubview(comparisonSummary)
-        comparisonSummary.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        chooseComparison.setAccessibilityIdentifier("Archive.ChooseComparison")
+        let comparisonBox = AppKitFactory.titledBox("", comparisonSummary)
+        let comparisonChooser = NSStackView(views: [NSTextField(labelWithString: "Choose revision to\ncompare with first:"), chooseComparison])
+        comparisonChooser.orientation = .vertical; comparisonChooser.alignment = .leading
+        let comparisonRow = NSStackView(views: [comparisonBox, comparisonChooser]); comparisonRow.alignment = .top
+        let filterContent = NSStackView(views: [pathFilter, pathScroll, pathHint, revisionFilter, comparisonRow])
+        filterContent.orientation = .vertical; filterContent.alignment = .leading; filterContent.spacing = 6
+        let filterGroup = AppKitFactory.titledBox("Filter files", filterContent)
+        filterGroup.setAccessibilityIdentifier("Archive.FilterFiles")
+        stack.addArrangedSubview(filterGroup)
+        filterGroup.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        pathScroll.widthAnchor.constraint(equalTo: filterContent.widthAnchor).isActive = true
+        comparisonRow.widthAnchor.constraint(equalTo: filterContent.widthAnchor).isActive = true
         revisionFilter.state = comparison == nil ? .off : .on
+        let formatGroup = AppKitFactory.titledBox("Archive format", NSStackView(views: [zip, tar]))
+        save.target = self; save.action = #selector(saveArchive); save.keyEquivalent = "\r"
+        save.image = AppKitFactory.resourceImage("SaveAs", accessibilityDescription: "Save as"); save.imagePosition = .imageLeft
+        let formatRow = NSStackView(views: [formatGroup, save]); formatRow.alignment = .bottom
+        formatRow.setAccessibilityIdentifier("Archive.FormatRow")
+        stack.addArrangedSubview(formatRow)
         output.isEditable = false; output.font = AppSettingsStore.shared.fontPreferences.font(.monospace, fallback: .monospacedSystemFont(ofSize: 11, weight: .regular))
         let transcript = NSScrollView(); transcript.documentView = output; transcript.hasVerticalScroller = true
         stack.addArrangedSubview(transcript)
         transcript.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         transcript.heightAnchor.constraint(greaterThanOrEqualToConstant: 45).isActive = true
         keepOpen.state = AppSettingsStore.shared.pullPreferences.closeProcessOnSuccess ? .off : .on
-        stack.addArrangedSubview(keepOpen)
-        save.target = self; save.action = #selector(saveArchive); save.keyEquivalent = "\r"
         close.target = self; close.action = #selector(closeWindow); close.keyEquivalent = "\u{1b}"
-        stack.addArrangedSubview(NSStackView(views: [save, close]))
+        stack.addArrangedSubview(NSStackView(views: [keepOpen, close]))
         view = root; update()
     }
     override func viewDidAppear() { super.viewDidAppear(); view.window?.makeFirstResponder(save) }
-    private func describe(_ commit: Commit?) -> String {
-        guard let commit else { return "..." }
-        return "\(commit.id)\n\(commit.subject)\nAuthor: \(commit.authorName)\nCommit date: \(commit.commitDate.formatted())"
+    private func describeComparison(_ commit: Commit?) -> String {
+        guard let commit else { return "...\n\nAuthor:  ...\nCommit date:  ..." }
+        return "\(commit.subject)\n\nAuthor:  \(commit.authorName)\nCommit date:  \(CommitInfoPresentation.dateText(commit.commitDate, now: Date()))"
     }
     private func update() {
-        summary.stringValue = describe(revision); comparisonSummary.stringValue = describe(comparison)
+        summary.apply(revision); comparisonSummary.stringValue = describeComparison(comparison)
         paths.isEditable = !isBusy && pathFilter.state == .on
         chooseComparison.isEnabled = !isBusy && revisionFilter.state == .on
         comparisonSummary.textColor = revisionFilter.state == .on ? .labelColor : .disabledControlTextColor
@@ -118,9 +134,10 @@ private final class ArchiveViewController: NSViewController {
     @objc private func chooseRevision() { choose(comparing: false) }
     @objc private func chooseDiffRevision() { choose(comparing: true) }
     private func choose(comparing: Bool) {
-        guard let window = view.window, let initial = (comparing ? comparison : revision) ?? history.first else { return }
+        guard let window = view.window else { return }
+        let initial = (comparing ? comparison : revision)?.id
         Task {
-            if let commit = await CherryPickRevisionChooser.present(history: history, selectedCommitID: initial.id, owner: window) {
+            if let commit = await chooseCommit(initial, window) {
                 if comparing { comparison = commit } else { revision = commit }; update()
             }
         }

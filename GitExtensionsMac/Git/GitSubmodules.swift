@@ -136,14 +136,19 @@ extension GitRepositoryModule: RepositorySubmoduleManagingDataSource {
         var description = ""
         var state: SubmoduleTreeItem.CommitState = exists ? .uninitialized : .missing
         var added: Int?, removed: Int?
+        var commitDetails: [ObjectID: SubmoduleDiffSummary.CommitInfo] = [:]
+        var summaryStatus = ""
         if initialized && exists {
             let headResult = try await git.run(GitCommand(arguments: ["rev-parse", "--verify", "HEAD"], accessesRemote: false, changesRepositoryState: false), in: url)
             if headResult.succeeded { head = try? ObjectID.parse(headResult.standardOutputString.trimmingCharacters(in: .whitespacesAndNewlines)) }
             let branchResult = try await git.run(GitCommand(arguments: ["symbolic-ref", "--quiet", "--short", "HEAD"], accessesRemote: false, changesRepositoryState: false), in: url)
             branch = bare ? nil : (branchResult.succeeded ? branchResult.standardOutputString.trimmingCharacters(in: .newlines) : "no branch")
             if module == nil && !bare {
-                let status = try await git.run(GitCommand(arguments: ["status", "--porcelain=v1", "-z"], accessesRemote: false, changesRepositoryState: false), in: url)
-                dirty = status.succeeded && !status.standardOutput.isEmpty
+                if sharedStatus[url] == nil {
+                    let status = try await git.run(GitCommand(arguments: ["--no-optional-locks", "status", "--porcelain=v2", "-z", "--untracked-files=all"], accessesRemote: false, changesRepositoryState: false), in: url)
+                    if status.succeeded { sharedStatus[url] = try GitOutputParser.parsePorcelainV2(status.standardOutput) }
+                }
+                dirty = !(sharedStatus[url]?.isEmpty ?? true)
             }
             state = module != nil && head == nil ? .modified : .same
             if let recorded = module?.expectedCommitID, let head, recorded != head {
@@ -163,6 +168,9 @@ extension GitRepositoryModule: RepositorySubmoduleManagingDataSource {
                 let fields = detail.standardOutputString.split(separator: "\0", maxSplits: 2, omittingEmptySubsequences: false)
                 if detail.succeeded, fields.count == 3 {
                     timestamps[id] = Int64(fields[0])
+                    if let seconds = TimeInterval(fields[0]) {
+                        commitDetails[id] = .init(id: id, date: Date(timeIntervalSince1970: seconds), body: String(fields[2]))
+                    }
                     description += "\(id == head ? "To" : "From"): \(id.string)\n\(fields[1])\n\(fields[2].trimmingCharacters(in: .newlines))\n"
                 }
             }
@@ -173,17 +181,26 @@ extension GitRepositoryModule: RepositorySubmoduleManagingDataSource {
             }
             if module?.state == .conflicted { state = .conflicted }
             if dirty {
-                let status = try await git.run(GitCommand(arguments: ["status", "--short", "--untracked-files=no"], accessesRemote: false, changesRepositoryState: false), in: url)
+                let status = try await git.run(GitCommand(arguments: ["status", "-s"], accessesRemote: false, changesRepositoryState: false), in: url)
                 if status.succeeded && !status.standardOutput.isEmpty {
+                    summaryStatus = status.standardOutputString
                     let lines = status.standardOutputString.split(separator: "\n")
                     description += "Status:\n" + lines.prefix(5).joined(separator: "\n") + (lines.count > 5 ? "\n…" : "")
                 }
             }
         }
-        return SubmoduleTreeItem(repositoryURL: url, parentURL: parent, path: path, localPath: localPath,
+        var item = SubmoduleTreeItem(repositoryURL: url, parentURL: parent, path: path, localPath: localPath,
             isCurrent: url.resolvingSymlinksInPath() == current.resolvingSymlinksInPath(), isTop: module == nil,
             isInitialized: initialized && exists, branch: branch, commitID: head, recordedID: module?.expectedCommitID,
-            commitState: state, addedCommits: added, removedCommits: removed, isDirty: dirty, commitDescription: description)
+            commitState: state, addedCommits: added, removedCommits: removed, isDirty: dirty, commitDescription: description,
+            changeCounts: sharedStatus[url].map(GitStatusRecord.allRevisionChangeCounts))
+        if module != nil {
+            var status = FileStatusSubmodule(first: module?.expectedCommitID, second: head ?? module?.commitID, isDirty: dirty)
+            status.state = state; status.added = added; status.removed = removed
+            item.diffSummary = try await submoduleDiffSummary(path: localPath, child: url, status: status,
+                                                             knownDetails: commitDetails, knownStatus: summaryStatus)
+        }
+        return item
     }
 
     private func validatedSubmoduleTreeItem(_ item: SubmoduleTreeItem) async throws -> SubmoduleTreeItem {

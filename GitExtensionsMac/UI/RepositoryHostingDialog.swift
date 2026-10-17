@@ -54,8 +54,10 @@ final class GitHubAccountSettingsController: NSViewController {
     private let token = NSSecureTextField(string: "")
     private let status = NSTextField(wrappingLabelWithString: "")
     private let generated: NSViewController?
-    init(host: GitExtensionPluginHost?, settings: [GitExtensionPluginSetting]) {
-        generated = host.map { PluginSettingsViewController(settings: settings, host: $0) }
+    private let embeddedCredentials: Bool
+    init(host: GitExtensionPluginHost?, settings: [GitExtensionPluginSetting], embeddedCredentials: Bool = false) {
+        self.embeddedCredentials = embeddedCredentials
+        generated = embeddedCredentials ? nil : host.map { PluginSettingsViewController(settings: settings, host: $0) }
         super.init(nibName: nil, bundle: nil)
     }
     required init?(coder: NSCoder) { nil }
@@ -81,7 +83,7 @@ final class GitHubAccountSettingsController: NSViewController {
             addChild(generated)
             stack.addArrangedSubview(generated.view)
             generated.view.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
-        } else {
+        } else if !embeddedCredentials {
             let close = NSButton(title: "Close", target: self, action: #selector(closeWindow)); close.keyEquivalent = "\r"
             stack.addArrangedSubview(close)
         }
@@ -89,6 +91,7 @@ final class GitHubAccountSettingsController: NSViewController {
         NSLayoutConstraint.activate([stack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
             stack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
             stack.topAnchor.constraint(equalTo: view.topAnchor, constant: 16), token.widthAnchor.constraint(equalTo: stack.widthAnchor)])
+        if embeddedCredentials { stack.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -16).isActive = true }
     }
     @objc private func save() {
         guard !token.stringValue.isEmpty else { status.stringValue = "Enter a token to replace the existing credential."; return }
@@ -122,7 +125,7 @@ final class GitHubRepositoryPlugin: NSObject, GitExtensionPlugin {
     var settings: [GitExtensionPluginSetting] {
         [.init(name: Self.helperEnabled, caption: "Enable commit message issue helper", defaultValue: "true", kind: .boolean),
          .init(name: Self.helperMaxCount, caption: "Maximum number of issues retrieved", defaultValue: "10",
-               kind: .number(minimum: Int(Int32.min), maximum: Int(Int32.max)))]
+               kind: .number(minimum: 0, maximum: Int(Int32.max)))]
     }
     var clientFactory: (String) -> RepositoryHostClient = { token in
         RepositoryHostClient(identity: HostedRepositoryIdentity.parse("https://github.com/api/api")!, token: token)
@@ -237,14 +240,25 @@ struct GitHubHostingContext {
     var changed: () -> Void = {}
 }
 
+private actor ProcessDialogResult<Value: Sendable> {
+    var value: Value?
+    func store(_ value: Value) { self.value = value }
+}
+
 @MainActor
 enum HostingProcessDialog {
     typealias Operation = @Sendable (@escaping GitOutputHandler) async throws -> Bool
     static var run: (_ title: String, _ parent: NSWindow, _ operation: @escaping Operation) async -> Bool = { title, parent, operation in
-        let controller = HostingProcessViewController(operation: operation)
+        await present(title, parent: parent, useDialogSettings: true, size: NSSize(width: 700, height: 430), minimum: NSSize(width: 520, height: 300), operation: operation)
+    }
+    static var runConfigured: (_ title: String, _ parent: NSWindow, _ useDialogSettings: Bool, _ operation: @escaping Operation) async -> Bool = { title, parent, useDialogSettings, operation in
+        await present(title, parent: parent, useDialogSettings: useDialogSettings, size: NSSize(width: 549, height: 327), minimum: NSSize(width: 500, height: 200), operation: operation)
+    }
+    private static func present(_ title: String, parent: NSWindow, useDialogSettings: Bool, size: NSSize, minimum: NSSize, operation: @escaping Operation) async -> Bool {
+        let controller = HostingProcessViewController(useDialogSettings: useDialogSettings, operation: operation)
         let panel = NSPanel(contentViewController: controller)
         panel.title = title; panel.styleMask = [.titled, .closable, .resizable]
-        panel.setContentSize(NSSize(width: 700, height: 430)); panel.minSize = NSSize(width: 520, height: 300)
+        panel.setContentSize(size); panel.minSize = minimum
         panel.delegate = controller
         return await withCheckedContinuation { continuation in
             controller.onClose = { succeeded in
@@ -254,6 +268,20 @@ enum HostingProcessDialog {
             parent.beginSheet(panel); controller.start()
         }
     }
+    static func read<Value: Sendable>(_ title: String, parent: NSWindow, useDialogSettings: Bool = true,
+                                     succeeded: @escaping @Sendable (Value) -> Bool = { _ in true },
+                                     operation: @escaping @Sendable (@escaping GitOutputHandler) async throws -> Value) async -> Value? {
+        let result = ProcessDialogResult<Value>()
+        _ = await ProcessOutputHistory.presentsCommands.withValue(true) {
+            await runConfigured(title, parent, useDialogSettings) { output in
+                let value = try await operation(output)
+                await result.store(value)
+                return succeeded(value)
+            }
+        }
+        return await result.value
+    }
+
     static func command(_ command: GitCommand, title: String, source: any RepositoryHostingDataSource, parent: NSWindow) async -> Bool {
         await run(title, parent) { output in
             let result = try await source.runHostingCommand(command, output: output)
@@ -269,16 +297,18 @@ enum HostingProcessDialog {
 private final class HostingProcessViewController: NSViewController, NSWindowDelegate {
     var onClose: ((Bool) -> Void)?
     private let operation: HostingProcessDialog.Operation
+    private let useDialogSettings: Bool
     private let progress = NSProgressIndicator()
     private let status = NSTextField(labelWithString: "Running…")
     private let outputView = NSTextView()
     private let keepOpen = NSButton(checkboxWithTitle: "Keep dialog open", target: nil, action: nil)
     private let abortButton = NSButton(title: "Abort", target: nil, action: nil)
     private let closeButton = NSButton(title: "OK", target: nil, action: nil)
+    let processInput = ProcessInputController()
     private var task: Task<Void, Never>?
     private var succeeded = false
     private var didClose = false
-    init(operation: @escaping HostingProcessDialog.Operation) { self.operation = operation; super.init(nibName: nil, bundle: nil) }
+    init(useDialogSettings: Bool, operation: @escaping HostingProcessDialog.Operation) { self.useDialogSettings = useDialogSettings; self.operation = operation; super.init(nibName: nil, bundle: nil) }
     required init?(coder: NSCoder) { nil }
     override func loadView() {
         let root = NSView()
@@ -289,35 +319,49 @@ private final class HostingProcessViewController: NSViewController, NSWindowDele
         outputView.font = AppSettingsStore.shared.fontPreferences.font(.monospace, fallback: .monospacedSystemFont(ofSize: 11, weight: .regular))
         let scroll = NSScrollView(); scroll.documentView = outputView; scroll.hasVerticalScroller = true; scroll.borderType = .bezelBorder
         keepOpen.state = AppSettingsStore.shared.pullPreferences.closeProcessOnSuccess ? .off : .on
+        keepOpen.isHidden = !useDialogSettings
         keepOpen.target = self; keepOpen.action = #selector(keepOpenChanged)
         abortButton.target = self; abortButton.action = #selector(abort)
         closeButton.target = self; closeButton.action = #selector(closeDialog); closeButton.keyEquivalent = "\r"; closeButton.isEnabled = false
         let spacer = NSView(); spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
         let header = NSStackView(views: [progress, status])
-        let footer = NSStackView(views: [keepOpen, spacer, abortButton, closeButton])
-        for item in [header, scroll, footer] { item.translatesAutoresizingMaskIntoConstraints = false; root.addSubview(item) }
+        let footer = NSStackView(views: [processInput.toggle, keepOpen, spacer, closeButton, abortButton])
+        let bottom = processInput.bottomStack(footer: footer)
+        for item in [header, scroll, bottom] { item.translatesAutoresizingMaskIntoConstraints = false; root.addSubview(item) }
         NSLayoutConstraint.activate([
             header.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12), header.topAnchor.constraint(equalTo: root.topAnchor, constant: 12),
             scroll.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12), scroll.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12),
-            scroll.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 9), scroll.bottomAnchor.constraint(equalTo: footer.topAnchor, constant: -9),
-            footer.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12), footer.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12),
-            footer.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -10)
+            scroll.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 9), scroll.bottomAnchor.constraint(equalTo: bottom.topAnchor, constant: -9),
+            bottom.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12), bottom.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12),
+            bottom.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -10)
         ])
         view = root
     }
     func start() {
         progress.startAnimation(nil)
+        processInput.window = view.window
         task = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
+                let processInput = processInput
+                let operation = operation
                 succeeded = try await OutputHistoryRecording.perform {
-                    try await operation { [weak self] event in Task { @MainActor in self?.append(event.text, error: event.stream == .standardError) } }
+                    try await processInput.perform {
+                        try await operation { [weak self] event in
+                            Task { @MainActor in
+                                self?.processInput.observeOutput(event.text)
+                                self?.append(event.text, error: event.stream == .standardError)
+                            }
+                        }
+                    }
                 }
                 status.stringValue = succeeded ? "Completed successfully" : "Failed"
             } catch is CancellationError { status.stringValue = "Aborted"; append("\nAborted\n", error: true) }
             catch { status.stringValue = "Failed"; append("\n\(error.localizedDescription)\n", error: true) }
-            progress.stopAnimation(nil); abortButton.isEnabled = false; closeButton.isEnabled = true; task = nil
-            if succeeded, keepOpen.state == .off { finish() }
+            processInput.finish()
+            progress.stopAnimation(nil); progress.isHidden = true; abortButton.isEnabled = false; closeButton.isEnabled = true; task = nil
+            view.window?.makeFirstResponder(closeButton)
+            if succeeded, useDialogSettings, keepOpen.state == .off { finish() }
         }
     }
     private func append(_ text: String, error: Bool) {
@@ -334,7 +378,7 @@ private final class HostingProcessViewController: NSViewController, NSWindowDele
     @objc private func closeDialog() { finish() }
     override func cancelOperation(_ sender: Any?) { task != nil ? abort() : finish() }
     func windowWillClose(_ notification: Notification) { task?.cancel(); finish() }
-    private func finish() { guard !didClose else { return }; didClose = true; onClose?(succeeded) }
+    private func finish() { guard !didClose else { return }; didClose = true; processInput.finish(); onClose?(succeeded) }
 }
 
 private func label(_ text: String) -> NSTextField { NSTextField(labelWithString: text) }

@@ -516,12 +516,12 @@ package protocol BuildServerAdapter: AnyObject, Sendable {
 }
 
 package enum BuildServerType: String, CaseIterable, Sendable {
-    case appVeyor = "AppVeyor"
-    case azureDevOps = "Azure DevOps and Team Foundation Server (since TFS2015)"
     case gitHubActions = "GitHub Actions"
-    case gitLab = "Gitlab"
     case jenkins = "Jenkins"
     case teamCity = "TeamCity"
+    case gitLab = "Gitlab"
+    case azureDevOps = "Azure DevOps and Team Foundation Server (since TFS2015)"
+    case appVeyor = "AppVeyor"
 }
 
 package enum BuildServerSettingKeys {

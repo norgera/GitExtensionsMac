@@ -78,6 +78,8 @@ package protocol RepositoryFileStatusDataSource: Sendable {
 
     func loadFileStatusDiff(group: FileStatusGroup, file: ChangedFile, options: FileDiffOptions, grep: GitGrepOptions) async throws -> FileStatusContent
 
+    func prepareFileStatusPreview(group: FileStatusGroup, file: ChangedFile, options: FileDiffOptions, grep: GitGrepOptions) async throws -> FilePreview<FileStatusContent>
+
     func loadFileData(path: String, at revision: RevisionID) async throws -> Data
 
     func exportFile(path: String, at revision: RevisionID, to url: URL) async throws
@@ -149,6 +151,7 @@ package struct FileStatusSubmodule: Hashable, Sendable {
     package var added: Int?
     package var removed: Int?
     package let isDirty: Bool
+    package var summary: SubmoduleDiffSummary?
 
     package var countSuffix: String {
         guard let added, let removed, added != 0 || removed != 0 else { return "" }
@@ -182,7 +185,7 @@ package enum FileStatusCommands {
 
     package static func status(showUntracked: Bool, showIgnored: Bool = false) -> GitCommand {
         var arguments = ["--no-optional-locks", "status", "--porcelain=2", "-z"]
-        if !showUntracked { arguments.append("--untracked-files=no") }
+        arguments.append(showUntracked ? "--untracked-files" : "--untracked-files=no")
         if showIgnored { arguments.append("--ignored") }
         return GitCommand(arguments: arguments, accessesRemote: false, changesRepositoryState: false)
     }
@@ -506,7 +509,7 @@ package struct FileStatusDiffCalculator {
     package var grepFiles: (_ revision: RevisionID, _ arguments: [String], _ text: String) async throws -> [ChangedFile]
     package var describe: (ObjectID) -> String
 
-    package static let diffWithParent = "Diff with A: "
+    package static let diffWithParent = "Diff with A "
 
     private func describe(_ revision: RevisionID) -> String {
         switch revision {
@@ -662,5 +665,11 @@ extension FileStatusDiffCalculator {
         case .index: headID.map { [.object($0)] } ?? []
         case .revision: commit.parentIDs.map(RevisionID.object)
         }
+    }
+}
+
+package extension RepositoryFileStatusDataSource {
+    func prepareFileStatusPreview(group: FileStatusGroup, file: ChangedFile, options: FileDiffOptions, grep: GitGrepOptions) async throws -> FilePreview<FileStatusContent> {
+        .ready(try await loadFileStatusDiff(group: group, file: file, options: options, grep: grep))
     }
 }

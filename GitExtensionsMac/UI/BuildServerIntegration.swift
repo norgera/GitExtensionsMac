@@ -60,7 +60,7 @@ enum BuildServerAdapterResolver {
                             await GitUICommands.requestBuildServerCredentials(key: key, useStored: stored)
                         }, isCommitVisible: @escaping @Sendable (ObjectID) async -> Bool = { _ in true }) async -> Resolution {
         let enabled = BuildServerSettingsStore.bool(settings[BuildServerSettingKeys.enabled])
-        let urls = BuildServerAutoDetector.orderedRemoteURLs(remotes)
+        let urls = BuildServerAutoDetector.orderedRemoteURLs(remotes, prioritized: AppSettingsStore.shared.prioritizedBuildServerRemoteNames)
         var typeName = settings[BuildServerSettingKeys.type] ?? ""
         if !typeName.isEmpty {
             if enabled == false { return .init(adapter: nil, explicitlyEnabled: false) }
@@ -222,8 +222,8 @@ final class BuildServerSettingsPageController: NSViewController, NSTextFieldDele
     private let transport: HostTransport
     private let lookupStatus = NSTextField(labelWithString: "")
     private var lookupLink: NSButton?
+    private var gitLabInstanceEdited = false
     private var chooserLink: NSButton?
-    private var credentialsLink: NSButton?
     private var clipboardLink: NSButton?
 
     init(store: BuildServerSettingsStore, remoteURLs: [String], workingDirectoryName: String?, transport: @escaping HostTransport = HostHTTP.send) {
@@ -250,9 +250,8 @@ final class BuildServerSettingsPageController: NSViewController, NSTextFieldDele
         for button in [enabled, showPage] { button.allowsMixedState = true; button.target = self; button.action = #selector(controlsChanged) }
         typePopup.addItems(withTitles: ["None"] + BuildServerType.allCases.map(\.rawValue))
         typePopup.target = self; typePopup.action = #selector(typeChanged)
-        stack.addArrangedSubview(enabled)
+        stack.addArrangedSubview(NSStackView(views: [enabled, showPage]))
         stack.addArrangedSubview(NSStackView(views: [NSTextField(labelWithString: "Build server type"), typePopup]))
-        stack.addArrangedSubview(showPage)
         adapterPanel.orientation = .vertical; adapterPanel.alignment = .leading; adapterPanel.spacing = 6
         stack.addArrangedSubview(adapterPanel)
         regexError.textColor = .systemRed
@@ -304,18 +303,18 @@ final class BuildServerSettingsPageController: NSViewController, NSTextFieldDele
     private func buildAdapterPanel(_ values: [String: String]) {
         lookupTask?.cancel()
         adapterPanel.arrangedSubviews.forEach { adapterPanel.removeArrangedSubview($0); $0.removeFromSuperview() }
-        adapterFields = [:]; adapterButtons = [:]; tokenField = nil; tokenManagement = nil; lookupLink = nil; chooserLink = nil; credentialsLink = nil; clipboardLink = nil
+        adapterFields = [:]; adapterButtons = [:]; tokenField = nil; tokenManagement = nil; lookupLink = nil; chooserLink = nil; clipboardLink = nil
         panelType = selectedType
-        guard let type = selectedType, workingDirectoryName != nil || store.locations == nil else { return }
+        guard let type = selectedType, workingDirectoryName != nil else { return }
         func value(_ key: String) -> String? { values[BuildServerSettingKeys.adapter(type.rawValue, key)] }
         switch type {
         case .appVeyor:
-            _ = field("AppVeyorProjectName", "Project(s) Name(s)", value("AppVeyorProjectName") ?? workingDirectoryName ?? "")
-            adapterPanel.addArrangedSubview(NSTextField(wrappingLabelWithString: "Separate different projects with |. Projects may include an account name: account/project."))
             let account = value("AppVeyorAccountName") ?? ""
             _ = field("AppVeyorAccountName", "Account name", account)
             addAdapterToken(type, identity: account, caption: "Api token")
             adapterPanel.addArrangedSubview(NSTextField(wrappingLabelWithString: "Token used to query the AppVeyor REST API, available in your AppVeyor user account."))
+            _ = field("AppVeyorProjectName", "Project(s) Name(s)", value("AppVeyorProjectName") ?? workingDirectoryName ?? "")
+            adapterPanel.addArrangedSubview(NSTextField(wrappingLabelWithString: "Separate different projects with |. Projects may include an account name: account/project."))
             addAdapterCheck("AppVeyorLoadTestsResults", "Display test results in build status summary for each build result (network intensive)", value("AppVeyorLoadTestsResults"))
         case .gitHubActions:
             let detected = BuildServerAutoDetector.detect(remoteURLs, only: .gitHubActions)?.1 ?? [:]
@@ -333,6 +332,7 @@ final class BuildServerSettingsPageController: NSViewController, NSTextFieldDele
             var project = value(BuildServerSettingKeys.azureProjectURL) ?? ""
             regexError.stringValue = "The 'Build definition name' regular expression is not valid and won't be saved!"
             if project.trimmingCharacters(in: .whitespaces).isEmpty { project = AzureDevOpsProjectURL.project(fromRemotes: remoteURLs) ?? "" }
+            _ = link("Extract data from a build result url copied in the clipboard", #selector(extractFromClipboard))
             _ = field(BuildServerSettingKeys.azureProjectURL, "Project Url", project)
             adapterPanel.addArrangedSubview(NSTextField(wrappingLabelWithString: "Examples:\n - https://dev.azure.com/yourorganization/projectname/\n - https://yourhost:8080/tfs/collectionname/projectname/\n - https://yourorganization.visualstudio.com/projectname/"))
             _ = field(BuildServerSettingKeys.azureDefinitionFilter, "Build definition name\n(all existing if left empty)", value(BuildServerSettingKeys.azureDefinitionFilter) ?? "")
@@ -341,36 +341,42 @@ final class BuildServerSettingsPageController: NSViewController, NSTextFieldDele
             tokenField = field("token", "Rest Api Token", "", secure: true) as? NSSecureTextField
             tokenField?.placeholderString = BuildServerSettingsStore.token(BuildServerSettingsStore.azureTokenKey(projectURL: project)) == nil
                 ? "Not set — Git credential helper is used when available" : "Stored in Keychain — enter a replacement"
-            adapterPanel.addArrangedSubview(NSTextField(wrappingLabelWithString: "You need to create a token with the following scopes:\n - 'Build (read)'\n - 'Project and team (read)'"))
             tokenManagement = link("Go to token management page", #selector(openAzureTokenPage))
-            _ = link("Extract data from a build result url copied in the clipboard", #selector(extractFromClipboard))
+            adapterPanel.addArrangedSubview(NSTextField(wrappingLabelWithString: "You need to create a token with the following scopes:\n - 'Build (read)'\n - 'Project and team (read)'"))
             updateAzureView()
         case .gitLab:
             let detected = remoteURLs.compactMap(CIConfiguration.gitLabRemote).first
             let instance = value("InstanceUrl") ?? detected?.instance ?? ""
             _ = field("InstanceUrl", "Instance URL", instance)
             _ = field("ProjectId", "Project ID", value("ProjectId") ?? "")
-            addAdapterToken(type, identity: instance, caption: "Api Token")
+            gitLabInstanceEdited = false
             lookupLink = link("Get Project ID from server", #selector(getGitLabProjectID))
-            tokenManagement = link("Go to token management page", #selector(openGitLabTokenPage))
             lookupStatus.stringValue = ""; lookupStatus.textColor = .systemRed; adapterPanel.addArrangedSubview(lookupStatus)
+            addAdapterToken(type, identity: instance, caption: "Api Token")
+            tokenManagement = link("Go to token management page", #selector(openGitLabTokenPage))
             updateExtraView()
             if value("ProjectId") == nil, !instance.isEmpty { getGitLabProjectID() }
-        case .jenkins, .teamCity:
-            _ = field("BuildServerUrl", type == .jenkins ? "Jenkins server URL" : "TeamCity server URL", value("BuildServerUrl") ?? "")
+        case .jenkins:
+            _ = field("BuildServerUrl", "Jenkins server URL", value("BuildServerUrl") ?? "")
             _ = field("ProjectName", "Project name", value("ProjectName") ?? workingDirectoryName ?? "")
-            if type == .jenkins {
-                _ = field("IgnoreBuildBranch", "Ignore build for branch", value("IgnoreBuildBranch") ?? "")
-            } else {
-                adapterPanel.addArrangedSubview(NSTextField(labelWithString: "Several names split by | character"))
-                _ = field("BuildIdFilter", "Build Id Filter (Regexp)", value("BuildIdFilter") ?? "")
-                addAdapterCheck("LogAsGuest", "Log as guest to display the build report", value("LogAsGuest") ?? "false")
-                chooserLink = link("Choose project/build…", #selector(chooseTeamCityBuild))
-                clipboardLink = link("Extract the data from the build url copied in the clipboard", #selector(extractTeamCityClipboard))
-                regexError.stringValue = "The \"Build Id Filter\" regular expression is not valid and won't be saved!"
-                adapterPanel.addArrangedSubview(regexError)
+            _ = field("IgnoreBuildBranch", "Ignore build for branch", value("IgnoreBuildBranch") ?? "")
+            updateExtraView()
+        case .teamCity:
+            clipboardLink = link("Extract the data from the build url copied in the clipboard", #selector(extractTeamCityClipboard))
+            _ = field("BuildServerUrl", "TeamCity server URL", value("BuildServerUrl") ?? "")
+            _ = field("ProjectName", "Project name", value("ProjectName") ?? workingDirectoryName ?? "")
+            if let projectRow = adapterPanel.arrangedSubviews.last as? NSStackView {
+                let chooser = NSButton(title: "...", target: self, action: #selector(chooseTeamCityBuild))
+                chooser.setAccessibilityLabel("Choose project/build")
+                projectRow.addArrangedSubview(chooser)
+                chooserLink = chooser
             }
-            credentialsLink = link("Credentials…", #selector(editBuildCredentials))
+            adapterPanel.addArrangedSubview(NSTextField(labelWithString: "Several names splitted by | char"))
+            _ = field("BuildIdFilter", "Build Id Filter", value("BuildIdFilter") ?? "")
+            regexError.stringValue = "The \"Build Id Filter\" regular expression is not valid and won't be saved!"
+            let regexRow = NSStackView(views: [NSTextField(labelWithString: "Regexp"), regexError])
+            adapterPanel.addArrangedSubview(regexRow)
+            addAdapterCheck("LogAsGuest", "Log as guest to display the build report", value("LogAsGuest") ?? "false")
             updateExtraView()
         }
     }
@@ -380,19 +386,18 @@ final class BuildServerSettingsPageController: NSViewController, NSTextFieldDele
             ? "Not set" : "Stored in Keychain — enter a replacement"
     }
     private func addAdapterCheck(_ key: String, _ title: String, _ value: String?) {
-        let control = NSButton(checkboxWithTitle: title, target: self, action: #selector(controlsChanged))
-        control.allowsMixedState = true; setTristate(control, value); control.isEnabled = scope != .effective
-        adapterButtons[key] = control; adapterPanel.addArrangedSubview(control)
+        let inherited = InheritedValueCheckbox(checkboxWithTitle: title, target: self, action: #selector(controlsChanged))
+        inherited.setInherited(BuildServerSettingsStore.bool(value)); inherited.isEnabled = scope != .effective
+        adapterButtons[key] = inherited; adapterPanel.addArrangedSubview(inherited)
     }
     private func updateExtraView() {
-        credentialsLink?.isEnabled = CIConfiguration.serverURL(adapterFields["BuildServerUrl"]?.stringValue ?? "", jenkins: selectedType == .jenkins) != nil
         clipboardLink?.isEnabled = scope != .effective
         if selectedType == .teamCity {
             regexError.isHidden = CIConfiguration.regexValid(adapterFields["BuildIdFilter"]?.stringValue ?? "")
             chooserLink?.isEnabled = scope != .effective && CIConfiguration.serverURL(adapterFields["BuildServerUrl"]?.stringValue ?? "") != nil
         }
         if selectedType == .gitLab {
-            let valid = CIConfiguration.serverURL(adapterFields["InstanceUrl"]?.stringValue ?? "") != nil
+            let valid = !gitLabInstanceEdited || Self.isAbsoluteURI(adapterFields["InstanceUrl"]?.stringValue ?? "")
             lookupLink?.isEnabled = scope != .effective && valid; tokenManagement?.isEnabled = valid
         }
     }
@@ -400,7 +405,14 @@ final class BuildServerSettingsPageController: NSViewController, NSTextFieldDele
         regexError.isHidden = AzureDevOpsProjectURL.isRegexValid(adapterFields[BuildServerSettingKeys.azureDefinitionFilter]?.stringValue ?? "")
         tokenManagement?.isEnabled = AzureDevOpsProjectURL.tokenManagementURL(project: adapterFields[BuildServerSettingKeys.azureProjectURL]?.stringValue ?? "") != nil
     }
-    func controlTextDidChange(_ notification: Notification) { captureAdapter(); if selectedType == .azureDevOps { updateAzureView() }; updateExtraView() }
+    static func isAbsoluteURI(_ text: String) -> Bool {
+        guard let url = URL(string: text.trimmingCharacters(in: .whitespaces)), let scheme = url.scheme, !scheme.isEmpty else { return false }
+        return url.host?.isEmpty == false || scheme == "file"
+    }
+
+    func controlTextDidChange(_ notification: Notification) {
+        if notification.object as? NSTextField === adapterFields["InstanceUrl"] { gitLabInstanceEdited = true }
+        captureAdapter(); if selectedType == .azureDevOps { updateAzureView() }; updateExtraView() }
 
     @objc private func scopeChanged() {
         view.window?.makeFirstResponder(nil)
@@ -462,10 +474,6 @@ final class BuildServerSettingsPageController: NSViewController, NSTextFieldDele
         }
     }
 
-    @objc private func editBuildCredentials() {
-        guard let server = CIConfiguration.serverURL(adapterFields["BuildServerUrl"]?.stringValue ?? "", jenkins: selectedType == .jenkins), let host = server.host else { return }
-        Task { _ = await GitUICommands.requestBuildServerCredentials(key: host, useStored: false) }
-    }
     @objc private func openGitLabTokenPage() {
         guard let base = CIConfiguration.serverURL(adapterFields["InstanceUrl"]?.stringValue ?? ""),
               let url = URL(string: "-/profile/personal_access_tokens?name=GitExtensionsIntegration&scopes=api", relativeTo: base) else { return }
@@ -613,4 +621,20 @@ final class BuildReportViewController: NSViewController, WKNavigationDelegate {
         webView.removeFromSuperview(); self.webView = nil; link.isHidden = false
     }
     @objc private func open() { if let url { NSWorkspace.shared.open(url) } }
+}
+
+final class InheritedValueCheckbox: NSButton {
+    func setInherited(_ value: Bool?) {
+        allowsMixedState = value == nil
+        state = value.map { $0 ? .on : .off } ?? .mixed
+    }
+
+    override func setNextState() {
+        if state == .mixed {
+            allowsMixedState = false
+            state = .off
+        } else {
+            super.setNextState()
+        }
+    }
 }

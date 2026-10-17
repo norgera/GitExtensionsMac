@@ -69,10 +69,10 @@ final class CommitSummaryView: NSBox {
         title = commit.shortID
         subject.stringValue = commit.subject
         author.stringValue = commit.authorName
-        date.stringValue = Self.relativeFormatter.localizedString(for: commit.commitDate, relativeTo: Date())
+        date.stringValue = CommitInfoPresentation.dateText(commit.commitDate, now: Date())
         let branchNames = commit.references.compactMap { reference -> String? in
             switch reference.kind {
-            case .currentBranch, .localBranch, .remoteBranch: reference.name
+            case .currentBranch, .localBranch: reference.name
             default: nil
             }
         }
@@ -112,9 +112,4 @@ final class CommitSummaryView: NSBox {
         return String(joined.prefix(74)) + "…"
     }
 
-    private static let relativeFormatter: RelativeDateTimeFormatter = {
-        let formatter = RelativeDateTimeFormatter()
-        formatter.unitsStyle = .full
-        return formatter
-    }()
 }

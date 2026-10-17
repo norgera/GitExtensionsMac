@@ -63,6 +63,21 @@ package struct RepositoryCleanResult: Equatable, Sendable {
 package protocol RepositoryCleaningDataSource: RepositoryBrowsingDataSource {
     func previewClean(_ request: RepositoryCleanRequest) async throws -> RepositoryCleanPreview
     func clean(_ request: RepositoryCleanRequest) async throws -> RepositoryCleanResult
+    func previewClean(_ request: RepositoryCleanRequest, output: @escaping GitOutputHandler) async throws -> RepositoryCleanPreview
+    func clean(_ request: RepositoryCleanRequest, output: @escaping GitOutputHandler) async throws -> RepositoryCleanResult
+}
+
+package extension RepositoryCleaningDataSource {
+    func previewClean(_ request: RepositoryCleanRequest, output: @escaping GitOutputHandler) async throws -> RepositoryCleanPreview {
+        let result = try await previewClean(request)
+        output(GitOutputEvent(stream: .standardOutput, data: Data(result.output.utf8)))
+        return result
+    }
+    func clean(_ request: RepositoryCleanRequest, output: @escaping GitOutputHandler) async throws -> RepositoryCleanResult {
+        let result = try await clean(request)
+        output(GitOutputEvent(stream: .standardOutput, data: Data(result.output.utf8)))
+        return result
+    }
 }
 
 package enum GitCleanCommands {
@@ -102,12 +117,20 @@ package enum GitCleanCommands {
 
 extension GitRepositoryModule: RepositoryCleaningDataSource {
     package func previewClean(_ request: RepositoryCleanRequest) async throws -> RepositoryCleanPreview {
+        try await previewClean(request, output: { _ in })
+    }
+
+    package func previewClean(_ request: RepositoryCleanRequest, output handler: @escaping GitOutputHandler) async throws -> RepositoryCleanPreview {
         let repository = try mutationRepository()
-        let output = try await cleanOutput(request, dryRun: true, in: repository)
+        let output = try await cleanOutput(request, dryRun: true, in: repository, output: handler)
         return RepositoryCleanPreview(output: output, hasCandidates: !cleanCandidates(in: output).isEmpty)
     }
 
     package func clean(_ request: RepositoryCleanRequest) async throws -> RepositoryCleanResult {
+        try await clean(request, output: { _ in })
+    }
+
+    package func clean(_ request: RepositoryCleanRequest, output: @escaping GitOutputHandler) async throws -> RepositoryCleanResult {
         let repository = try mutationRepository()
         let before = try await cleanOutput(request, dryRun: true, in: repository)
         let beforeCandidates = cleanCandidates(in: before)
@@ -116,7 +139,7 @@ extension GitRepositoryModule: RepositoryCleaningDataSource {
         }
 
         do {
-            let output = try await cleanOutput(request, dryRun: false, in: repository)
+            let output = try await cleanOutput(request, dryRun: false, in: repository, output: output)
             return RepositoryCleanResult(output: output, outcome: .cleaned)
         } catch {
             let after = (try? await cleanOutput(request, dryRun: true, in: repository)) ?? before
@@ -133,18 +156,20 @@ extension GitRepositoryModule: RepositoryCleaningDataSource {
     private func cleanOutput(
         _ request: RepositoryCleanRequest,
         dryRun: Bool,
-        in repository: ResolvedGitRepository
+        in repository: ResolvedGitRepository,
+        output handler: GitOutputHandler? = nil
     ) async throws -> String {
         var output = ""
-        let main = try await git.run(GitCleanCommands.clean(request, dryRun: dryRun), in: repository.rootURL)
+        let main: GitCommandResult
+        if let handler { main = try await git.runStreaming(GitCleanCommands.clean(request, dryRun: dryRun), in: repository.rootURL, output: handler) }
+        else { main = try await git.run(GitCleanCommands.clean(request, dryRun: dryRun), in: repository.rootURL) }
         guard main.succeeded else { throw commandError(from: main) }
         output += main.standardOutputString
 
         if request.cleanSubmodules {
-            let submodules = try await git.run(
-                GitCleanCommands.cleanSubmodules(request, dryRun: dryRun),
-                in: repository.rootURL
-            )
+            let submodules: GitCommandResult
+            if let handler { submodules = try await git.runStreaming(GitCleanCommands.cleanSubmodules(request, dryRun: dryRun), in: repository.rootURL, output: handler) }
+            else { submodules = try await git.run(GitCleanCommands.cleanSubmodules(request, dryRun: dryRun), in: repository.rootURL) }
             guard submodules.succeeded else { throw commandError(from: submodules) }
             output += submodules.standardOutputString
         }

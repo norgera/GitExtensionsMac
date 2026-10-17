@@ -365,10 +365,12 @@ extension GitRepositoryModule: RepositoryPushingDataSource {
                 behind: branch.behind
             )
         }
-        let remoteBranches = state.references.branches.compactMap { branch -> RepositoryPushRemoteBranchState? in
-            guard branch.isRemote, let remote = branch.remoteName else { return nil }
-            return RepositoryPushRemoteBranchState(remote: remote, name: branch.name, objectID: branch.commitID)
-        }
+        let remoteBranches = (state.navigation.remotes.flatMap(\.branches) + state.references.branches)
+            .reduce(into: [RepositoryPushRemoteBranchState]()) { result, branch in
+                guard branch.isRemote, let remote = branch.remoteName else { return }
+                let item = RepositoryPushRemoteBranchState(remote: remote, name: branch.name, objectID: branch.commitID)
+                if !result.contains(where: { $0.remote == item.remote && $0.name == item.name }) { result.append(item) }
+            }
         let autoSetupMerge = try await optionalPushConfig("branch.autosetupmerge", repository: repository)?
             .caseInsensitiveCompare("false") != .orderedSame
         return RepositoryPushState(

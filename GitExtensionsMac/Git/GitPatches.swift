@@ -58,11 +58,12 @@ package struct PatchPreviewMetadata: Sendable {
 }
 
 package enum PatchPreviewParser {
-    package static func load(_ url: URL) async throws -> PatchPreview {
-        try await Task.detached { try parse(Data(contentsOf: url)) }.value
+    package static func load(_ url: URL, encoding: RepositoryTextEncoding = .automatic) async throws -> PatchPreview {
+        try await Task.detached { try parse(Data(contentsOf: url), encoding: encoding) }.value
     }
-    package static func parse(_ data: Data) throws -> PatchPreview {
-        let decoded = FileContentDecoder.decode(data, path: "patch.txt", requestedEncoding: .automatic).text
+    package static func parse(_ data: Data, encoding: RepositoryTextEncoding = .automatic) throws -> PatchPreview {
+        let content = FileContentDecoder.decode(data, path: "patch.txt", requestedEncoding: encoding)
+        let decoded = content.text
         let expression = try NSRegularExpression(pattern: #"^diff --(git|cc|combined)\s+(.+)$"#)
         var sections: [[String]] = []
         var current: [String] = []
@@ -71,8 +72,6 @@ package enum PatchPreviewParser {
             if expression.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)) != nil {
                 if !current.isEmpty { sections.append(current) }
                 current = [line]
-            } else if line == "-- " || line.hasPrefix("From ") {
-                if !current.isEmpty { sections.append(current); current = [] }
             } else if !current.isEmpty { current.append(line) }
         }
         if !current.isEmpty { sections.append(current) }
@@ -116,11 +115,11 @@ package enum PatchPreviewParser {
             }
             let id = "patch:\(files.count)"
             let additions = body.filter { $0.hasPrefix("+") && !$0.hasPrefix("+++") }.count
-            let deletions = body.filter { $0.hasPrefix("-") && !$0.hasPrefix("---") }.count
+            let deletions = body.filter { $0.hasPrefix("-") && !$0.hasPrefix("---") && $0 != "-- " }.count
             let file = ChangedFile(id: id, path: type == .deleted ? oldPath : path,
                                    oldPath: oldPath == path ? nil : oldPath, changeType: type, additions: additions, deletions: deletions)
             files.append(file)
-            diffs.merge(GitOutputParser.parseUnifiedDiff(Data(body.joined(separator: "\n").utf8), files: [file])) { _, new in new }
+            diffs.merge(GitOutputParser.parseUnifiedDiff(text: body.joined(separator: "\n"), files: [file], contentEncoding: content.encoding?.foundationEncoding ?? .utf8, numberUnprefixedContext: true)) { _, new in new }
             metadata[id] = PatchPreviewMetadata(change: change, fileType: fileType)
         }
         return PatchPreview(files: files, diffs: diffs, metadata: metadata)

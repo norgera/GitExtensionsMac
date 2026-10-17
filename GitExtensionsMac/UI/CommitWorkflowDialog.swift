@@ -9,6 +9,7 @@ private enum CommitKeyboardShortcut: String {
     case message
     case stageAll
     case filter
+    case toggleSelectionFilter
     case refresh
     case createBranch
     case openWithDifftool
@@ -159,6 +160,14 @@ private final class CommitRootView: NSView {
 
 @MainActor
 enum CommitWorkflowDialog {
+    static func nextItemToSelect(rows: [String], selected: Set<String>) -> String? {
+        if let first = rows.firstIndex(where: { selected.contains($0) }),
+           let next = rows[(first + 1)...].first(where: { !selected.contains($0) }) {
+            return next
+        }
+        return rows.first
+    }
+
     static func present(
         source: any RepositoryCommitWorkflowDataSource,
         pushSource: (any RepositoryPushingDataSource)? = nil,
@@ -223,7 +232,7 @@ enum CommitWorkflowDialog {
 }
 
 @MainActor
-private final class CommitWorkflowViewController: NSViewController, NSOutlineViewDataSource, NSOutlineViewDelegate, NSTextViewDelegate, NSSearchFieldDelegate, NSWindowDelegate, NSMenuDelegate {
+private final class CommitWorkflowViewController: NSViewController, NSOutlineViewDataSource, NSOutlineViewDelegate, NSTextViewDelegate, NSSearchFieldDelegate, NSComboBoxDelegate, NSWindowDelegate, NSMenuDelegate {
     var scriptHooks: ApplicationScriptHooks?
     var commandLineMessage: String?
     private struct TemplateMenuValue {
@@ -249,13 +258,15 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
     private let settings = AppSettingsStore.shared
     private let unstagedTable = NSOutlineView()
     private let stagedTable = NSOutlineView()
+    private let unstagedEmptyLabel = NSTextField(labelWithString: "There are no unstaged changes")
+    private let stagedEmptyLabel = NSTextField(labelWithString: "There are no staged changes")
     private let unstagedFilter = NSSearchField()
     private let stagedFilter = NSSearchField()
     private let stageSelectedButton = NSButton(title: "Stage", target: nil, action: nil)
     private let stageAllFilesButton = NSButton(title: "Stage All", target: nil, action: nil)
     private let unstageSelectedButton = NSButton(title: "Unstage", target: nil, action: nil)
     private let unstageAllFilesButton = NSButton(title: "Unstage All", target: nil, action: nil)
-    private let messageView = NSTextView()
+    private let messageView = CommitMessageTextView()
     private let commitDiffView = CommitDiffView()
     private let amend = NSButton(checkboxWithTitle: "Amend commit", target: nil, action: nil)
     private let amendPanel = NSStackView()
@@ -263,25 +274,45 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
     private let templatesMenu = NSPopUpButton()
     private let optionsMenu = NSPopUpButton()
     private let stageAll = NSButton(checkboxWithTitle: "Stage all before committing", target: nil, action: nil)
-    private let allowEmpty = NSButton(checkboxWithTitle: "Allow Empty", target: nil, action: nil)
     private let signOff = NSButton(checkboxWithTitle: "Sign-off commit", target: nil, action: nil)
     private let resetAuthor = NSButton(checkboxWithTitle: "Reset author", target: nil, action: nil)
     private let author = NSTextField(string: "")
+    private let stageInSuperproject = NSButton(checkboxWithTitle: CommitSuperprojectStaging.title, target: nil, action: nil)
+    private var superprojectSubmodule: RepositorySuperprojectSubmodule?
+    private var pendingSuperprojectStage: RepositorySuperprojectSubmodule?
+    private let authorStatus = CommitAuthorStatusButton()
+    private let selectionFilterBox = NSComboBox()
+    private let selectionFilterBar = NSStackView()
+    private let selectionFilterThrottle = CommitSelectionFilterThrottle()
+    private var insertScopeParentheses = false
+    private var autoCompleteWords: [String] = []
+    private var autoCompleteTask: Task<Void, Never>?
     private let status = NSTextField(labelWithString: "Loading changes…")
-    private let commitButton = NSButton(title: "Commit", target: nil, action: nil)
-    private let commitAndPushButton = NSButton(title: "Commit & push", target: nil, action: nil)
+    private let commitButton = CommitShortcutButton(title: "Commit", target: nil, action: nil)
+    private let commitAndPushButton = LeadingImageButton(title: "Commit & push", target: nil, action: nil)
     private let cancelButton = NSButton(title: "Cancel", target: nil, action: nil)
-    private let stashStagedButton = NSButton(title: "Stash staged changes", target: nil, action: nil)
-    private let resetAllButton = NSButton(title: "Reset all changes", target: nil, action: nil)
-    private let resetUnstagedButton = NSButton(title: "Reset unstaged changes", target: nil, action: nil)
-    private let resetSoftButton = NSButton(title: "Reset soft", target: nil, action: nil)
+    private let stashStagedButton = LeadingImageButton(title: "Stash staged changes", target: nil, action: nil)
+    private let resetAllButton = LeadingImageButton(title: "Reset all changes", target: nil, action: nil)
+    private let resetUnstagedButton = LeadingImageButton(title: "Reset unstaged changes", target: nil, action: nil)
+    private let resetSoftButton = LeadingImageButton(title: "Reset soft", target: nil, action: nil)
     private let createBranchButton = NSButton(title: "Create branch", target: nil, action: nil)
-    private let manageTrackingButton = NSButton(title: "Manage tracking…", target: nil, action: nil)
+    private let solveMergeConflictsButton = NSButton(title: "There are unresolved merge conflicts", target: nil, action: nil)
+    private let branchIcon = NSImageView()
+    private let branchNameLabel = NSTextField(labelWithString: "")
+    private let remoteNameLink = CommitAuthorStatusButton()
+    private let stagedCountLabel = NSTextField(labelWithString: "Staged")
+    private let stagedCountValue = NSTextField(labelWithString: "0")
+    private let cursorLineLabel = NSTextField(labelWithString: "Ln")
+    private let cursorLineValue = NSTextField(labelWithString: "0")
+    private let cursorColumnLabel = NSTextField(labelWithString: "Col")
+    private let cursorColumnValue = NSTextField(labelWithString: "0")
+    private let toolbarOverflow = CommitToolbarOverflow()
     private let modifyCommitMessageButton = NSButton(title: "Modify commit message", target: nil, action: nil)
     private let mainSplit = NSSplitView()
     private let fileSplit = NSSplitView()
     private let contentSplit = NSSplitView()
-    private let messageSplit = NSSplitView()
+    private let messageSplit = NSStackView()
+    private let splitterManager = SplitterManager(settingsPath: "CommitDialog")
     private var didSetInitialDividers = false
     private var unstaged: [ChangedFile] = []
     private var staged: [ChangedFile] = []
@@ -364,7 +395,7 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
 
     required init?(coder: NSCoder) { nil }
     deinit {
-        loadTask?.cancel(); diffLoadTask?.cancel(); actionTask?.cancel()
+        loadTask?.cancel(); diffLoadTask?.cancel(); actionTask?.cancel(); autoCompleteTask?.cancel()
         if let registeredTemplatesObserver { NotificationCenter.default.removeObserver(registeredTemplatesObserver) }
     }
 
@@ -417,6 +448,9 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
         mainSplit.dividerStyle = .paneSplitter
         mainSplit.addArrangedSubview(left)
         mainSplit.addArrangedSubview(right)
+        splitterManager.addSplitter(mainSplit, name: "splitMain", fixedPanel: .fixedLeadingPane, defaultDistance: 397)
+        splitterManager.addSplitter(fileSplit, name: "splitLeft", fixedPanel: .proportional, defaultDistance: 274)
+        splitterManager.addSplitter(contentSplit, name: "splitRight", fixedPanel: .fixedTrailingPane, defaultDistance: 426)
         mainSplit.translatesAutoresizingMaskIntoConstraints = false
         left.widthAnchor.constraint(greaterThanOrEqualToConstant: 80).isActive = true
 
@@ -424,21 +458,54 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
         status.textColor = .secondaryLabelColor
         status.lineBreakMode = .byTruncatingTail
         status.translatesAutoresizingMaskIntoConstraints = false
+        authorStatus.font = AppSettingsStore.shared.applicationFont(size: 11)
+        authorStatus.target = self
+        authorStatus.action = #selector(openAuthorSettings)
+        authorStatus.translatesAutoresizingMaskIntoConstraints = false
+        authorStatus.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        authorStatus.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+        branchIcon.image = AppKitFactory.resourceImage("Branch", accessibilityDescription: "Branch")
+        for label in [branchNameLabel, stagedCountLabel, stagedCountValue, cursorLineLabel, cursorLineValue, cursorColumnLabel, cursorColumnValue] {
+            label.font = AppSettingsStore.shared.applicationFont(size: 11)
+            label.lineBreakMode = .byClipping
+        }
+        remoteNameLink.font = AppSettingsStore.shared.applicationFont(size: 11)
+        for (label, width) in [(stagedCountValue, CGFloat(40)), (cursorLineValue, 40), (cursorColumnValue, 40)] {
+            label.widthAnchor.constraint(equalToConstant: width).isActive = true
+        }
+        let strip = NSStackView(views: [branchIcon, branchNameLabel, remoteNameLink, stagedCountLabel, stagedCountValue, cursorLineLabel, cursorLineValue, cursorColumnLabel, cursorColumnValue])
+        strip.orientation = .horizontal
+        strip.alignment = .centerY
+        strip.spacing = 4
+        strip.setCustomSpacing(12, after: remoteNameLink)
+        strip.translatesAutoresizingMaskIntoConstraints = false
+        strip.setContentCompressionResistancePriority(.required, for: .horizontal)
+        status.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         root.addSubview(mainSplit)
+        root.addSubview(authorStatus)
         root.addSubview(status)
+        root.addSubview(strip)
+        root.addSubview(cancelButton)
+        cancelButton.frame = .zero
         NSLayoutConstraint.activate([
+            strip.leadingAnchor.constraint(greaterThanOrEqualTo: status.trailingAnchor, constant: 8),
+            strip.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -11),
+            strip.centerYAnchor.constraint(equalTo: status.centerYAnchor),
             mainSplit.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             mainSplit.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             mainSplit.topAnchor.constraint(equalTo: root.topAnchor),
             mainSplit.bottomAnchor.constraint(equalTo: status.topAnchor, constant: -2),
-            status.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 8),
-            status.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -8),
+            authorStatus.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 8),
+            authorStatus.centerYAnchor.constraint(equalTo: status.centerYAnchor),
+            authorStatus.widthAnchor.constraint(lessThanOrEqualTo: root.widthAnchor, multiplier: 0.6),
+            status.leadingAnchor.constraint(equalTo: authorStatus.trailingAnchor, constant: 12),
             status.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -4),
             status.heightAnchor.constraint(equalToConstant: 18)
         ])
         view = root
         configureInitialValues()
         reloadChanges()
+        loadSuperprojectSubmodule()
     }
 
     override func viewDidAppear() {
@@ -446,15 +513,7 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
         guard !didSetInitialDividers else { return }
         didSetInitialDividers = true
         view.layoutSubtreeIfNeeded()
-        let geometry = settings.commitPreferences
-        mainSplit.setPosition(clamped(geometry.mainDivider, minimum: 240, maximum: mainSplit.bounds.width - 320), ofDividerAt: 0)
-        fileSplit.setPosition(clamped(geometry.fileDivider, minimum: 110, maximum: fileSplit.bounds.height - 110), ofDividerAt: 0)
-        contentSplit.setPosition(clamped(geometry.contentDivider, minimum: 90, maximum: contentSplit.bounds.height - 135), ofDividerAt: 0)
-        messageSplit.setPosition(clamped(geometry.commandDivider, minimum: 150, maximum: messageSplit.bounds.width - 230), ofDividerAt: 0)
-    }
-
-    private func clamped(_ value: CGFloat, minimum: CGFloat, maximum: CGFloat) -> CGFloat {
-        min(maximum, max(minimum, value))
+        splitterManager.restoreSplitters()
     }
 
     private func makeFilePane() -> NSView {
@@ -481,7 +540,8 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
             stageAll: stageAllFilesButton
         )
         let bottomTools = fileToolbar(for: stagedTable)
-        let top = stacked(topTools, unstagedFilter, unstagedScroll)
+        configureSelectionFilterBar()
+        let top = stacked(selectionFilterBar, topTools, unstagedFilter, unstagedScroll)
         let bottom = stacked(transfer, bottomTools, stagedFilter, stagedScroll)
         fileSplit.isVertical = false
         fileSplit.dividerStyle = .paneSplitter
@@ -495,6 +555,7 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
         messageView.font = AppSettingsStore.shared.commitFont
         messageView.delegate = self
         messageView.isAutomaticTextCompletionEnabled = settings.preferences.provideAutocompletion
+        messageView.onStringAssigned = { [weak self] in self?.refreshMessageMarkup() }
         CommitSpelling.apply(to: messageView)
         NotificationCenter.default.addObserver(self, selector: #selector(spellingDictionaryChanged), name: .spellingDictionaryDidChange, object: nil)
         let messageScroll = NSScrollView()
@@ -502,6 +563,13 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
         messageScroll.hasVerticalScroller = true
         messageScroll.borderType = .bezelBorder
         configureDocumentView(messageView, width: 760, height: 260)
+        if settings.commitMessageEditorPreferences.messageEditorWordWrap {
+            messageScroll.hasHorizontalScroller = false
+            messageView.setSoftWrap(true)
+        } else {
+            messageScroll.hasHorizontalScroller = true
+            messageScroll.autohidesScrollers = true
+        }
         messageScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 115).isActive = true
         messageWatermark.stringValue = composesMessage ? "Enter commit message" : "Commit Message is requested during commit"
         messageWatermark.textColor = .placeholderTextColor
@@ -512,13 +580,15 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
 
         commitButton.target = self
         commitButton.action = #selector(commit)
-        commitButton.keyEquivalent = "\r"
-        commitButton.keyEquivalentModifierMask = .command
         commitAndPushButton.target = self
         commitAndPushButton.action = #selector(commitAndPush)
         commitAndPushButton.isEnabled = pushSource != nil
         amend.target = self
         amend.action = #selector(amendChanged)
+        stageInSuperproject.target = self
+        stageInSuperproject.action = #selector(stageInSuperprojectChanged)
+        stageInSuperproject.toolTip = CommitSuperprojectStaging.toolTip
+        stageInSuperproject.isHidden = true
         modifyCommitMessageButton.target = self
         modifyCommitMessageButton.action = #selector(modifySpecialCommitMessage)
         modifyCommitMessageButton.bezelStyle = .inline
@@ -529,19 +599,32 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
         cancelButton.target = self
         cancelButton.action = #selector(cancel)
         cancelButton.keyEquivalent = "\u{1b}"
-        for button in [commitButton, commitAndPushButton, stashStagedButton, resetAllButton, resetUnstagedButton, cancelButton] {
-            button.widthAnchor.constraint(equalToConstant: 171).isActive = true
-            button.heightAnchor.constraint(equalToConstant: 26).isActive = true
+        cancelButton.alphaValue = 0
+        cancelButton.refusesFirstResponder = true
+        cancelButton.setAccessibilityElement(false)
+        for (button, image) in [(commitButton, "RepoStateClean"), (commitAndPushButton, "ArrowUp"), (stashStagedButton, "stash"),
+                                (resetAllButton, "ResetWorkingDirChanges"), (resetUnstagedButton, "ResetWorkingDirChanges"), (resetSoftButton, "ResetCurrentBranchToHere")] {
+            button.image = AppKitFactory.resourceImage(image, accessibilityDescription: button.title)
+            button.imagePosition = .imageLeft
+            button.imageHugsTitle = false
         }
-        resetSoftButton.widthAnchor.constraint(equalToConstant: 159).isActive = true
+        for button in [commitButton, commitAndPushButton, stashStagedButton, resetAllButton, resetUnstagedButton] {
+            button.widthAnchor.constraint(greaterThanOrEqualToConstant: 171).isActive = true
+            button.heightAnchor.constraint(equalToConstant: 26).isActive = true
+            button.setContentCompressionResistancePriority(.required, for: .horizontal)
+        }
         resetSoftButton.heightAnchor.constraint(equalToConstant: 26).isActive = true
+        resetSoftButton.setContentCompressionResistancePriority(.required, for: .horizontal)
         amendPanel.orientation = .vertical
         amendPanel.alignment = .leading
         amendPanel.spacing = 2
+        amendPanel.edgeInsets = NSEdgeInsets(top: 0, left: 12, bottom: 0, right: 0)
         amendPanel.addArrangedSubview(resetAuthor)
         amendPanel.addArrangedSubview(resetSoftButton)
         amendPanel.isHidden = true
-        let commands = NSStackView(views: [commitButton, commitAndPushButton, amend, amendPanel, modifyCommitMessageButton, stashStagedButton, resetAllButton, resetUnstagedButton, cancelButton])
+        let commands = NSStackView(views: [commitButton, commitAndPushButton, stageInSuperproject, amend, amendPanel, modifyCommitMessageButton, stashStagedButton, resetAllButton, resetUnstagedButton])
+        NSLayoutConstraint.activate([commitAndPushButton, stashStagedButton, resetAllButton, resetUnstagedButton].map { $0.widthAnchor.constraint(equalTo: commitButton.widthAnchor) }
+            + [resetSoftButton.widthAnchor.constraint(equalTo: commitButton.widthAnchor, constant: -12)])
         commands.orientation = .vertical
         commands.alignment = .leading
         commands.spacing = 7
@@ -552,9 +635,9 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
         messageMenu.addItem(withTitle: "Commit message")
         createBranchButton.target = self
         createBranchButton.action = #selector(createBranch)
-        manageTrackingButton.target = self
-        manageTrackingButton.action = #selector(manageTracking)
-        manageTrackingButton.isHidden = onManageRemotes == nil
+        remoteNameLink.target = self
+        remoteNameLink.action = #selector(manageTracking)
+        remoteNameLink.toolTip = nil
         templatesMenu.removeAllItems()
         templatesMenu.pullsDown = true
         templatesMenu.addItem(withTitle: "Commit templates")
@@ -562,17 +645,23 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
         optionsMenu.pullsDown = true
         optionsMenu.addItem(withTitle: "Options")
         configureOptionsMenu()
-        messageMenu.widthAnchor.constraint(equalToConstant: 85).isActive = true
-        templatesMenu.widthAnchor.constraint(equalToConstant: 125).isActive = true
-        createBranchButton.widthAnchor.constraint(equalToConstant: 100).isActive = true
-        optionsMenu.widthAnchor.constraint(equalToConstant: 90).isActive = true
-        [messageMenu, templatesMenu, createBranchButton, manageTrackingButton, optionsMenu].forEach {
-            $0.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-            $0.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        for (menu, image) in [(messageMenu, "WorkingDirChanges"), (templatesMenu, "CommitTemplates"), (optionsMenu, nil)] as [(NSPopUpButton, String?)] {
+            menu.isBordered = false
+            (menu.cell as? NSPopUpButtonCell)?.arrowPosition = .arrowAtBottom
+            if let image, let title = menu.item(at: 0) {
+                title.image = AppKitFactory.resourceImage(image, accessibilityDescription: title.title)
+                menu.imagePosition = .imageLeft
+            }
+        }
+        [messageMenu, templatesMenu, createBranchButton, optionsMenu].forEach {
+            $0.setContentCompressionResistancePriority(.required, for: .horizontal)
+            $0.setContentHuggingPriority(.defaultHigh, for: .horizontal)
         }
         let spacer = NSView()
         spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let messageToolbar = NSStackView(views: [messageMenu, templatesMenu, createBranchButton, manageTrackingButton, spacer, optionsMenu])
+        spacer.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        let messageToolbar = NSStackView(views: [messageMenu, templatesMenu, createBranchButton, spacer, optionsMenu, toolbarOverflow.button])
+        toolbarOverflow.attach(to: messageToolbar, overflowing: [createBranchButton, templatesMenu])
         messageToolbar.orientation = .horizontal
         messageToolbar.alignment = .centerY
         messageToolbar.spacing = 6
@@ -583,15 +672,44 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
         editor.spacing = 0
         messageToolbar.widthAnchor.constraint(equalTo: editor.widthAnchor).isActive = true
         messageScroll.widthAnchor.constraint(equalTo: editor.widthAnchor).isActive = true
-        messageSplit.isVertical = true
-        messageSplit.dividerStyle = .thin
+        messageSplit.orientation = .horizontal
+        messageSplit.alignment = .top
+        messageSplit.distribution = .fill
+        messageSplit.spacing = 0
+        commands.setHuggingPriority(.defaultHigh, for: .horizontal)
         messageSplit.addArrangedSubview(commands)
         messageSplit.addArrangedSubview(editor)
-        commands.widthAnchor.constraint(greaterThanOrEqualToConstant: 171).isActive = true
+        commands.setClippingResistancePriority(.defaultLow, for: .vertical)
+        for stack in [editor, messageSplit] { stack.setClippingResistancePriority(.defaultLow, for: .horizontal) }
+        commands.setHuggingPriority(.defaultLow, for: .vertical)
+        editor.heightAnchor.constraint(equalTo: messageSplit.heightAnchor).isActive = true
+        editor.trailingAnchor.constraint(equalTo: messageSplit.trailingAnchor).isActive = true
 
         contentSplit.isVertical = false
         contentSplit.dividerStyle = .paneSplitter
         contentSplit.addArrangedSubview(commitDiffView)
+        solveMergeConflictsButton.target = self
+        solveMergeConflictsButton.action = #selector(solveMergeConflicts)
+        solveMergeConflictsButton.image = AppKitFactory.resourceImage("SolveMerge", accessibilityDescription: "Solve merge conflicts")
+        solveMergeConflictsButton.imagePosition = .imageLeft
+        solveMergeConflictsButton.imageHugsTitle = false
+        solveMergeConflictsButton.isBordered = false
+        solveMergeConflictsButton.wantsLayer = true
+        solveMergeConflictsButton.layer?.backgroundColor = NSColor(srgbRed: 230 / 255, green: 99 / 255, blue: 99 / 255, alpha: 1).cgColor
+        (solveMergeConflictsButton.cell as? NSButtonCell)?.wraps = true
+        solveMergeConflictsButton.attributedTitle = NSAttributedString(string: solveMergeConflictsButton.title, attributes: [
+            .font: NSFont.boldSystemFont(ofSize: NSFont.systemFontSize), .foregroundColor: NSColor.black,
+            .paragraphStyle: { let style = NSMutableParagraphStyle(); style.alignment = .center; style.lineBreakMode = .byWordWrapping; return style }()
+        ])
+        solveMergeConflictsButton.isHidden = true
+        solveMergeConflictsButton.translatesAutoresizingMaskIntoConstraints = false
+        commitDiffView.addSubview(solveMergeConflictsButton)
+        NSLayoutConstraint.activate([
+            solveMergeConflictsButton.leadingAnchor.constraint(equalTo: commitDiffView.leadingAnchor, constant: 14),
+            solveMergeConflictsButton.topAnchor.constraint(equalTo: commitDiffView.topAnchor, constant: 12),
+            solveMergeConflictsButton.widthAnchor.constraint(equalToConstant: 188),
+            solveMergeConflictsButton.heightAnchor.constraint(equalToConstant: 42)
+        ])
         contentSplit.addArrangedSubview(messageSplit)
         return contentSplit
     }
@@ -652,19 +770,20 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
 
         let conventional = NSMenuItem(title: "Conventional Commits", action: nil, keyEquivalent: "")
         let submenu = NSMenu(title: "Conventional Commits")
-        for keyword in ["build", "chore", "ci", "docs", "feat", "fix", "perf", "refactor", "style", "test"] {
+        for keyword in ConventionalCommitPrefixer.headerCommitTypes {
             let item = NSMenuItem(title: keyword, action: #selector(insertConventionalPrefix(_:)), keyEquivalent: "")
             item.target = self
             item.representedObject = keyword
             submenu.addItem(item)
         }
         submenu.addItem(.separator())
-        for footer in ["BREAKING CHANGE", "Co-authored-by", "Reviewed-by", "[skip ci]"] {
+        for footer in ConventionalCommitPrefixer.footerKeywords + ["[skip ci]"] {
             let item = NSMenuItem(title: footer, action: #selector(insertTemplateFooter(_:)), keyEquivalent: "")
             item.target = self
             item.representedObject = footer
             submenu.addItem(item)
         }
+        submenu.addItem(.separator())
         let documentation = NSMenuItem(title: "Documentation…", action: #selector(openConventionalCommitDocumentation), keyEquivalent: "")
         documentation.target = self
         submenu.addItem(documentation)
@@ -717,11 +836,6 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
             clearAuthor.target = self
             menu.addItem(clearAuthor)
         }
-        let allowEmptyItem = NSMenuItem(title: "Allow Empty", action: #selector(toggleCommitOption(_:)), keyEquivalent: "")
-        allowEmptyItem.target = self
-        allowEmptyItem.representedObject = "allowEmpty"
-        allowEmptyItem.state = allowEmpty.state
-        menu.addItem(allowEmptyItem)
         let noVerifyItem = NSMenuItem(title: "No verify", action: #selector(toggleCommitOption(_:)), keyEquivalent: "")
         noVerifyItem.target = self
         noVerifyItem.representedObject = "noVerify"
@@ -822,14 +936,192 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
 
     @objc private func insertConventionalPrefix(_ sender: NSMenuItem) {
         guard let keyword = sender.representedObject as? String else { return }
-        insertConventionalPrefixItem(keyword)
+        applyConventionalKeyword(keyword)
     }
 
     @objc private func insertTemplateFooter(_ sender: NSMenuItem) {
         guard let footer = sender.representedObject as? String else { return }
-        let suffix = messageView.string.isEmpty ? "" : "\n\n"
-        messageView.string += suffix + footer + (footer == "[skip ci]" ? "" : ": ")
+        let keepsCursorPosition = footer == "[skip ci]"
+        let selection = messageView.selectedRange()
+        messageView.string = ConventionalCommitPrefixer.appendFooter(keepsCursorPosition ? footer : "\(footer): ", to: messageView.string)
+        let length = (messageView.string as NSString).length
+        messageView.setSelectedRange(keepsCursorPosition ? NSRange(location: min(selection.location, length), length: 0) : NSRange(location: length, length: 0))
         commitWindow?.makeFirstResponder(messageView)
+    }
+
+    private func applyConventionalKeyword(_ keyword: String) {
+        let result = ConventionalCommitPrefixer.apply(keyword: keyword, message: messageView.string,
+                                                      selectionStart: messageView.selectedRange().location, insertScope: insertScopeParentheses)
+        messageView.string = result.message
+        messageView.setSelectedRange(NSRange(location: min(result.selectionStart, (result.message as NSString).length), length: 0))
+        commitWindow?.makeFirstResponder(messageView)
+    }
+
+    private func openConventionalCommitMenu(insertScope: Bool) {
+        insertScopeParentheses = insertScope
+        guard let submenu = templatesMenu.menu?.items.first(where: { $0.title == "Conventional Commits" })?.submenu,
+              let feat = submenu.items.first(where: { $0.title == ConventionalCommitPrefixer.feat }) else { return }
+        let menu = submenu.copy() as? NSMenu ?? submenu
+        let positioning = menu.items.first(where: { $0.title == feat.title })
+        let caret = messageView.firstRect(forCharacterRange: messageView.selectedRange(), actualRange: nil)
+        let location = commitWindow.map { window -> NSPoint in
+            let inWindow = window.convertFromScreen(caret).origin
+            return messageView.convert(inWindow, from: nil)
+        } ?? .zero
+        menu.popUp(positioning: positioning, at: location, in: messageView)
+    }
+
+    @objc private func stageInSuperprojectChanged() {
+        guard !stageInSuperproject.isHidden else { return }
+        var preferences = settings.commitMessageEditorPreferences
+        preferences.stageInSuperprojectAfterCommit = stageInSuperproject.state == .on
+        settings.saveCommitMessageEditorPreferences(preferences)
+    }
+
+    private func loadSuperprojectSubmodule() {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let submodule = await source.loadSuperprojectSubmodule()
+            superprojectSubmodule = submodule
+            stageInSuperproject.isHidden = submodule == nil
+        }
+    }
+
+    private func stageSubmoduleInSuperproject(_ target: RepositorySuperprojectSubmodule) async {
+        do {
+            try await source.stageInSuperproject(target)
+        } catch {
+            status.stringValue = error.localizedDescription
+        }
+    }
+
+    @objc private func openAuthorSettings() {
+        guard let commitWindow else { return }
+        Task { @MainActor [weak self, weak commitWindow] in
+            guard let self, let commitWindow else { return }
+            await ApplicationShellDialogs.presentSettings(from: commitWindow, source: source as? any RepositorySettingsDataSource,
+                                                          initialPage: CommitAuthorStatus.settingsPage)
+            reloadChanges(preserveMessage: true)
+        }
+    }
+
+    private func configureSelectionFilterBar() {
+        let label = NSTextField(labelWithString: CommitSelectionFilter.title)
+        label.font = AppSettingsStore.shared.applicationFont(size: 11)
+        selectionFilterBox.isEditable = true
+        selectionFilterBox.completes = false
+        selectionFilterBox.numberOfVisibleItems = CommitSelectionFilter.historyLimit
+        selectionFilterBox.toolTip = CommitSelectionFilter.toolTip
+        selectionFilterBox.delegate = self
+        selectionFilterBox.setAccessibilityIdentifier("CommitSelectionFilter")
+        selectionFilterBox.widthAnchor.constraint(equalToConstant: 160).isActive = true
+        selectionFilterBar.setViews([label, selectionFilterBox], in: .leading)
+        selectionFilterBar.orientation = .horizontal
+        selectionFilterBar.alignment = .centerY
+        selectionFilterBar.spacing = 5
+        selectionFilterBar.edgeInsets = NSEdgeInsets(top: 3, left: 6, bottom: 3, right: 5)
+    }
+
+    private func toggleSelectionFilter() {
+        let visible = selectionFilterBar.isHidden
+        selectionFilterBar.isHidden = !visible
+        if visible {
+            commitWindow?.makeFirstResponder(selectionFilterBox)
+        } else if let editor = selectionFilterBox.currentEditor(), commitWindow?.firstResponder === editor {
+            commitWindow?.makeFirstResponder(unstagedTable)
+        }
+    }
+
+    @discardableResult
+    private func applySelectionFilter(_ text: String) -> Int {
+        let paths = unstagedSelectableNodes().compactMap { $0.file?.path }
+        let matches: Set<String>
+        do {
+            matches = Set(try CommitSelectionFilter.matchingPaths(paths, pattern: text))
+            selectionFilterBox.toolTip = CommitSelectionFilter.toolTip
+        } catch {
+            selectionFilterBox.toolTip = CommitSelectionFilter.errorToolTip(error)
+            return 0
+        }
+        if !matches.isEmpty { unstagedTable.expandItem(nil, expandChildren: true) }
+        var rows = IndexSet()
+        for row in 0..<unstagedTable.numberOfRows {
+            if let path = (unstagedTable.item(atRow: row) as? ChangedFileNode)?.file?.path, matches.contains(path) { rows.insert(row) }
+        }
+        unstagedTable.selectRowIndexes(rows, byExtendingSelection: false)
+        if let first = rows.first { unstagedTable.scrollRowToVisible(first) }
+        return rows.count
+    }
+
+    private func selectionFilterTextChanged(_ text: String) {
+        selectionFilterThrottle.submit(text) { [weak self] value in
+            guard let self else { return }
+            if applySelectionFilter(value) > 0 {
+                let history = CommitSelectionFilter.history(selectionFilterBox.objectValues.compactMap { $0 as? String }, adding: value)
+                selectionFilterBox.removeAllItems()
+                selectionFilterBox.addItems(withObjectValues: history)
+            }
+        }
+    }
+
+    private func unstagedSelectableNodes() -> [ChangedFileNode] {
+        func flatten(_ nodes: [ChangedFileNode]) -> [ChangedFileNode] { nodes.flatMap { [$0] + flatten($0.children) } }
+        return flatten(unstagedRootNodes).filter { $0.file != nil }
+    }
+
+    func comboBoxSelectionDidChange(_ notification: Notification) {
+        guard notification.object as? NSComboBox === selectionFilterBox else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            selectionFilterThrottle.cancel()
+            applySelectionFilter(selectionFilterBox.stringValue)
+        }
+    }
+
+    private func refreshMessageMarkup() {
+        let text = messageView.string
+        messageView.illFormedRanges = settings.commitMessageEditorPreferences.markIllFormedLines ? CommitMessageMarkup.illFormedRanges(in: text) : []
+        messageView.marksBlankFirstLine = settings.commitMessageEditorPreferences.markIllFormedLines && CommitMessageMarkup.marksBlankFirstLine(text)
+        let validation = settings.commitPreferences.validation
+        messageView.applyOverLimitRanges(CommitMessageMarkup.overLimitRanges(in: text, firstLineLimit: validation.maximumSubjectLength,
+                                                                             bodyLineLimit: validation.maximumLineLength,
+                                                                             secondLineMustBeEmpty: validation.requireEmptySecondLine))
+        messageView.needsDisplay = true
+    }
+
+    @objc private func wordWrapCommitMessageBody() {
+        let limit = CommitWordWrapper.bodyLineLimit(configured: settings.commitPreferences.validation.maximumLineLength)
+        let original = messageView.string
+        let wrapped = CommitWordWrapper.wrapBody(original, limit: limit)
+        guard wrapped != original else { return }
+        let full = NSRange(location: 0, length: (original as NSString).length)
+        guard messageView.shouldChangeText(in: full, replacementString: wrapped) else { return }
+        messageView.replaceCharacters(in: full, with: wrapped)
+        messageView.didChangeText()
+    }
+
+    @objc private func toggleMarkIllFormedLines(_ sender: NSMenuItem) {
+        var preferences = settings.commitMessageEditorPreferences
+        preferences.markIllFormedLines.toggle()
+        settings.saveCommitMessageEditorPreferences(preferences)
+        refreshMessageMarkup()
+    }
+
+    private func refreshAutoCompleteWords() {
+        autoCompleteTask?.cancel()
+        guard settings.preferences.provideAutocompletion, let context = repositoryContext else { return }
+        let files = unstaged.map { (file: $0, kind: Commit.Kind.workingDirectory) } + staged.map { (file: $0, kind: Commit.Kind.index) }
+        let artificial = RevisionCommitBuilder.artificialRevisions(headID: context.headID)
+        let regexes = CommitAutoCompleteRegexes.regexes
+        let source = source
+        autoCompleteTask = Task { @MainActor [weak self] in
+            let words = await CommitAutoCompleteRegexes.collectWords(files: files, regexes: regexes) { file, kind in
+                guard let commit = artificial.first(where: { $0.kind == kind }) else { return nil }
+                return try? await source.loadDiff(for: commit, file: file, options: FileDiffOptions(contextLines: 5))
+            }
+            guard !Task.isCancelled, let self else { return }
+            autoCompleteWords = words
+        }
     }
 
     @objc private func toggleCommitOption(_ sender: NSMenuItem) {
@@ -840,9 +1132,6 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
         } else if key == "noVerify" {
             noVerify.toggle()
             sender.state = noVerify ? .on : .off
-        } else if key == "allowEmpty" {
-            allowEmpty.state = allowEmpty.state == .on ? .off : .on
-            sender.state = allowEmpty.state
         } else {
             sender.state = sender.state == .on ? .off : .on
             var preferences = settings.commitPreferences
@@ -879,12 +1168,14 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
             }
             author.stringValue = value
             configureOptionsMenu()
+            updateStatus()
         }
     }
 
     @objc private func clearAuthorOverride() {
         author.stringValue = ""
         configureOptionsMenu()
+        updateStatus()
     }
 
     @objc private func selectGPGSigning(_ sender: NSMenuItem) {
@@ -928,7 +1219,6 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
         let preferences = settings.preferences
         let commitPreferences = settings.commitPreferences
         stageAll.state = initial?.stageAllBeforeCommit == true ? .on : .off
-        allowEmpty.state = (initial?.allowEmpty ?? preferences.defaultAllowEmpty) ? .on : .off
         signOff.state = (initial?.signOff ?? preferences.defaultSignOff) ? .on : .off
         resetAuthor.state = initial?.resetAuthor == true ? .on : .off
         author.stringValue = initial?.author ?? ""
@@ -939,7 +1229,10 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
         commitAndPushButton.isHidden = !commitPreferences.showCommitAndPush
         resetAllButton.isHidden = !commitPreferences.showResetAll
         resetUnstagedButton.isHidden = !commitPreferences.showResetUnstaged
+        stageInSuperproject.state = settings.commitMessageEditorPreferences.stageInSuperprojectAfterCommit ? .on : .off
+        selectionFilterBar.isHidden = !settings.commitMessageEditorPreferences.showsSelectionFilter
         modeChanged()
+        refreshMessageMarkup()
     }
 
     private func configureTable(_ table: NSOutlineView) {
@@ -975,6 +1268,16 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
         scroll.hasHorizontalScroller = true
         scroll.autohidesScrollers = true
         scroll.borderType = .noBorder
+        let label = table === stagedTable ? stagedEmptyLabel : unstagedEmptyLabel
+        label.font = NSFontManager.shared.convert(AppSettingsStore.shared.applicationFont(size: 11), toHaveTrait: .italicFontMask)
+        label.textColor = .secondaryLabelColor
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.isHidden = true
+        scroll.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.topAnchor.constraint(equalTo: scroll.topAnchor, constant: 4),
+            label.leadingAnchor.constraint(equalTo: scroll.leadingAnchor, constant: 6)
+        ])
         return scroll
     }
 
@@ -1190,17 +1493,44 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
 
     func textView(_ view: NSTextView, menu: NSMenu, for event: NSEvent, at charIndex: Int) -> NSMenu? {
         guard view === messageView else { return menu }
+        let nativeItems = menu.items
+        menu.removeAllItems()
         for (offset, item) in CommitSpelling.menuItems(for: view, at: charIndex, target: self, replace: #selector(replaceMisspelledWord(_:)),
                                                        add: #selector(addWordToDictionary(_:)), ignore: #selector(ignoreMisspelledWord(_:)),
                                                        remove: #selector(removeWordFromDictionary(_:))).enumerated() {
             menu.insertItem(item, at: offset)
         }
+        let edits: [(String, Selector)] = [
+            ("Cut", #selector(NSText.cut(_:))), ("Copy", #selector(NSText.copy(_:))),
+            ("Paste", #selector(NSText.paste(_:))), ("Delete", #selector(CommitMessageTextView.deleteSelectedMessageText(_:))),
+            ("Select all", #selector(NSText.selectAll(_:)))
+        ]
+        for (title, action) in edits {
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            item.target = messageView
+            menu.addItem(item)
+        }
+        let wordWrap = NSMenuItem(title: "Word wrap (except subject line)", action: #selector(wordWrapCommitMessageBody), keyEquivalent: "")
+        wordWrap.target = self
+        menu.addItem(wordWrap)
         menu.addItem(.separator())
         menu.addItem(CommitSpelling.dictionaryMenuItem(target: self, action: #selector(selectSpellingDictionary(_:))))
+        menu.addItem(.separator())
+        let markIllFormed = NSMenuItem(title: "Mark ill formed lines", action: #selector(toggleMarkIllFormedLines(_:)), keyEquivalent: "")
+        markIllFormed.target = self
+        markIllFormed.state = settings.commitMessageEditorPreferences.markIllFormedLines ? .on : .off
+        menu.addItem(markIllFormed)
         let completion = NSMenuItem(title: "Provide auto completion", action: #selector(toggleAutoCompletion(_:)), keyEquivalent: "")
         completion.target = self
         completion.state = settings.preferences.provideAutocompletion ? .on : .off
         menu.addItem(completion)
+        let editActions = Set(edits.map(\.1) + [#selector(NSTextView.delete(_:))])
+        let services = nativeItems.filter { $0.action.map { !editActions.contains($0) } ?? true }
+        if services.contains(where: { !$0.isSeparatorItem }) {
+            menu.addItem(.separator())
+            for item in services where !item.isSeparatorItem || menu.items.last?.isSeparatorItem != true { menu.addItem(item) }
+            if menu.items.last?.isSeparatorItem == true { menu.removeItem(at: menu.items.count - 1) }
+        }
         return menu
     }
 
@@ -1209,6 +1539,7 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
         preferences.provideAutocompletion.toggle()
         settings.save(preferences)
         messageView.isAutomaticTextCompletionEnabled = preferences.provideAutocompletion
+        refreshAutoCompleteWords()
     }
 
     @objc private func replaceMisspelledWord(_ sender: NSMenuItem) {
@@ -1263,7 +1594,14 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
     private func applyFileToolbarVisibility() {
         let hidden = Set(settings.fileStatusListPreferences.hiddenToolbarItems)
         for items in fileToolbarItems.values {
-            for item in items { item.view.isHidden = hidden.contains(item.name) }
+            let refreshVisible = items.contains { $0.name == "btnRefresh" } && !hidden.contains("btnRefresh")
+            for item in items {
+                switch item.name {
+                case "btnCollapseGroups", "sepRefresh": item.view.isHidden = true
+                case "sepAsTree": item.view.isHidden = hidden.contains(item.name) || !refreshVisible
+                default: item.view.isHidden = hidden.contains(item.name)
+                }
+            }
         }
         for menu in fileToolbarMenus {
             for item in menu.items { item.state = (item.representedObject as? String).map { hidden.contains($0) ? .off : .on } ?? .off }
@@ -1274,9 +1612,8 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
         for button in [unstageAll, unstage, stage, stageAll] {
             let isStage = button === stage || button === stageAll
             let isAll = button === stageAll || button === unstageAll
-            button.image = AppKitFactory.resourceImage(isStage ? "ArrowDown" : "ArrowUp", accessibilityDescription: isStage ? "Stage" : "Unstage", isTemplate: true)
+            button.image = AppKitFactory.resourceImage(isStage ? (isAll ? "StageAll" : "Stage") : (isAll ? "UnstageAll" : "Unstage"), accessibilityDescription: isStage ? "Stage" : "Unstage")
             button.isBordered = false
-            button.contentTintColor = .systemPurple
             button.toolTip = button === stageAll ? "Stage all" : button === stage ? "Stage selected" : button === unstageAll ? "Unstage all" : "Unstage selected"
             if isAll {
                 button.title = ""
@@ -1642,6 +1979,14 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
     }
 
     func controlTextDidChange(_ notification: Notification) {
+        if notification.object as? NSTextField === author {
+            updateStatus()
+            return
+        }
+        if notification.object as? NSComboBox === selectionFilterBox {
+            selectionFilterTextChanged(selectionFilterBox.stringValue)
+            return
+        }
         guard let field = notification.object as? NSSearchField,
               field === unstagedFilter || field === stagedFilter else { return }
         reloadFileTrees()
@@ -1652,7 +1997,8 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
         }
     }
 
-    private func reloadChanges(preserveMessage: Bool = false, preferredPath: String? = nil) {
+    private func reloadChanges(preserveMessage: Bool = false, preferredPath: String? = nil, transfer: (source: NSOutlineView, next: String?, moved: [String])? = nil) {
+        commitDiffView.previewPresentation.cancel()
         loadTask?.cancel()
         diffLoadTask?.cancel()
         let preservedMessage = messageView.string
@@ -1708,10 +2054,7 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
                 configureOptionsMenu()
                 let branch = context.branches.first(where: \.isCurrent)?.name ?? "detached HEAD"
                 commitWindow?.title = "Commit to \(branch) (\(context.repository.path))"
-                manageTrackingButton.isHidden = onManageRemotes == nil || context.branches.first(where: \.isCurrent) == nil
-                manageTrackingButton.toolTip = context.branches.first(where: \.isCurrent).map {
-                    "Change the remote and merge branch tracked by ‘\($0.name)’"
-                }
+                remoteNameLink.isEnabled = onManageRemotes != nil && context.branches.contains(where: \.isCurrent)
                 var discovered: [ChangedFile] = []
                 if showsIgnoredFiles || showsAssumeUnchangedFiles || showsSkipWorktreeFiles,
                    let files = source as? any RepositoryFileStatusDataSource {
@@ -1723,9 +2066,27 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
                 unstaged = worktreeValue.files + discovered
                 staged = indexValue.files
                 reloadFileTrees(preserveSelection: false)
-                restoreSelection(path: unstagedSelection, in: unstagedTable)
-                restoreSelection(path: stagedSelection, in: stagedTable)
+                if let transfer {
+                    let target = transfer.source === unstagedTable ? stagedTable : unstagedTable
+                    if displayedFiles(for: transfer.source).isEmpty {
+                        restoreSelection(paths: transfer.moved, in: target)
+                        commitWindow?.makeFirstResponder(target)
+                    } else {
+                        target.deselectAll(nil)
+                        transfer.source.deselectAll(nil)
+                        restoreSelection(path: transfer.next, in: transfer.source)
+                        commitWindow?.makeFirstResponder(transfer.source)
+                    }
+                } else {
+                    restoreSelection(path: unstagedSelection, in: unstagedTable)
+                    restoreSelection(path: stagedSelection, in: stagedTable)
+                    if unstagedTable.selectedRow < 0, stagedTable.selectedRow < 0 {
+                        let table = unstaged.isEmpty ? stagedTable : unstagedTable
+                        if let row = firstFileRow(in: table) { table.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false) }
+                    }
+                }
                 updateStatus()
+                refreshAutoCompleteWords()
                 setInitialFocusIfNeeded()
                 if let loadError = loadedCommitState.messageLoadError,
                    loadError != lastShownMessageLoadError,
@@ -1758,10 +2119,18 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
         guard let commit = RevisionCommitBuilder.artificialRevisions(headID: context.headID)
             .first(where: { $0.kind == kind }) else { return }
         diffLoadTask?.cancel()
+        commitDiffView.apply(file: file, diff: nil, direction: table === unstagedTable ? .stage : .unstage)
+        let headless = context.headID == nil && kind == .index
         diffLoadTask = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
-                let diff = try await source.loadDiff(
+                if CommitFileContentPresentation.viewsAsFileContent(file, headless: headless), let browsing = source as? any RepositoryBrowsingDataSource,
+                   let preview = try await fileContentPreview(file: file, commit: commit, source: browsing) {
+                    guard !Task.isCancelled else { return }
+                    commitDiffView.apply(file: file, preview: preview, direction: table === unstagedTable ? .stage : .unstage)
+                    return
+                }
+                let preview = try await source.prepareDiff(
                     for: commit,
                     file: file,
                     options: commitDiffView.diffOptions
@@ -1769,7 +2138,7 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
                 guard !Task.isCancelled else { return }
                 commitDiffView.apply(
                     file: file,
-                    diff: diff,
+                    preview: preview,
                     direction: table === unstagedTable ? .stage : .unstage
                 )
             } catch is CancellationError {
@@ -1780,6 +2149,28 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
         }
     }
 
+    private func fileContentPreview(file: ChangedFile, commit: Commit, source: any RepositoryBrowsingDataSource) async throws -> FilePreview<FileDiff?>? {
+        let entry: RepositoryFileEntry
+        if commit.kind == .workingDirectory {
+            entry = RepositoryFileEntry(path: file.path, content: "")
+        } else if let indexed = try await source.loadRepositoryFiles(for: commit).first(where: { $0.path == file.path }) {
+            entry = indexed
+        } else {
+            return nil
+        }
+        let id = file.id
+        let convert: @Sendable (RepositoryFileContent) -> FileDiff? = { content in
+            content.kind == .text ? CommitFileContentPresentation.numberedText(content.text, id: id) : nil
+        }
+        switch try await source.prepareFilePresentation(for: commit, file: entry, encoding: .automatic) {
+        case .ready(let content):
+            guard content.kind == .text else { return nil }
+            return .ready(convert(content))
+        case .deferred(let length, let load):
+            return .deferred(length: length) { convert(try await load()) }
+        }
+    }
+
     @objc private func stageSelected() {
         mutate(paths: mutationPaths(for: selectedFiles(in: unstagedTable)), stage: true)
     }
@@ -1787,11 +2178,16 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
     @objc private func unstageSelected() {
         mutate(paths: mutationPaths(for: selectedFiles(in: stagedTable)), stage: false)
     }
+
     @objc private func stageEveryFile() { mutateAll(stage: true) }
     @objc private func unstageEveryFile() { mutateAll(stage: false) }
 
     private func mutate(paths: [String], stage: Bool) {
         guard !paths.isEmpty else { status.stringValue = "Select at least one file."; return }
+        let sourceTable = stage ? unstagedTable : stagedTable
+        let rows = (0..<sourceTable.numberOfRows).compactMap { (sourceTable.item(atRow: $0) as? ChangedFileNode)?.file?.path }
+        let moved = selectedPaths(in: sourceTable)
+        let next = CommitWorkflowDialog.nextItemToSelect(rows: rows, selected: Set(moved))
         actionTask?.cancel()
         actionTask = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -1799,7 +2195,7 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
             do {
                 status.stringValue = stage ? "Staging…" : "Unstaging…"
                 _ = try await (stage ? source.stage(paths: paths, showErrors: settings.preferences.showErrorsWhenStagingFiles) : source.unstage(paths: paths))
-                reloadChanges(preserveMessage: true, preferredPath: paths.first)
+                reloadChanges(preserveMessage: true, transfer: (sourceTable, next, moved))
             } catch { await stagingFailed(error, stage: stage, count: paths.count) }
         }
     }
@@ -1945,11 +2341,11 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
     }
 
     @objc private func commit() {
-        if !(commitState?.mutationState.conflictedPaths.isEmpty ?? true) {
-            resolveConflicts()
-            return
-        }
         performCommit(pushAfter: false)
+    }
+
+    @objc private func solveMergeConflicts() {
+        resolveConflicts()
     }
 
     @objc private func commitAndPush() {
@@ -1961,8 +2357,7 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
         if pushAfter,
            currentCommitMode == .normal,
            staged.isEmpty,
-           unstaged.isEmpty,
-           allowEmpty.state == .off {
+           unstaged.isEmpty {
             openPush(context: networkContext, forceWithLease: false)
             return
         }
@@ -1974,6 +2369,40 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
             let originalMutationState = try? await source.loadMutationState()
             do {
                 let message = messageView.string
+                var shouldStageAll = stageAll.state == .on
+                var shouldAllowEmpty = false
+                if currentCommitMode != .normal {
+                    if settings.commitPreferences.confirmAmend, !(await confirmAmend(window: commitWindow)) { return }
+                } else if staged.isEmpty, !shouldStageAll {
+                    if commitState?.isMergeCommit == true {
+                        guard await confirmEmptyMerge(window: commitWindow) else { return }
+                        shouldAllowEmpty = true
+                    } else {
+                        guard let choice = await noStagedChoice(window: commitWindow) else { return }
+                        switch choice {
+                        case .stage:
+                            let filtered = mutationPaths(for: displayedFiles(for: unstagedTable))
+                            if !unstagedFilter.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                guard !filtered.isEmpty else { throw RepositoryMutationError.noPaths }
+                                _ = try await source.stage(paths: filtered)
+                                shouldStageAll = false
+                            } else {
+                                shouldStageAll = true
+                            }
+                        case .empty:
+                            shouldAllowEmpty = true
+                        }
+                    }
+                }
+                if !(commitState?.mutationState.conflictedPaths.isEmpty ?? true) {
+                    let alert = NSAlert()
+                    alert.alertStyle = .critical
+                    alert.messageText = "Merge conflicts"
+                    alert.informativeText = "There are unresolved merge conflicts, solve merge conflicts before committing."
+                    alert.addButton(withTitle: "OK")
+                    _ = await begin(alert, window: commitWindow)
+                    return
+                }
                 guard !composesMessage || (!message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                       && !(usingTemplate && message == commitState?.loadedTemplate)) else {
                     status.stringValue = "Please enter a commit message."
@@ -1987,39 +2416,10 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
                     commitWindow.makeFirstResponder(author)
                     return
                 }
-                if currentCommitMode != .normal,
-                   settings.commitPreferences.confirmAmend,
-                   !(await confirmAmend(window: commitWindow)) {
-                    return
-                }
                 if commitState?.mutationState.currentBranch == nil,
                    settings.commitPreferences.confirmDetachedHead,
                    !(await resolveDetachedHead(window: commitWindow)) {
                     return
-                }
-
-                var shouldStageAll = stageAll.state == .on
-                var shouldAllowEmpty = allowEmpty.state == .on
-                if currentCommitMode == .normal, staged.isEmpty, !shouldStageAll, !shouldAllowEmpty {
-                    if commitState?.isMergeCommit == true {
-                        guard await confirmEmptyMerge(window: commitWindow) else { return }
-                        shouldAllowEmpty = true
-                    } else {
-                    guard let choice = await noStagedChoice(window: commitWindow) else { return }
-                    switch choice {
-                    case .stage:
-                        let filtered = mutationPaths(for: displayedFiles(for: unstagedTable))
-                        if !unstagedFilter.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                            guard !filtered.isEmpty else { throw RepositoryMutationError.noPaths }
-                            _ = try await source.stage(paths: filtered)
-                            shouldStageAll = false
-                        } else {
-                            shouldStageAll = true
-                        }
-                    case .empty:
-                        shouldAllowEmpty = true
-                    }
-                    }
                 }
 
                 let validationContext = validationContext(for: message)
@@ -2073,11 +2473,18 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
                 applySpecialCommitState()
                 status.stringValue = result.message
 
+                let superprojectTarget = stageInSuperproject.isHidden ? nil : CommitSuperprojectStaging.target(
+                    location: superprojectSubmodule, preference: settings.commitMessageEditorPreferences.stageInSuperprojectAfterCommit)
                 if pushAfter {
+                    pendingSuperprojectStage = superprojectTarget
                     openPush(
                         context: networkContext,
                         forceWithLease: (wasAmend || historyWasSoftReset) && preferences.forceWithLeaseAfterAmend
                     )
+                    if pushWindowController == nil { pendingSuperprojectStage = nil }
+                } else if CommitSuperprojectStaging.shouldStage(target: superprojectTarget, pushRequested: false, pushCompleted: false),
+                          let superprojectTarget {
+                    await stageSubmoduleInSuperproject(superprojectTarget)
                 }
                 historyWasSoftReset = false
                 let newState = try await source.loadMutationState()
@@ -2240,6 +2647,16 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
             },
             onCompletion: { [weak self] completed in
                 guard let self else { return }
+                let target = pendingSuperprojectStage
+                pendingSuperprojectStage = nil
+                if CommitSuperprojectStaging.shouldStage(target: target, pushRequested: true, pushCompleted: completed), let target {
+                    Task { @MainActor [weak self] in
+                        await self?.stageSubmoduleInSuperproject(target)
+                        guard let self else { return }
+                        if closeWhenPushCompletes { closeAfterSuccessfulCommit() }
+                    }
+                    return
+                }
                 if completed, closeWhenPushCompletes {
                     closeAfterSuccessfulCommit()
                 } else if !completed, closeWhenPushCompletes {
@@ -2418,21 +2835,25 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
     private func updateButtonStates() {
         updateMessageWatermark()
         let busy = actionTask != nil || loadTask != nil
+        unstagedEmptyLabel.isHidden = commitState == nil || !unstaged.isEmpty
+        stagedEmptyLabel.isHidden = commitState == nil || !staged.isEmpty
+        unstagedFilter.isHidden = !unstagedEmptyLabel.isHidden
+        stagedFilter.isHidden = !stagedEmptyLabel.isHidden
         let conflicts = !(commitState?.mutationState.conflictedPaths.isEmpty ?? true)
-        commitButton.title = conflicts ? "Solve conflicts" : "Commit"
+        commitButton.title = "Commit"
+        solveMergeConflictsButton.isHidden = !conflicts
         commitButton.isEnabled = !busy
         commitAndPushButton.title = currentCommitMode == .normal && staged.isEmpty && unstaged.isEmpty ? "Push" : "Commit & push"
-        commitAndPushButton.isEnabled = !busy && pushSource != nil && !conflicts
-        stageSelectedButton.isEnabled = !busy && !selectedFiles(in: unstagedTable).isEmpty
-        unstageSelectedButton.isEnabled = !busy && !selectedFiles(in: stagedTable).isEmpty
-        stageAllFilesButton.isEnabled = !busy && !displayedFiles(for: unstagedTable).isEmpty
-        unstageAllFilesButton.isEnabled = !busy && !displayedFiles(for: stagedTable).isEmpty
-        stashStagedButton.isEnabled = !busy && !staged.isEmpty
+        commitAndPushButton.isEnabled = !busy && pushSource != nil
+        stageSelectedButton.isEnabled = !busy
+        unstageSelectedButton.isEnabled = !busy
+        stageAllFilesButton.isEnabled = !busy
+        unstageAllFilesButton.isEnabled = !busy
+        stashStagedButton.isEnabled = !busy
         resetUnstagedButton.isEnabled = !busy && !unstaged.isEmpty
         resetAllButton.isEnabled = !busy && (!unstaged.isEmpty || !staged.isEmpty)
         let currentHead = head
         resetSoftButton.isEnabled = !busy && currentHead?.parentIDs.isEmpty == false
-        cancelButton.title = actionTask == nil ? "Cancel" : "Abort"
     }
 
     private func perform(shortcut: CommitKeyboardShortcut) -> Bool {
@@ -2450,6 +2871,8 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
             stageEveryFile()
         case .filter:
             commitWindow?.makeFirstResponder(unstagedTable.selectedRow >= 0 ? unstagedFilter : stagedFilter)
+        case .toggleSelectionFilter:
+            toggleSelectionFilter()
         case .refresh:
             refreshChanges()
         case .createBranch:
@@ -2469,9 +2892,9 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
                   responder === commitDiffView.focusView || responder.isDescendant(of: commitDiffView),
                   commitDiffView.addSelectionToMessage() else { return false }
         case .conventionalType:
-            insertConventionalPrefixItem("feat")
+            openConventionalCommitMenu(insertScope: false)
         case .conventionalScope:
-            promptForConventionalScope()
+            openConventionalCommitMenu(insertScope: true)
         }
         return true
     }
@@ -2502,50 +2925,20 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
         commitWindow?.makeFirstResponder(table)
     }
 
-    private func insertConventionalPrefixItem(_ keyword: String) {
-        if messageView.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            messageView.string = "\(keyword): "
-        } else {
-            messageView.string = "\(keyword): \(messageView.string)"
-        }
-        commitWindow?.makeFirstResponder(messageView)
-        messageView.setSelectedRange(NSRange(location: (messageView.string as NSString).length, length: 0))
-    }
-
-    private func promptForConventionalScope() {
-        guard let commitWindow else { return }
-        actionTask = Task { @MainActor [weak self, weak commitWindow] in
-            guard let self, let commitWindow else { return }
-            defer { actionTask = nil; updateButtonStates() }
-            let alert = NSAlert()
-            alert.messageText = "Conventional Commit"
-            alert.informativeText = "Enter an optional scope for a feat commit."
-            alert.addButton(withTitle: "Insert")
-            alert.addButton(withTitle: "Cancel")
-            let field = NSTextField(string: "")
-            field.placeholderString = "scope"
-            field.frame.size.width = 260
-            alert.accessoryView = field
-            guard await begin(alert, window: commitWindow) == .alertFirstButtonReturn else { return }
-            let scope = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            let prefix = scope.isEmpty ? "feat: " : "feat(\(scope)): "
-            if messageView.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                messageView.string = prefix
-            } else {
-                messageView.string = prefix + messageView.string
-            }
-            commitWindow.makeFirstResponder(messageView)
-        }
-    }
-
     private func updateStatus() {
-        var branch = commitState?.mutationState.currentBranch ?? "detached HEAD"
+        let branch = commitState?.mutationState.currentBranch ?? "detached HEAD"
         if let tracking = commitState?.branchTracking {
-            branch += " \u{2192} \(CommitPushTarget.describe(tracking))"
+            branchNameLabel.stringValue = "\(branch) \u{2192}"
+            remoteNameLink.statusText = CommitPushTarget.describe(tracking)
+            remoteNameLink.isHidden = false
+        } else {
+            branchNameLabel.stringValue = branch
+            remoteNameLink.statusText = ""
+            remoteNameLink.isHidden = true
         }
-        let encoding = commitState?.commitEncoding ?? "UTF-8"
-        let committer = commitState?.committer ?? "Loading author…"
-        status.stringValue = "\(committer)   \(branch)   \(staged.count) staged / \(unstaged.count) unstaged   \(encoding)"
+        stagedCountValue.stringValue = "\(staged.count)/\(staged.count + unstaged.count)"
+        authorStatus.statusText = CommitAuthorStatus.text(committer: commitState?.committer, author: author.stringValue)
+        status.stringValue = ""
     }
 
     private func setInitialFocusIfNeeded() {
@@ -2566,10 +2959,7 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
                 stagedTable.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
             }
         } else {
-            amend.state = .on
-            selectedCommitMode = .amend
-            modeChanged()
-            commitWindow.makeFirstResponder(messageView)
+            commitWindow.makeFirstResponder(amend)
         }
     }
 
@@ -2598,6 +2988,7 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
             }
         }
         usingTemplate = usingTemplate && messageView.string == commitState?.loadedTemplate
+        refreshMessageMarkup()
         updateLineAndColumn()
     }
 
@@ -2608,22 +2999,11 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
         indexOfSelectedItem index: UnsafeMutablePointer<Int>?
     ) -> [String] {
         guard settings.preferences.provideAutocompletion else { return [] }
-        var completions = Set(words)
-        completions.formUnion([
-            "Co-authored-by: ",
-            "Signed-off-by: ",
-            "BREAKING CHANGE: ",
-            "Reviewed-by: ",
-            "Tested-by: "
-        ])
-        for file in unstaged + staged {
-            for path in [file.path, file.oldPath].compactMap({ $0 }) {
-                let name = (path as NSString).lastPathComponent
-                completions.insert(name)
-                completions.insert((name as NSString).deletingPathExtension)
-            }
-        }
-        return completions.filter { !$0.isEmpty }.sorted()
+        let typed = (textView.string as NSString).substring(with: charRange)
+        return (autoCompleteWords + CommitAutoCompleteRegexes.metadataKeywords)
+            .map(CommitAutoCompleteWord.init)
+            .filter { $0.matches(typed) }
+            .map(\.word)
     }
 
     func textViewDidChangeSelection(_ notification: Notification) { updateLineAndColumn() }
@@ -2647,9 +3027,8 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
         let location = min(messageView.selectedRange().location, (messageView.string as NSString).length)
         let prefix = (messageView.string as NSString).substring(to: location)
         let lines = prefix.components(separatedBy: "\n")
-        updateStatus()
-        let column = (lines.last.map { ($0 as NSString).length } ?? 0) + 1
-        status.stringValue += "   Ln \(lines.count), Col \(column)"
+        cursorLineValue.stringValue = String(lines.count)
+        cursorColumnValue.stringValue = String((lines.last.map { ($0 as NSString).length } ?? 0) + 1)
     }
 
     private func showOperationError(_ error: Error, title: String) async {
@@ -2686,6 +3065,7 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
     }
 
     func windowWillClose(_ notification: Notification) {
+        commitDiffView.previewPresentation.cancel()
         saveGeometry()
         if persistDraftOnClose {
             let message = messageView.string
@@ -2717,11 +3097,8 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
         var preferences = settings.commitPreferences
         preferences.windowWidth = commitWindow.contentLayoutRect.width
         preferences.windowHeight = commitWindow.contentLayoutRect.height
-        if mainSplit.subviews.count > 1 { preferences.mainDivider = mainSplit.subviews[0].frame.width }
-        if fileSplit.subviews.count > 1 { preferences.fileDivider = fileSplit.subviews[0].frame.height }
-        if contentSplit.subviews.count > 1 { preferences.contentDivider = contentSplit.subviews[0].frame.height }
-        if messageSplit.subviews.count > 1 { preferences.commandDivider = messageSplit.subviews[0].frame.width }
         settings.saveCommitPreferences(preferences)
+        splitterManager.saveSplitters()
     }
 
     private func closeAfterSuccessfulCommit() {
@@ -2738,7 +3115,7 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
 }
 
 @MainActor
-private final class CommitDiffView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSMenuItemValidation, NSMenuDelegate {
+final class CommitDiffView: NSView, NSTableViewDataSource, NSTableViewDelegate, NSMenuItemValidation, NSMenuDelegate {
     private(set) var isResetConfirmationOpen = false
     var scriptLineNumber: Int {
         let row = tableView.selectedRow >= 0 ? tableView.selectedRow : caretRow
@@ -2753,7 +3130,13 @@ private final class CommitDiffView: NSView, NSTableViewDataSource, NSTableViewDe
     private var syntaxStates: [Int?] = []
     private var gutterMetrics = DiffGutterMetrics.empty
     private var caretRow = -1
-    private var searchQuery = ""
+    let searchState = FileViewerSearchState()
+    private var searchOffsets: [Int] = []
+    let previewPresentation = FilePreviewPresentation<FileDiff?>()
+    private lazy var findPanel = FileViewerFindPanel(state: searchState, caret: { [weak self] in
+        guard let self else { return 0 }
+        return searchState.currentMatch.map(NSMaxRange) ?? (searchOffsets.indices.contains(caretRow) ? searchOffsets[caretRow] : 0)
+    }, changed: { [weak self] in self?.applySearch() })
     private var occurrences = FileViewerOccurrences()
     private var difftasticEnabled: Bool?
     var difftasticAvailability: (() async -> Bool)?
@@ -2812,26 +3195,16 @@ private final class CommitDiffView: NSView, NSTableViewDataSource, NSTableViewDe
             case .unstageLines:
                 guard patchingAllowed, direction == .unstage else { return false }
                 applyLines()
-            case .find, .findNext, .findPrevious, .goToLine:
-                if shortcut == .findNext, searchQuery.isEmpty, let file, let onDifftool {
-                    onDifftool(file, direction)
-                    return true
-                }
-                let lines = presentations.map(\.line)
-                let destination: Int?
-                switch shortcut {
-                case .find: destination = FileViewerNavigationDialogs.find(lines: lines, after: caretRow, query: &searchQuery)
-                case .goToLine: destination = FileViewerNavigationDialogs.goToLine(lines: lines)
-                default: destination = FileViewerNavigationDialogs.matchingRow(lines: lines, query: searchQuery, after: caretRow, forward: shortcut == .findNext)
-                }
-                if let destination {
-                    caretRow = destination
-                    occurrences.term = searchQuery
-                    occurrences.row = destination
-                    occurrences.column = FileViewerOccurrences.ranges(of: searchQuery, in: presentations[destination].line.text).first?.location ?? -1
-                    reloadRenderedLines()
-                    tableView.selectRowIndexes(IndexSet(integer: destination), byExtendingSelection: false)
-                    tableView.scrollRowToVisible(destination)
+            case .find:
+                findText()
+            case .findNext, .findPrevious:
+                if shortcut == .findNext, searchState.query.isEmpty, let file, let onDifftool { onDifftool(file, direction) }
+                else { findPanel.perform(shortcut == .findNext ? .next : .previous, viaKeyboard: true) }
+            case .goToLine:
+                if let row = FileViewerNavigationDialogs.goToLine(lines: presentations.map(\.line)) {
+                    caretRow = row
+                    tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+                    tableView.scrollRowToVisible(row)
                 }
             default: performToolbarAction(shortcut.title, state: preferences.showsSyntaxHighlighting ? .off : .on)
             }
@@ -2849,6 +3222,7 @@ private final class CommitDiffView: NSView, NSTableViewDataSource, NSTableViewDe
         tableView.usesAlternatingRowBackgroundColors = false
         tableView.dataSource = self
         tableView.delegate = self
+        tableView.onCopy = { [weak self] in self?.copyViewer(.selection) }
         tableView.target = self; tableView.doubleAction = #selector(selectDiffWord)
         let menu = NSMenu(title: "Diff actions")
         menu.delegate = self
@@ -2883,6 +3257,7 @@ private final class CommitDiffView: NSView, NSTableViewDataSource, NSTableViewDe
         addSubview(trackingView)
         trackingView.addSubview(scrollView)
         hoverToolbar.install(in: trackingView)
+        previewPresentation.install(in: trackingView)
         NSLayoutConstraint.activate([
             trackingView.leadingAnchor.constraint(equalTo: leadingAnchor),
             trackingView.trailingAnchor.constraint(equalTo: trailingAnchor),
@@ -2897,13 +3272,42 @@ private final class CommitDiffView: NSView, NSTableViewDataSource, NSTableViewDe
 
     required init?(coder: NSCoder) { nil }
 
+    func apply(file: ChangedFile, preview: FilePreview<FileDiff?>, direction: RepositoryHunkDirection) {
+        apply(file: file, diff: nil, direction: direction)
+        previewPresentation.present(preview, display: { [weak self] in self?.apply(file: file, diff: $0, direction: direction) }, failure: { [weak self] in self?.toolTip = $0.localizedDescription })
+    }
+
+    @objc private func findText() { if !presentations.isEmpty { findPanel.present(owner: window) } }
+    @objc private func findNext() { findPanel.perform(.next, viaKeyboard: true) }
+    @objc private func findPrevious() { findPanel.perform(.previous, viaKeyboard: true) }
+    private func applySearch() {
+        if let match = searchState.currentMatch, let row = searchOffsets.lastIndex(where: { $0 <= match.location }) {
+            caretRow = row
+            tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+            tableView.scrollRowToVisible(row)
+        }
+        reloadRenderedLines()
+    }
+    private func searchRanges(row: Int, active: Bool) -> [NSRange] {
+        let lineRange = NSRange(location: searchOffsets[row], length: presentations[row].line.text.utf16.count)
+        let matches = active ? searchState.currentMatch.map { [$0] } ?? [] : searchState.highlightedRanges
+        return matches.compactMap {
+            let range = NSIntersectionRange($0, lineRange)
+            return range.length > 0 ? NSRange(location: range.location - lineRange.location, length: range.length) : nil
+        }
+    }
+
     func apply(file: ChangedFile, diff: FileDiff?, direction: RepositoryHunkDirection) {
+        previewPresentation.cancel()
         self.file = file
         self.diff = diff
         self.direction = direction
-        patchingAllowed = diff?.appearance ?? .patch == .patch
+        patchingAllowed = (diff?.appearance ?? .patch) == .patch && diff?.submoduleSummary == nil && diff?.isTextOnly != true
         presentations = DiffLinePresentation.build(from: diff?.lines ?? [], appearance: diff?.appearance ?? .patch)
         syntaxStates = DiffSyntaxHighlighter.lineStates(diff?.lines ?? [], filePath: file.path)
+        var offset = 0
+        searchOffsets = (diff?.lines ?? []).map { line in defer { offset += line.text.utf16.count + 1 }; return offset }
+        searchState.setText((diff?.lines ?? []).map(\.text).joined(separator: "\n"))
         occurrences.row = -1; occurrences.column = -1
         gutterMetrics = DiffGutterMetrics(lines: diff?.lines ?? [], font: AppSettingsStore.shared.diffGutterFont)
         caretRow = -1
@@ -2923,6 +3327,7 @@ private final class CommitDiffView: NSView, NSTableViewDataSource, NSTableViewDe
         if menuItem.action == #selector(showBlame) {
             return onBlame != nil && blameAllowed() && file?.isTracked == true && file?.isSubmodule != true
         }
+        if [#selector(findText), #selector(findNext), #selector(findPrevious)].contains(menuItem.action) { return !presentations.isEmpty }
         return true
     }
 
@@ -2941,10 +3346,20 @@ private final class CommitDiffView: NSView, NSTableViewDataSource, NSTableViewDe
         return RepositoryLineSelection(file: file, diff: diff, lineIDs: lineIDs, direction: direction)
     }
 
-    func allowPatching() { patchingAllowed = diff?.appearance ?? .patch == .patch }
+    func allowPatching() { patchingAllowed = (diff?.appearance ?? .patch) == .patch && diff?.submoduleSummary == nil && diff?.isTextOnly != true }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
-        for item in menu.items where item.identifier?.rawValue == "viewer.appearance" || item.action == #selector(resetLines) { menu.removeItem(item) }
+        for item in menu.items where ["viewer.appearance", "viewer.copy", "viewer.find"].contains(item.identifier?.rawValue ?? "") || item.action == #selector(resetLines) { menu.removeItem(item) }
+        for (title, action) in [("Find…", #selector(findText)), ("Find next", #selector(findNext)), ("Find previous", #selector(findPrevious))] {
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            item.identifier = .init("viewer.find"); item.target = self; menu.addItem(item)
+        }
+        let commands: [(String, Selector)] = [("Copy", #selector(copySelection)), ("Copy patch", #selector(copyPatch)),
+                                             ("Copy old version", #selector(copyOldVersion)), ("Copy new version", #selector(copyNewVersion))]
+        for (title, action) in commands where title == "Copy" || (diff?.appearance == .patch && diff?.isTextOnly != true) {
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            item.identifier = .init("viewer.copy"); item.target = self; menu.addItem(item)
+        }
         let reset = NSMenuItem(title: "Reset selected line(s)", action: #selector(resetLines), keyEquivalent: "")
         reset.target = self; menu.insertItem(reset, at: min(2, menu.items.count))
         let root = NSMenuItem(title: "Diff appearance", action: nil, keyEquivalent: "")
@@ -2969,6 +3384,24 @@ private final class CommitDiffView: NSView, NSTableViewDataSource, NSTableViewDe
     @objc private func appearanceSelected(_ item: NSMenuItem) {
         guard let appearance = (item.representedObject as? String).flatMap(DiffDisplayAppearance.init(rawValue:)) else { return }
         setAppearance(appearance)
+    }
+
+    @objc private func copySelection() { copyViewer(.selection) }
+    @objc private func copyPatch() { copyViewer(.patch) }
+    @objc private func copyOldVersion() { copyViewer(.oldVersion) }
+    @objc private func copyNewVersion() { copyViewer(.newVersion) }
+    private func copyViewer(_ command: FileViewerCopy.Command) {
+        let lines = presentations.map(\.line)
+        let patch = diff?.appearance == .patch && diff?.isTextOnly != true
+        let text = lines.map { patch ? $0.patchText : $0.text }.joined(separator: "\n")
+        let ranges = FileViewerCopy.selectedRanges(lines: lines, rows: tableView.selectedRowIndexes, patch: patch)
+        let selections: [NSRange?] = ranges.isEmpty ? [nil] : ranges.map(Optional.some)
+        let payloads = selections.compactMap {
+            FileViewerCopy.payload(command, text: text, selection: $0, isDiff: diff?.isTextOnly != true && diff?.appearance != .difftastic,
+                                   normalizeLineEndings: diff?.normalizesCopyLineEndings ?? false)
+        }
+        guard !payloads.isEmpty else { return }
+        NSPasteboard.general.clearContents(); NSPasteboard.general.setString(payloads.joined(), forType: .string)
     }
 
     private func setAppearance(_ appearance: DiffDisplayAppearance) {
@@ -3063,7 +3496,9 @@ private final class CommitDiffView: NSView, NSTableViewDataSource, NSTableViewDe
             filePath: file?.path,
             appearance: diff?.appearance ?? .patch,
             highlightTerm: occurrences.term,
-            openSpan: syntaxStates.indices.contains(row) ? syntaxStates[row] : nil
+            openSpan: syntaxStates.indices.contains(row) ? syntaxStates[row] : nil,
+            searchRanges: searchRanges(row: row, active: false),
+            activeSearchRanges: searchRanges(row: row, active: true)
         )
         return cell
     }
@@ -3156,10 +3591,10 @@ private enum CommitTemplateSettingsDialog {
     static func present(parent: NSWindow, onClose: @escaping () -> Void) {
         let controller = CommitTemplateSettingsViewController()
         let panel = NSPanel(contentViewController: controller)
-        panel.title = "Commit message templates and validation"
+        panel.title = "Commit message settings"
         panel.styleMask = [.titled, .closable, .resizable]
-        panel.setContentSize(NSSize(width: 680, height: 570))
-        panel.minSize = NSSize(width: 600, height: 500)
+        panel.setContentSize(NSSize(width: 698, height: 361))
+        panel.minSize = NSSize(width: 550, height: 310)
         controller.panel = panel
         controller.onFinish = { saved in
             parent.endSheet(panel)
@@ -3170,7 +3605,38 @@ private enum CommitTemplateSettingsDialog {
 }
 
 @MainActor
-private final class CommitTemplateSettingsViewController: NSViewController, NSWindowDelegate {
+enum CommitTemplateSlotTitle {
+    static func title(index: Int, name: String) -> String {
+        let caption: String
+        if name.isEmpty {
+            caption = "<empty>"
+        } else if name.count <= 50 {
+            caption = name
+        } else {
+            caption = String(name.prefix(47)) + "..."
+        }
+        return "\(index + 1) : \(caption)"
+    }
+}
+
+enum CommitTemplateSettingsPresentation {
+    static let regexHelp = #"""
+    Use {{regex}}[regex group number] to extract branch name part
+    Group number is optional, default is 1
+
+    Examples on branch name: "feature/ABC-4587-commitMessageRegex"
+    "Commit from: {{^feature/(.*)$}} branch" -> "Commit from: ABC-4587-commitMessageRegex branch"
+    "{{([A-Z]+-\d+)}}: My message is" -> "ABC-4587: My message is "
+    "Name: {{([A-Z]+-\d+)-(.*)}}[2], issue: {{([A-Z]+-\d+)-(.*)}}[1]" -> "Name: commitMessageRegex, issue: ABC-4587"
+    """#
+
+    static func validatedLength(_ text: String) -> Int? {
+        guard let value = Int(text), (0...100).contains(value) else { return nil }
+        return value
+    }
+}
+
+final class CommitTemplateSettingsViewController: NSViewController, NSWindowDelegate, NSTextFieldDelegate {
     weak var panel: NSPanel?
     var onFinish: ((Bool) -> Void)?
     private var preferences = AppSettingsStore.shared.commitPreferences
@@ -3179,111 +3645,165 @@ private final class CommitTemplateSettingsViewController: NSViewController, NSWi
     private var didFinish = false
     private let slots = NSPopUpButton()
     private let nameField = NSTextField(string: "")
-    private let regexCheck = NSButton(checkboxWithTitle: "Expand {{branch regular expression}}[group] placeholders", target: nil, action: nil)
+    private let regexCheck = NSButton(checkboxWithTitle: "Enable regex", target: nil, action: nil)
     private let textView = NSTextView()
     private let subjectLength = NSTextField(string: "0")
     private let lineLength = NSTextField(string: "0")
-    private let secondLine = NSButton(checkboxWithTitle: "Require validation-time empty second line", target: nil, action: nil)
-    private let formatSecondLine = NSButton(checkboxWithTitle: "Insert an empty second line when writing the message", target: nil, action: nil)
-    private let autoWrap = NSButton(checkboxWithTitle: "Auto-wrap using the configured line length", target: nil, action: nil)
-    private let indent = NSButton(checkboxWithTitle: "Indent wrapped lines after the first line", target: nil, action: nil)
+    private let secondLine = NSButton(checkboxWithTitle: "", target: nil, action: nil)
+    private let autoWrap = NSButton(checkboxWithTitle: "", target: nil, action: nil)
+    private let indent = NSButton(checkboxWithTitle: "", target: nil, action: nil)
+    private let subjectStepper = NSStepper()
+    private let lineStepper = NSStepper()
     private let validationRegex = NSTextField(string: "")
 
     override func loadView() {
         templates = Array(preferences.templates.prefix(10))
         while templates.count < 10 { templates.append(CommitMessageTemplate()) }
-        let root = NSView()
-        slots.addItems(withTitles: (1...10).map { "\($0): <empty>" })
+        let root = NSView(frame: NSRect(x: 0, y: 0, width: 698, height: 361))
+        slots.addItems(withTitles: (0..<10).map { CommitTemplateSlotTitle.title(index: $0, name: "") })
         slots.target = self; slots.action = #selector(slotChanged)
-        nameField.placeholderString = "Template name"
+        slots.setAccessibilityIdentifier("CommitTemplate.Slot")
         nameField.maximumNumberOfLines = 1
-        nameField.widthAnchor.constraint(greaterThanOrEqualToConstant: 280).isActive = true
-        let selector = row(label: "Template:", controls: [slots, nameField])
-
+        nameField.delegate = self
+        nameField.setAccessibilityIdentifier("CommitTemplate.Name")
+        regexCheck.toolTip = CommitTemplateSettingsPresentation.regexHelp
+        regexCheck.setAccessibilityIdentifier("CommitTemplate.Regex")
         textView.isRichText = false
         textView.font = AppSettingsStore.shared.fontPreferences.font(.monospace, fallback: .monospacedSystemFont(ofSize: 12, weight: .regular))
         textView.isVerticallyResizable = true
-        textView.isHorizontallyResizable = true
         textView.autoresizingMask = [.width, .height]
         textView.textContainer?.widthTracksTextView = true
+        textView.setAccessibilityIdentifier("CommitTemplate.Body")
         let textScroll = NSScrollView()
         textScroll.documentView = textView
         textScroll.hasVerticalScroller = true
         textScroll.borderType = .bezelBorder
-        textScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 170).isActive = true
-
-        for field in [subjectLength, lineLength] {
-            field.alignment = .right
-            field.widthAnchor.constraint(equalToConstant: 60).isActive = true
+        let bodyLabel = label("Commit template:")
+        let nameLabel = label("Name:")
+        let templatePage = NSView()
+        for control in [slots, nameLabel, nameField, bodyLabel, textScroll, regexCheck] {
+            control.translatesAutoresizingMaskIntoConstraints = false
+            templatePage.addSubview(control)
         }
-        subjectLength.stringValue = String(preferences.validation.maximumSubjectLength)
-        lineLength.stringValue = String(preferences.validation.maximumLineLength)
+        NSLayoutConstraint.activate([
+            slots.leadingAnchor.constraint(equalTo: templatePage.leadingAnchor, constant: 8),
+            slots.trailingAnchor.constraint(equalTo: templatePage.trailingAnchor, constant: -8),
+            slots.topAnchor.constraint(equalTo: templatePage.topAnchor, constant: 8),
+            nameLabel.leadingAnchor.constraint(equalTo: slots.leadingAnchor),
+            nameLabel.centerYAnchor.constraint(equalTo: nameField.centerYAnchor),
+            nameField.leadingAnchor.constraint(equalTo: templatePage.leadingAnchor, constant: 120),
+            nameField.trailingAnchor.constraint(equalTo: slots.trailingAnchor),
+            nameField.topAnchor.constraint(equalTo: slots.bottomAnchor, constant: 6),
+            bodyLabel.leadingAnchor.constraint(equalTo: slots.leadingAnchor),
+            bodyLabel.topAnchor.constraint(equalTo: textScroll.topAnchor),
+            textScroll.leadingAnchor.constraint(equalTo: nameField.leadingAnchor),
+            textScroll.trailingAnchor.constraint(equalTo: nameField.trailingAnchor),
+            textScroll.topAnchor.constraint(equalTo: nameField.bottomAnchor, constant: 6),
+            textScroll.bottomAnchor.constraint(equalTo: regexCheck.topAnchor, constant: -6),
+            textScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 120),
+            regexCheck.leadingAnchor.constraint(equalTo: slots.leadingAnchor),
+            regexCheck.bottomAnchor.constraint(equalTo: templatePage.bottomAnchor, constant: -8)
+        ])
+        let subject = numericControl(subjectLength, stepper: subjectStepper, value: preferences.validation.maximumSubjectLength, id: "CommitValidation.SubjectLength", tag: 0)
+        let line = numericControl(lineLength, stepper: lineStepper, value: preferences.validation.maximumLineLength, id: "CommitValidation.LineLength", tag: 1)
         secondLine.state = preferences.validation.requireEmptySecondLine ? .on : .off
-        formatSecondLine.state = preferences.ensureSecondLineEmpty ? .on : .off
         autoWrap.state = preferences.validation.autoWrap ? .on : .off
         indent.state = preferences.validation.indentAfterFirstLine ? .on : .off
         validationRegex.stringValue = preferences.validation.regularExpression
-        validationRegex.placeholderString = "Empty disables regular-expression validation"
-
-        let validation = NSBox()
-        validation.title = "Commit message validation"
-        let validationStack = NSStackView(views: [
-            row(label: "Maximum first-line length (0 disables):", controls: [subjectLength]),
-            row(label: "Maximum line length (0 disables):", controls: [lineLength]),
-            secondLine,
-            formatSecondLine,
-            autoWrap,
-            indent,
-            row(label: "Regular expression:", controls: [validationRegex])
+        validationRegex.setAccessibilityIdentifier("CommitValidation.Regex")
+        let validation = NSGridView(views: [
+            [label("Maximum number of characters in the first line (0 = check disabled):"), subject],
+            [label("Maximum number of characters per line (0 = check disabled):"), line],
+            [label("Auto-wrap commit message (except subject line)"), autoWrap],
+            [label("Commit must match following RegEx (Empty = check disabled):"), validationRegex],
+            [label("Indent lines after the first line:"), indent],
+            [label("Second line must be empty:"), secondLine]
         ])
-        validationStack.orientation = .vertical
-        validationStack.alignment = .leading
-        validationStack.spacing = 6
-        validationStack.translatesAutoresizingMaskIntoConstraints = false
-        validation.contentView?.addSubview(validationStack)
-        if let content = validation.contentView {
-            NSLayoutConstraint.activate([
-                validationStack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 8),
-                validationStack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -8),
-                validationStack.topAnchor.constraint(equalTo: content.topAnchor, constant: 8),
-                validationStack.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -8)
-            ])
+        validation.rowSpacing = 8
+        validation.columnSpacing = 8
+        validation.column(at: 1).xPlacement = .leading
+        for index in 0..<validation.numberOfRows { validation.row(at: index).yPlacement = .center }
+        validationRegex.widthAnchor.constraint(greaterThanOrEqualToConstant: 230).isActive = true
+        let validationPage = NSView()
+        validation.translatesAutoresizingMaskIntoConstraints = false
+        validationPage.addSubview(validation)
+        NSLayoutConstraint.activate([
+            validation.leadingAnchor.constraint(equalTo: validationPage.leadingAnchor, constant: 8),
+            validation.topAnchor.constraint(equalTo: validationPage.topAnchor, constant: 8),
+            validation.trailingAnchor.constraint(lessThanOrEqualTo: validationPage.trailingAnchor, constant: -8),
+            validation.bottomAnchor.constraint(lessThanOrEqualTo: validationPage.bottomAnchor, constant: -8)
+        ])
+        let tabs = NSTabView()
+        tabs.setAccessibilityIdentifier("CommitTemplate.Tabs")
+        for (title, page) in [("Commit templates", templatePage), ("Commit validation", validationPage)] {
+            let item = NSTabViewItem(identifier: title)
+            item.label = title; item.view = page
+            tabs.addTabViewItem(item)
         }
-
         let ok = NSButton(title: "OK", target: self, action: #selector(save))
         ok.keyEquivalent = "\r"
         let cancel = NSButton(title: "Cancel", target: self, action: #selector(cancel))
         cancel.keyEquivalent = "\u{1b}"
         let spacer = NSView(); spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let buttons = NSStackView(views: [spacer, cancel, ok])
-        buttons.orientation = .horizontal; buttons.spacing = 8
-        let stack = NSStackView(views: [selector, regexCheck, textScroll, validation, buttons])
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 9
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        root.addSubview(stack)
+        let buttons = NSStackView(views: [spacer, cancel, ok]); buttons.spacing = 8
+        for control in [tabs, buttons] { control.translatesAutoresizingMaskIntoConstraints = false; root.addSubview(control) }
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12),
-            stack.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12),
-            stack.topAnchor.constraint(equalTo: root.topAnchor, constant: 12),
-            stack.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -12),
-            selector.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            textScroll.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            validation.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            buttons.widthAnchor.constraint(equalTo: stack.widthAnchor)
+            tabs.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 9),
+            tabs.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -9),
+            tabs.topAnchor.constraint(equalTo: root.topAnchor, constant: 9),
+            tabs.bottomAnchor.constraint(equalTo: buttons.topAnchor, constant: -9),
+            buttons.leadingAnchor.constraint(equalTo: tabs.leadingAnchor),
+            buttons.trailingAnchor.constraint(equalTo: tabs.trailingAnchor),
+            buttons.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -9)
         ])
         view = root
         refreshSlotTitles()
         loadSlot(0)
     }
 
-    private func row(label: String, controls: [NSView]) -> NSStackView {
-        let labelView = NSTextField(labelWithString: label)
-        let spacer = NSView(); spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let stack = NSStackView(views: [labelView, spacer] + controls)
-        stack.orientation = .horizontal; stack.alignment = .centerY; stack.spacing = 7
-        return stack
+    private func label(_ title: String) -> NSTextField {
+        let field = NSTextField(labelWithString: title)
+        field.font = AppSettingsStore.shared.applicationFont(size: 11)
+        return field
+    }
+
+    private func numericControl(_ field: NSTextField, stepper: NSStepper, value: Int, id: String, tag: Int) -> NSView {
+        let formatter = NumberFormatter()
+        formatter.allowsFloats = false; formatter.minimum = 0; formatter.maximum = 100
+        field.formatter = formatter; field.alignment = .right; field.delegate = self
+        field.integerValue = value
+        field.setAccessibilityIdentifier(id)
+        field.widthAnchor.constraint(equalToConstant: 60).isActive = true
+        stepper.minValue = 0; stepper.maxValue = 100; stepper.increment = 1; stepper.valueWraps = false
+        stepper.integerValue = value; stepper.tag = tag
+        stepper.target = self; stepper.action = #selector(stepLength(_:))
+        stepper.setAccessibilityIdentifier(id + ".Stepper")
+        let controls = NSStackView(views: [field, stepper]); controls.spacing = 2
+        return controls
+    }
+
+    @objc private func stepLength(_ sender: NSStepper) {
+        let field = sender.tag == 0 ? subjectLength : lineLength
+        field.integerValue = sender.integerValue
+    }
+
+    func controlTextDidEndEditing(_ notification: Notification) {
+        guard let field = notification.object as? NSTextField,
+              field === subjectLength || field === lineLength,
+              let value = CommitTemplateSettingsPresentation.validatedLength(field.stringValue) else { return }
+        (field === subjectLength ? subjectStepper : lineStepper).integerValue = value
+    }
+
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        guard control === subjectLength || control === lineLength,
+              commandSelector == #selector(NSResponder.moveUp(_:)) || commandSelector == #selector(NSResponder.moveDown(_:)),
+              let value = CommitTemplateSettingsPresentation.validatedLength(textView.string) else { return false }
+        let step = control === subjectLength ? subjectStepper : lineStepper
+        step.integerValue = min(100, max(0, value + (commandSelector == #selector(NSResponder.moveUp(_:)) ? 1 : -1)))
+        stepLength(step)
+        textView.string = String(step.integerValue)
+        textView.selectAll(nil)
+        return true
     }
 
     @objc private func slotChanged() {
@@ -3309,18 +3829,25 @@ private final class CommitTemplateSettingsViewController: NSViewController, NSWi
 
     private func refreshSlotTitles() {
         for index in templates.indices {
-            let name = templates[index].name.isEmpty ? "<empty>" : String(templates[index].name.prefix(50))
-            slots.item(at: index)?.title = "\(index + 1): \(name)"
+            slots.item(at: index)?.title = CommitTemplateSlotTitle.title(index: index, name: templates[index].name)
         }
     }
 
+    func controlTextDidChange(_ obj: Notification) {
+        guard obj.object as? NSTextField === nameField, templates.indices.contains(selectedSlot) else { return }
+        templates[selectedSlot].name = String(nameField.stringValue.prefix(80))
+        slots.item(at: selectedSlot)?.title = CommitTemplateSlotTitle.title(index: selectedSlot, name: templates[selectedSlot].name)
+    }
+
     @objc private func save() {
+        guard panel?.makeFirstResponder(nil) != false,
+              let subject = CommitTemplateSettingsPresentation.validatedLength(subjectLength.stringValue),
+              let line = CommitTemplateSettingsPresentation.validatedLength(lineLength.stringValue) else { NSSound.beep(); return }
         captureSlot(selectedSlot)
         preferences.templates = templates
-        preferences.validation.maximumSubjectLength = max(0, Int(subjectLength.stringValue) ?? 0)
-        preferences.validation.maximumLineLength = max(0, Int(lineLength.stringValue) ?? 0)
+        preferences.validation.maximumSubjectLength = subject
+        preferences.validation.maximumLineLength = line
         preferences.validation.requireEmptySecondLine = secondLine.state == .on
-        preferences.ensureSecondLineEmpty = formatSecondLine.state == .on
         preferences.validation.autoWrap = autoWrap.state == .on
         preferences.validation.indentAfterFirstLine = indent.state == .on
         preferences.validation.regularExpression = validationRegex.stringValue
@@ -3334,5 +3861,113 @@ private final class CommitTemplateSettingsViewController: NSViewController, NSWi
         guard !didFinish else { return }
         didFinish = true
         onFinish?(saved)
+    }
+}
+
+final class CommitToolbarOverflow: NSObject, NSStackViewDelegate, NSMenuDelegate {
+    let button = NSPopUpButton(frame: .zero, pullsDown: true)
+    private weak var stack: NSStackView?
+    private var overflowing: [NSView] = []
+    private var detached: Set<ObjectIdentifier> = []
+    var isAvailable: (NSView) -> Bool = { _ in true }
+
+    override init() {
+        super.init()
+        button.bezelStyle = .recessed
+        button.isBordered = false
+        button.addItem(withTitle: "»")
+        button.menu?.delegate = self
+        button.toolTip = "More"
+        button.setAccessibilityLabel("More")
+        button.setAccessibilityIdentifier("CommitToolbarOverflow")
+        button.setContentCompressionResistancePriority(.required, for: .horizontal)
+        button.isHidden = true
+    }
+
+    func attach(to stack: NSStackView, overflowing views: [NSView]) {
+        self.stack = stack
+        overflowing = views
+        stack.delegate = self
+        stack.detachesHiddenViews = true
+        stack.setClippingResistancePriority(.defaultLow, for: .horizontal)
+        for (index, view) in views.enumerated() {
+            stack.setVisibilityPriority(NSStackView.VisibilityPriority(rawValue: Float(100 + index * 100)), for: view)
+        }
+    }
+
+    var overflowTitles: [String] {
+        overflowItems().map(\.title)
+    }
+
+    func stackView(_ stackView: NSStackView, willDetach views: [NSView]) {
+        views.forEach { detached.insert(ObjectIdentifier($0)) }
+        DispatchQueue.main.async { [weak self] in self?.updateButton() }
+    }
+
+    func stackView(_ stackView: NSStackView, didReattach views: [NSView]) {
+        views.forEach { detached.remove(ObjectIdentifier($0)) }
+        views.filter { !isAvailable($0) }.forEach { $0.isHidden = true }
+        DispatchQueue.main.async { [weak self] in self?.updateButton() }
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        let title = menu.items.first?.copy() as? NSMenuItem ?? NSMenuItem(title: "»", action: nil, keyEquivalent: "")
+        menu.removeAllItems()
+        menu.addItem(title)
+        overflowItems().forEach(menu.addItem)
+    }
+
+    func updateButton() {
+        button.isHidden = overflowItems().isEmpty
+    }
+
+    private func overflowItems() -> [NSMenuItem] {
+        let order = stack?.arrangedSubviews ?? []
+        return order.filter { view in
+            overflowing.contains { $0 === view } && detached.contains(ObjectIdentifier(view)) && isAvailable(view)
+        }.compactMap { view -> NSMenuItem? in
+            if let popUp = view as? NSPopUpButton {
+                let item = NSMenuItem(title: popUp.itemTitle(at: 0), action: nil, keyEquivalent: "")
+                let submenu = NSMenu(title: item.title)
+                popUp.itemArray.dropFirst().forEach { submenu.addItem($0.copy() as! NSMenuItem) }
+                item.submenu = submenu
+                item.isEnabled = popUp.isEnabled
+                return item
+            }
+            if let control = view as? NSButton {
+                let item = NSMenuItem(title: control.title, action: control.action, keyEquivalent: "")
+                item.target = control.target
+                item.isEnabled = control.isEnabled
+                return item
+            }
+            return nil
+        }
+    }
+}
+
+final class CommitShortcutButton: LeadingImageButton {
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        guard isEnabled, event.type == .keyDown, event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
+              event.charactersIgnoringModifiers == "\r" else { return super.performKeyEquivalent(with: event) }
+        performClick(nil)
+        return true
+    }
+}
+
+enum CommitFileContentPresentation {
+    static func viewsAsFileContent(_ file: ChangedFile, headless: Bool) -> Bool {
+        guard !file.isSubmodule, !file.isStatusOnly else { return false }
+        let isImage = [".bmp", ".gif", ".ico", ".jpg", ".jpeg", ".png", ".tif", ".tiff"].contains { file.path.lowercased().hasSuffix($0) }
+        return file.changeType == .added || !file.isTracked || headless || (file.changeType != .deleted && isImage)
+    }
+
+    static func numberedText(_ text: String, id: String) -> FileDiff {
+        var lines = text.components(separatedBy: "\n")
+        if lines.count > 1, lines.last == "" { lines.removeLast() }
+        var diff = FileDiff(id: id, fileID: id, lines: lines.enumerated().map {
+            DiffLine(id: String($0.offset), oldLineNumber: nil, newLineNumber: $0.offset + 1, kind: .context, text: $0.element)
+        })
+        diff.isTextOnly = true
+        return diff
     }
 }

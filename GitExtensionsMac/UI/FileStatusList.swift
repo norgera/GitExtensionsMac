@@ -137,9 +137,17 @@ final class ChangedFilesViewController: NSViewController, NSOutlineViewDelegate,
     var canFilterInGrid = false
     var canBlame = false
     var canFileHistory = false
+    var hasFileTreeBlameHandoff = false
     var isBlameShown = false
     var canOpenSubmodule = false
-    var canUseFindInCommitFilesGitGrep: Bool { mode != .plain }
+    var supportsFindInCommitFilesGitGrep = true {
+        didSet {
+            updateToolbar()
+            if isViewLoaded { setGrepBoxVisible(canUseFindInCommitFilesGitGrep && preferences.showFindInCommitFilesGitGrep, focus: false) }
+        }
+    }
+    var canAutoRefresh = true { didSet { updateToolbar() } }
+    var canUseFindInCommitFilesGitGrep: Bool { supportsFindInCommitFilesGitGrep && mode != .plain }
 
 
     private(set) var showsUntrackedFiles = true
@@ -179,6 +187,7 @@ final class ChangedFilesViewController: NSViewController, NSOutlineViewDelegate,
     private var grouping = AppSettingsStore.shared.fileStatusListPreferences.grouping
     private var usesDenseTree = AppSettingsStore.shared.fileStatusListPreferences.usesDenseTree
     private var showsGroupNodesInFlatList = AppSettingsStore.shared.fileStatusListPreferences.showsGroupNodesInFlatList
+    var groupsByRevision = true
     private var filter: NSRegularExpression?
     private var filterTask: Task<Void, Never>?
     private var grepTask: Task<Void, Never>?
@@ -396,7 +405,7 @@ final class ChangedFilesViewController: NSViewController, NSOutlineViewDelegate,
         let hasGroups = canUseFindInCommitFilesGitGrep || rootNodes.first?.isDiffGroup == true
         let hasDiffAB = groups.contains { $0.kind == .diffA || $0.kind == .diffB }
         let hidden = Set(preferences.hiddenToolbarItems)
-        let refreshVisible = mode == .diff
+        let refreshVisible = canAutoRefresh && mode == .diff
         for item in toolbarItems {
             var visible: Bool
             switch item.name {
@@ -503,6 +512,7 @@ final class ChangedFilesViewController: NSViewController, NSOutlineViewDelegate,
             let item = NSMenuItem(title: title, action: #selector(chooseViewMode(_:)), keyEquivalent: "")
             item.target = self
             item.tag = tag
+            if tag.isMultiple(of: 2) { AppKitFactory.setMenuImage(["FolderClosed", "File", "FileStatusModified"][tag / 2], for: item) }
             button.menu?.addItem(item)
         }
         button.menu?.addItem(.separator())
@@ -679,7 +689,9 @@ final class ChangedFilesViewController: NSViewController, NSOutlineViewDelegate,
         add("Show untracked files", #selector(toggleShowUntracked), state: showsUntrackedFiles, enabled: isWorktree)
         menu.addItem(.separator())
         add("Edit ignored files", #selector(editGitIgnore))
+        AppKitFactory.setMenuImage("EditGitIgnore", for: menu.items.last!)
         add("Edit locally ignored files", #selector(editLocallyIgnoredFiles))
+        AppKitFactory.setMenuImage("EditGitIgnore", for: menu.items.last!)
         menu.addItem(.separator())
         add("Refresh artificial commits on form focus", #selector(toggleRefreshOnFocus), state: AppSettingsStore.shared.commitPreferences.refreshOnFocus)
         let allParents = NSMenuItem(title: "Show file differences for all parents", action: #selector(toggleShowDiffForAllParents), keyEquivalent: "")
@@ -709,6 +721,7 @@ final class ChangedFilesViewController: NSViewController, NSOutlineViewDelegate,
             menuItem.representedObject = item.name
             menuItem.state = hidden.contains(item.name) ? .off : .on
             menuItem.isEnabled = item.name != "btnSettings"
+            if let image = ["btnCollapseGroups": "CollapseAll", "btnRefresh": "ReloadRevisions", "btnAsTree": "FileTree", "btnByPath": "FolderClosed", "btnByExtension": "File", "btnByStatus": "FileStatusModified", "btnFindInFilesGitGrep": "ViewFile", "btnSettings": "Settings"][item.name] { AppKitFactory.setMenuImage(image, for: menuItem) }
             toolbarMenu.addItem(menuItem)
         }
         toolbarItem.submenu = toolbarMenu
@@ -747,6 +760,7 @@ final class ChangedFilesViewController: NSViewController, NSOutlineViewDelegate,
 
     private func imagePullDown(_ imageName: String, tooltip: String, width: CGFloat) -> NSPopUpButton {
         let button = NSPopUpButton(frame: .zero, pullsDown: true)
+        button.menu?.autoenablesItems = false
         button.isBordered = false
         button.controlSize = .small
         button.toolTip = tooltip
@@ -937,6 +951,15 @@ final class ChangedFilesViewController: NSViewController, NSOutlineViewDelegate,
 
 
     @discardableResult
+    func selectNextSearchFile(forward: Bool) -> Bool {
+        let items = rootNodes.flatMap(\.descendantFiles).compactMap { itemsByNodeFileID[$0.id] }.filter { !$0.file.isStatusOnly && !$0.file.isRangeDiff }
+        guard !items.isEmpty, let current = focusedItem ?? selectedItems().first, let index = items.firstIndex(of: current) else { return false }
+        let next = (index + (forward ? 1 : items.count - 1)) % items.count
+        selectItems([items[next]])
+        notifySelection()
+        return true
+    }
+
     func selectAdjacentVisibleFile(forward: Bool) -> Bool {
         let current = outlineView.selectedRow
         let rows = (0..<outlineView.numberOfRows).filter { (outlineView.item(atRow: $0) as? ChangedFileNode)?.file != nil }
@@ -962,7 +985,7 @@ final class ChangedFilesViewController: NSViewController, NSOutlineViewDelegate,
         if let plainSections {
             return plainSections.compactMap { section in
                 let sectionFiles = section.files.filter(isFilterMatch)
-                guard !sectionFiles.isEmpty else { return nil }
+                guard !sectionFiles.isEmpty || plainSections.count > 1 else { return nil }
                 let children = ChangedFileListTreeBuilder.build(files: sectionFiles, grouping: grouping, isTreeMode: isTreeMode,
                                                                 usesDenseTree: usesDenseTree, showsGroupNodesInFlatList: showsGroupNodesInFlatList)
                 return ChangedFileNode(id: "section:\(section.id)", title: "(\(sectionFiles.count)) \(section.title)",
@@ -980,7 +1003,7 @@ final class ChangedFilesViewController: NSViewController, NSOutlineViewDelegate,
     }
 
     private func makeGroupNodes() -> (nodes: [ChangedFileNode], states: [ChangedFileNode: Bool], filesPresent: Bool) {
-        let groupByRevision = mode == .diff
+        let groupByRevision = mode == .diff && groupsByRevision
         let filesPresent = groups.contains { !$0.files.isEmpty }
         let hasGrepGroup = !grepText.isEmpty || groups.contains(where: \.isGrep)
         let showDiffGroups = groups.count > 1 || (groupByRevision && !(groups.count == 1 && groups[0].files.isEmpty))
@@ -1193,7 +1216,7 @@ final class ChangedFilesViewController: NSViewController, NSOutlineViewDelegate,
         guard let node = item as? ChangedFileNode, let identifier = tableColumn?.identifier else { return nil }
         let cell = (outlineView.makeView(withIdentifier: identifier, owner: self) as? ChangedFileCellView) ?? ChangedFileCellView()
         cell.identifier = identifier
-        cell.apply(node: node, submodule: node.file.flatMap { submoduleStatuses[$0.id] })
+        cell.apply(node: node, submodule: node.file.flatMap { submoduleStatuses[$0.id] }, usesFileTypeIcon: mode == .fileTree || node.imageName == "File")
         return cell
     }
 
@@ -1284,7 +1307,7 @@ final class ChangedFilesViewController: NSViewController, NSOutlineViewDelegate,
         context.canFilterInGrid = canFilterInGrid
         context.canBlame = canBlame
         context.canFileHistory = canFileHistory
-        context.blameInFileTree = !context.isFileTreeMode && !AppSettingsStore.shared.blamePreferences.useDiffViewerForBlame
+        context.blameInFileTree = !AppSettingsStore.shared.blamePreferences.useDiffViewerForBlame
         context.isBlameShown = isBlameShown
         context.canCherryPick = canCherryPick
         context.canUseGrep = canUseFindInCommitFilesGitGrep
@@ -1365,13 +1388,30 @@ final class ChangedFilesViewController: NSViewController, NSOutlineViewDelegate,
         }
         let context = menuContext()
         populatePlaceholderMenu(menu, with: ChangedFileContextMenuBuilder.build(context))
+        if let copy = menuItem(withIdentifier: "file.copyPaths", in: menu) {
+            let submenu = NSMenu(title: copy.title)
+            submenu.autoenablesItems = false
+            for kind in FileStatusCopyPathKind.allCases {
+                let choice = NSMenuItem(title: kind.title, action: #selector(performMenuItem(_:)), keyEquivalent: "")
+                choice.identifier = .init("file.copyPaths." + kind.rawValue)
+                choice.target = self
+                choice.isEnabled = copy.isEnabled
+                if kind == .fullNative {
+                    choice.attributedTitle = NSAttributedString(string: choice.title, attributes: [.font: NSFont.boldSystemFont(ofSize: NSFont.systemFontSize)])
+                }
+                submenu.addItem(choice)
+            }
+            copy.submenu = submenu
+            copy.target = self
+            copy.action = #selector(performMenuItem(_:))
+        }
         func bind(_ menu: NSMenu) {
             for item in menu.items {
                 if let submenu = item.submenu { bind(submenu); continue }
                 guard let id = item.identifier?.rawValue, item.isEnabled else { continue }
                 if mode == .plain {
 
-                    if id == "file.copyPaths" || id == "file.find" || id.hasPrefix("tree.") {
+                    if id.hasPrefix("file.copyPaths") || id == "file.find" || id.hasPrefix("tree.") {
                         item.target = self
                         item.action = #selector(performMenuItem(_:))
                     } else {
@@ -1384,6 +1424,11 @@ final class ChangedFilesViewController: NSViewController, NSOutlineViewDelegate,
             }
         }
         bind(menu)
+        let images = ["file.submodule.update": "SubmodulesUpdate", "file.submodule.reset": "ResetWorkingDirChanges", "file.submodule.stash": "stash", "file.submodule.commit": "RepoStateDirtySubmodules", "file.stage": "Stage", "file.unstage": "Unstage", "file.reset": "ResetWorkingDirChanges", "file.cherryPick": "CherryPick", "file.difftool.menu": "Diff", "file.open.local": "EditFile", "file.open.localWith": "EditFile", "file.open.revision": "ViewFile", "file.open.revisionWith": "ViewFile", "file.edit.local": "EditFile", "file.save": "SaveAs", "file.delete": "DeleteFile", "file.copyPaths": "CopyPaths", "file.showFinder": "BrowseFileExplorer", "file.showFileTree": "FileTree", "file.filterGrid": "FunnelPencil", "file.history": "FileHistory", "file.blame": "Blame", "file.findCommit": "ViewFile", "file.ignore.gitignore": "AddToGitIgnore", "file.ignore.exclude": "AddToGitIgnore", "file.stopTracking": "StopTrackingFile", "sort.pathTree": "FolderClosed", "sort.extensionTree": "File", "sort.statusTree": "FileStatusModified"]
+        for (id, image) in images {
+            if let item = menuItem(withIdentifier: id, in: menu) { AppKitFactory.setMenuImage(image, for: item) }
+        }
+        if let move = menuItem(withIdentifier: "file.move", in: menu) { AppKitFactory.setMenuImage("FileStatusRenamed", for: move, adaptLightness: true) }
         if mode != .plain {
             menuItem(withIdentifier: "file.skipWorktree", in: menu)?.state = items.contains(where: \.file.isSkipWorktree) ? .on : .off
             menuItem(withIdentifier: "file.assumeUnchanged", in: menu)?.state = items.contains(where: \.file.isAssumeUnchanged) ? .on : .off
@@ -1401,34 +1446,68 @@ final class ChangedFilesViewController: NSViewController, NSOutlineViewDelegate,
                     item.attributedTitle = NSAttributedString(string: item.title, attributes: [.font: NSFont.boldSystemFont(ofSize: NSFont.systemFontSize)])
                 }
             }
+            if let history = menuItem(withIdentifier: "file.history", in: menu), hasFileTreeBlameHandoff,
+               !(items.first?.file.isSubmodule == true && AppSettingsStore.shared.preferences.openSubmoduleDiffInSeparateWindow) {
+                history.attributedTitle = NSAttributedString(string: history.title, attributes: [.font: NSFont.boldSystemFont(ofSize: NSFont.systemFontSize)])
+            }
+            for id in ["file.difftool.captionFirst", "file.difftool.captionSecond"] {
+                if let caption = menuItem(withIdentifier: id, in: menu) {
+                    let font = NSFontManager.shared.convert(NSFont.systemFont(ofSize: NSFont.systemFontSize), toHaveTrait: .italicFontMask)
+                    caption.attributedTitle = NSAttributedString(string: caption.title, attributes: [.font: font])
+                }
+            }
             applyShortcutTitles(menu)
         }
         if onScript != nil, mode != .plain {
-            let scripts = NSMenuItem(title: "Run script", action: nil, keyEquivalent: "")
-            scripts.submenu = ApplicationScriptsMenu(placement: .files, execute: { [weak self] in self?.onScript?($0) })
-            if let index = menu.items.firstIndex(where: { $0.identifier?.rawValue == "tree.collapseRootFolders" || $0.identifier?.rawValue == "sort.menu" }) {
-                menu.insertItem(.separator(), at: index)
-                menu.insertItem(scripts, at: index)
-            } else {
-                menu.addItem(.separator())
-                menu.addItem(scripts)
+            let scriptItems = Self.userScriptItems(((try? ApplicationScriptsStore.shared.load()) ?? []).filter(\.enabled), target: self, action: #selector(runFileScript(_:)))
+            if !scriptItems.isEmpty {
+                if let index = menu.items.firstIndex(where: { $0.identifier?.rawValue == "tree.collapseRootFolders" || $0.identifier?.rawValue == "sort.menu" }) {
+                    menu.insertItem(.separator(), at: index)
+                    for item in scriptItems.reversed() { menu.insertItem(item, at: index) }
+                } else {
+                    menu.addItem(.separator())
+                    scriptItems.forEach(menu.addItem)
+                }
             }
         }
     }
 
 
+    static func userScriptItems(_ scripts: [ScriptDefinition], target: AnyObject?, action: Selector?) -> [NSMenuItem] {
+        guard !scripts.isEmpty else { return [] }
+        let host = NSMenuItem(title: "Run script", action: nil, keyEquivalent: "")
+        let hostMenu = NSMenu(title: "Run script")
+        var direct: [NSMenuItem] = []
+        for script in scripts {
+            let item = NSMenuItem(title: script.displayName, action: action, keyEquivalent: "")
+            item.target = target
+            item.representedObject = script
+            if let path = script.iconFilePath { item.image = NSImage(contentsOfFile: path) }
+            if item.image == nil, let icon = script.icon { item.image = AppKitFactory.resourceImage(icon) }
+            if script.onEvent == .showInFileList { direct.append(item) } else { hostMenu.addItem(item) }
+        }
+        host.submenu = hostMenu
+        return (hostMenu.items.isEmpty ? [] : [host]) + direct
+    }
+
+    @objc private func runFileScript(_ item: NSMenuItem) {
+        if let script = item.representedObject as? ScriptDefinition { onScript?(script) }
+    }
+
     private func applyShortcutTitles(_ menu: NSMenu) {
         for item in menu.items {
             if let submenu = item.submenu { applyShortcutTitles(submenu) }
-            guard let id = item.identifier?.rawValue, let chord = ApplicationHotkeys.shared.chord(for: id),
-                  ApplicationHotkeys.definitions.contains(where: { $0.id == id && $0.category == "File status list" }) else { continue }
-            let flags = NSEvent.ModifierFlags(rawValue: chord.modifiers)
-            if chord.key.count == 1, chord.key.unicodeScalars.first.map({ $0.value < 0xF700 }) == true, chord.key != "\u{7f}" {
-                item.keyEquivalent = chord.key
-                item.keyEquivalentModifierMask = flags
-            } else {
-                item.toolTip = [item.toolTip, chord.title].compactMap { $0 }.joined(separator: "\n")
+            guard let rawID = item.identifier?.rawValue else { continue }
+            let id = rawID.hasSuffix(".tools") ? String(rawID.dropLast(6)) : rawID
+            let tool = rawID.hasSuffix(".tools") ? item.submenu?.items.first : nil
+            if let tool {
+                tool.attributedTitle = NSAttributedString(string: tool.title, attributes: [.font: NSFont.boldSystemFont(ofSize: NSFont.systemFontSize)])
             }
+            guard let chord = ApplicationHotkeys.shared.chord(for: id),
+                  ApplicationHotkeys.definitions.contains(where: { $0.id == id && $0.category == "File status list" }) else { continue }
+            let shortcutItem = tool ?? (id == "file.copyPaths" ? item.submenu?.items.first { $0.identifier?.rawValue == "file.copyPaths.fullNative" } ?? item : item)
+            shortcutItem.keyEquivalent = chord.key
+            shortcutItem.keyEquivalentModifierMask = NSEvent.ModifierFlags(rawValue: chord.modifiers)
         }
     }
 
@@ -1451,6 +1530,9 @@ final class ChangedFilesViewController: NSViewController, NSOutlineViewDelegate,
         case "tree.expandAll": outlineView.selectedRowIndexes.compactMap { outlineView.item(atRow: $0) }.forEach { outlineView.expandItem($0, expandChildren: true) }; return
         case "tree.collapseRootFolders": collapseRootFolders(); return
         case "file.copyPaths": copyPaths(); return
+        case "file.copyPaths.relativePOSIX": copyPaths(.relativePOSIX); return
+        case "file.copyPaths.relativeNative": copyPaths(.relativeNative); return
+        case "file.copyPaths.fullNative": copyPaths(.fullNative); return
         case "file.difftool.disableTools":
             var viewer = AppSettingsStore.shared.fileViewerPreferences
             viewer.showAvailableDiffTools = false
@@ -1518,10 +1600,8 @@ final class ChangedFilesViewController: NSViewController, NSOutlineViewDelegate,
         return true
     }
 
-    private func copyPaths() {
-        let paths = selectedFolder.map { [$0] } ?? currentlySelectedFiles().map(\.path)
-        let base = repositoryURL
-        let value = paths.map { path in base.map { $0.appendingPathComponent(path).path } ?? path }.joined(separator: "\n")
+    private func copyPaths(_ kind: FileStatusCopyPathKind = .fullNative) {
+        let value = FileStatusCopyPathKind.payload(files: currentlySelectedFiles(), folder: selectedFolder, repositoryURL: repositoryURL, kind: kind)
         guard !value.isEmpty else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(value, forType: .string)
@@ -1729,7 +1809,7 @@ enum FileSearchWindow {
 }
 
 
-final class FindInCommitFilesGitGrepWindowController: NSWindowController, NSWindowDelegate {
+final class FindInCommitFilesGitGrepWindowController: NSWindowController, NSWindowDelegate, NSTextFieldDelegate {
     private let locate: (String) -> Void
     private let toggle: (Bool) -> Void
     private let closed: () -> Void
@@ -1744,7 +1824,7 @@ final class FindInCommitFilesGitGrepWindowController: NSWindowController, NSWind
         self.locate = locate
         self.toggle = toggle
         self.closed = closed
-        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 425, height: 144), styleMask: [.titled, .closable, .utilityWindow], backing: .buffered, defer: false)
+        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 425, height: 170), styleMask: [.titled, .closable, .utilityWindow], backing: .buffered, defer: false)
         panel.title = "Find in commit files using git-grep"
         panel.isFloatingPanel = true
         panel.hidesOnDeactivate = true
@@ -1765,16 +1845,26 @@ final class FindInCommitFilesGitGrepWindowController: NSWindowController, NSWind
         findBox.setAccessibilityIdentifier("GitGrepFindWhat")
         optionsField.target = self
         optionsField.action = #selector(optionsChanged)
+        optionsField.delegate = self
+        optionsField.setAccessibilityIdentifier("GitGrepOptions")
         matchCase.target = self
         matchCase.action = #selector(matchCaseChanged)
         wholeWord.target = self
         wholeWord.action = #selector(wholeWordChanged)
         showSearchBox.target = self
         showSearchBox.action = #selector(showSearchBoxChanged)
-        let grid = NSGridView(views: [[findLabel, findBox], [optionsLabel, optionsField], [NSGridCell.emptyContentView, NSStackView(views: [matchCase, wholeWord])]])
+        findBox.placeholderString = "git-grep regular expression..."
+        let help = NSButton(title: "", target: self, action: #selector(openHelp))
+        help.bezelStyle = .helpButton
+        help.setAccessibilityIdentifier("GitGrepHelp")
+        let footer = NSStackView(views: [showSearchBox, NSView(), find])
+        let grid = NSGridView(views: [[findLabel, findBox], [optionsLabel, optionsField], [NSGridCell.emptyContentView, matchCase], [NSGridCell.emptyContentView, wholeWord], [help, footer]])
         grid.column(at: 0).xPlacement = .trailing
+        grid.column(at: 1).xPlacement = .fill
         grid.rowSpacing = 6
-        let bottom = NSStackView(views: [showSearchBox, NSView(), find])
+        grid.row(at: 4).topPadding = 6
+        let bottom = NSView()
+        bottom.heightAnchor.constraint(equalToConstant: 0).isActive = true
         for view in [grid, bottom] as [NSView] {
             view.translatesAutoresizingMaskIntoConstraints = false
             root.addSubview(view)
@@ -1821,6 +1911,10 @@ final class FindInCommitFilesGitGrepWindowController: NSWindowController, NSWind
 
     @objc private func search() { locate(findBox.stringValue) }
 
+    static let helpURL = URL(string: ApplicationShellLinks.documentationURL.absoluteString + "browse_repository#diff")!
+
+    @objc private func openHelp() { NSWorkspace.shared.open(Self.helpURL) }
+
     private func update(_ change: (inout FileStatusListPreferences) -> Void) {
         var preferences = AppSettingsStore.shared.fileStatusListPreferences
         change(&preferences)
@@ -1828,6 +1922,7 @@ final class FindInCommitFilesGitGrepWindowController: NSWindowController, NSWind
     }
 
     @objc private func optionsChanged() { update { $0.gitGrepUserArguments = optionsField.stringValue } }
+    func controlTextDidChange(_ obj: Notification) { if obj.object as? NSTextField === optionsField { optionsChanged() } }
     @objc private func matchCaseChanged() { update { $0.gitGrepIgnoreCase = matchCase.state != .on } }
     @objc private func wholeWordChanged() { update { $0.gitGrepMatchWholeWord = wholeWord.state == .on } }
     @objc private func showSearchBoxChanged() {

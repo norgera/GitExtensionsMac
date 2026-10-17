@@ -402,17 +402,34 @@ package struct RepositoryMergeToolConfiguration: Hashable, Sendable {
     package let usesGUISetting: Bool
     package let availableTools: [String]
     package let trustExitCode: Bool
+    package let command: String?
+    package let path: String?
+    package let executablePath: String?
 
     package init(
         name: String,
         usesGUISetting: Bool,
         availableTools: [String] = [],
-        trustExitCode: Bool = false
+        trustExitCode: Bool = false,
+        command: String? = nil,
+        path: String? = nil,
+        executablePath: String? = nil
     ) {
         self.name = name
         self.usesGUISetting = usesGUISetting
         self.availableTools = availableTools
         self.trustExitCode = trustExitCode
+        self.command = command
+        self.path = path
+        self.executablePath = executablePath
+    }
+
+    package var hasExtrasConfigured: Bool {
+        !(path ?? "").trimmingCharacters(in: .whitespaces).isEmpty || !(command ?? "").trimmingCharacters(in: .whitespaces).isEmpty
+    }
+
+    package var runsDirectly: Bool {
+        !(path ?? "").trimmingCharacters(in: .whitespaces).isEmpty && !(command ?? "").trimmingCharacters(in: .whitespaces).isEmpty
     }
 }
 
@@ -640,6 +657,33 @@ package protocol RepositoryCommitDataSource: RepositoryStagingDataSource {
     func commit(_ request: RepositoryCommitRequest) async throws -> RepositoryMutationResult
     func commit(_ request: RepositoryCommitRequest, beforeExecution: @escaping @Sendable () async throws -> Void) async throws -> RepositoryMutationResult
     func resetSoftToParent() async throws -> RepositoryMutationResult
+    func loadSuperprojectSubmodule() async -> RepositorySuperprojectSubmodule?
+    func stageInSuperproject(_ submodule: RepositorySuperprojectSubmodule) async throws
+}
+
+package struct RepositorySuperprojectSubmodule: Equatable, Sendable {
+    package let superprojectURL: URL
+    package let path: String
+
+    package init(superprojectURL: URL, path: String) {
+        self.superprojectURL = superprojectURL
+        self.path = path
+    }
+
+    package enum Commands {
+        package static let submodulePaths = GitCommand(arguments: ["config", "--file", ".gitmodules", "--null", "--get-regexp", #"^submodule\..*\.path$"#],
+                                                       accessesRemote: false, changesRepositoryState: false)
+        package static func stage(path: String) -> GitCommand {
+            GitCommand(arguments: ["update-index", "--add", "--", path], accessesRemote: false, changesRepositoryState: true)
+        }
+    }
+
+    package static func registeredPaths(_ output: String) -> [String] {
+        output.split(separator: "\0").compactMap { record in
+            guard let newline = record.firstIndex(of: "\n") else { return nil }
+            return String(record[record.index(after: newline)...])
+        }
+    }
 }
 
 package extension RepositoryCommitDataSource {
@@ -647,6 +691,9 @@ package extension RepositoryCommitDataSource {
         try await beforeExecution()
         return try await commit(request)
     }
+
+    func loadSuperprojectSubmodule() async -> RepositorySuperprojectSubmodule? { nil }
+    func stageInSuperproject(_ submodule: RepositorySuperprojectSubmodule) async throws {}
 }
 
 package protocol RepositoryStashDataSource: RepositoryMutationStateDataSource {
@@ -669,16 +716,18 @@ package protocol RepositoryConflictDataSource: RepositoryMutationStateDataSource
     func conflictWorkingTreeURL(path: String) async throws -> URL
     func chooseConflictSide(paths: [String], side: RepositoryConflictSide) async throws -> RepositoryMutationResult
     func loadMergeToolConfiguration() async throws -> RepositoryMergeToolConfiguration?
-    func runMergeTool(paths: [String], tool: String?) async throws -> RepositoryMutationResult
-}
-
-package extension RepositoryConflictDataSource {
-    func runMergeTool(paths: [String]) async throws -> RepositoryMutationResult {
-        try await runMergeTool(paths: paths, tool: nil)
-    }
+    func loadMergeTools() async throws -> [String]
+    func runMergeTool(path: String?, tool: String?, output: @escaping GitOutputHandler) async throws -> GitCommandResult
+    func checkoutConflictFiles(path: String) async throws -> RepositoryConflictTemporaryFiles
+    func isBinaryConflictFile(path: String) async -> Bool
+    func runExternalMergeTool(executable: String, arguments: [String]) async throws -> Int32
 }
 
 package protocol RepositoryConflictResolutionDataSource: RepositoryCommitDataSource, RepositoryConflictDataSource {}
+
+extension RepositoryConflictDataSource {
+    package func loadMergeTools() async throws -> [String] { try await loadMergeToolConfiguration()?.availableTools ?? [] }
+}
 
 package protocol RepositoryCherryPickDataSource: RepositoryConflictResolutionDataSource {
     func cherryPick(_ request: RepositoryCherryPickRequest) async throws -> RepositoryMutationResult
@@ -1503,6 +1552,13 @@ extension GitRepositoryModule: RepositoryBrowserMutationDataSource, RepositorySt
         )
     }
 
+    package func loadMergeTools() async throws -> [String] {
+        let repository = try mutationRepository()
+        let selected = try await conflictRead(["config", "--get", "merge.tool"], in: repository)
+        let result = try await conflictRead(["mergetool", "--tool-help"], in: repository)
+        return MergeToolInvocation.availableTools(output: result.standardOutputString, defaultTool: selected.standardOutputString.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
     package func loadMergeToolConfiguration() async throws -> RepositoryMergeToolConfiguration? {
         let repository = try mutationRepository()
         let gui = try await conflictRead(["config", "--get", "merge.guitool"], in: repository)
@@ -1527,37 +1583,77 @@ extension GitRepositoryModule: RepositoryBrowserMutationDataSource, RepositorySt
             ["config", "--bool", "--get", "mergetool.\(selectedName).trustExitCode"],
             in: repository
         )
+        func value(_ key: String) async throws -> String? {
+            let result = try await conflictRead(["config", "--get", "mergetool.\(selectedName).\(key)"], in: repository)
+            let text = result.standardOutputString.trimmingCharacters(in: .newlines)
+            return result.succeeded && !text.isEmpty ? text : nil
+        }
+        let toolSettings = MergeToolInvocation.defaults(tool: selectedName, command: try await value("cmd"), path: try await value("path"))
+        let executable = toolSettings.path.flatMap {
+            MergeToolInvocation.resolveExecutable($0, workingDirectory: repository.rootURL, searchPaths: GitProcessEnvironment.executableSearchPaths())
+        }
         return RepositoryMergeToolConfiguration(
             name: selectedName,
             usesGUISetting: usesGUISetting,
             availableTools: names.sorted(),
-            trustExitCode: trust.succeeded && trust.standardOutputString.trimmingCharacters(in: .whitespacesAndNewlines) == "true"
+            trustExitCode: trust.succeeded && trust.standardOutputString.trimmingCharacters(in: .whitespacesAndNewlines) == "true",
+            command: toolSettings.command,
+            path: toolSettings.path,
+            executablePath: executable
         )
     }
 
-    package func runMergeTool(paths: [String], tool: String? = nil) async throws -> RepositoryMutationResult {
+    package func runMergeTool(path: String?, tool: String?, output: @escaping GitOutputHandler) async throws -> GitCommandResult {
         let repository = try mutationRepository()
-        let paths = normalizedPaths(paths)
-        let state = try await mutationState(in: repository)
-        let conflicts = Set(state.conflictedPaths)
-        guard paths.allSatisfy(conflicts.contains) else {
-            throw RepositoryMutationError.unresolvedConflicts(state.conflictedPaths)
-        }
-        guard let configuration = try await loadMergeToolConfiguration() else {
-            throw RepositoryMutationError.mergeToolNotConfigured
-        }
         var arguments = ["mergetool"]
-        if configuration.usesGUISetting { arguments.append("--gui") }
-        if let tool, !tool.isEmpty { arguments.append("--tool=\(tool)") }
-        arguments.append("--no-prompt")
-        if !paths.isEmpty { arguments += ["--"] + paths }
-        _ = try await checkedMutation(arguments, in: repository)
-        return try await refreshedMutationResult(
-            message: paths.isEmpty
-                ? "Merge tool completed."
-                : "Merge tool completed for \(paths.count) path(s).",
-            selectedCommitID: .workingDirectory
+        if let tool, !tool.trimmingCharacters(in: .whitespaces).isEmpty { arguments.append("--tool=\(tool)") } else { arguments.append("--gui") }
+        if let path { arguments += ["--", path] }
+        return try await git.runStreaming(
+            GitCommand(arguments: arguments, accessesRemote: false, changesRepositoryState: true),
+            in: repository.rootURL,
+            output: output
         )
+    }
+
+    package func checkoutConflictFiles(path: String) async throws -> RepositoryConflictTemporaryFiles {
+        let repository = try mutationRepository()
+        let conflict = try await loadConflicts().first { $0.path == path }
+        func checkout(_ side: RepositoryConflictSide, suffix: String) async throws -> URL? {
+            let target = repository.rootURL.appendingPathComponent(path + "." + suffix)
+            guard conflict?.version(for: side) != nil else {
+                return FileManager.default.fileExists(atPath: target.path) ? target : nil
+            }
+            let result = try await conflictRead(["checkout-index", "--temp", "--stage=\(side.rawValue)", "--", path], in: repository)
+            let temporary = result.standardOutputString.split(separator: "\t", maxSplits: 1).first.map(String.init) ?? ""
+            var available = target
+            var index = 1
+            while FileManager.default.fileExists(atPath: available.path), index < 50 {
+                available = URL(fileURLWithPath: target.path + String(index))
+                index += 1
+            }
+            if !temporary.isEmpty {
+                try? FileManager.default.moveItem(at: repository.rootURL.appendingPathComponent(temporary), to: available)
+            }
+            return available
+        }
+        return RepositoryConflictTemporaryFiles(
+            base: try await checkout(.base, suffix: "BASE"),
+            local: try await checkout(.local, suffix: "LOCAL"),
+            remote: try await checkout(.remote, suffix: "REMOTE")
+        )
+    }
+
+    package func isBinaryConflictFile(path: String) async -> Bool {
+        guard let repository = try? mutationRepository() else { return ConflictBinaryDetection.isBinary(path: path, checkAttrOutput: nil) }
+        let result = try? await conflictRead(["check-attr", "-z", "diff", "text", "crlf", "eol", "--", path], in: repository)
+        return ConflictBinaryDetection.isBinary(path: path, checkAttrOutput: result?.succeeded == true ? result?.standardOutputString : nil)
+    }
+
+    package func runExternalMergeTool(executable: String, arguments: [String]) async throws -> Int32 {
+        let repository = try mutationRepository()
+        let invocation = ScriptInvocation(executable: URL(fileURLWithPath: executable), arguments: arguments,
+                                          workingDirectory: repository.rootURL, environment: [:])
+        return try await ScriptExecution.run(invocation) { _ in }.exitStatus
     }
 
     package func loadInteractiveRebasePlan(upstream: String) async throws -> [RepositoryRebaseTodoItem] {
@@ -1726,7 +1822,7 @@ extension GitRepositoryModule: RepositoryBrowserMutationDataSource, RepositorySt
             currentCommitID: stoppedObjectID,
             patches: patches,
             canEditTodo: FileManager.default.fileExists(atPath: rebaseDirectory.appendingPathComponent("git-rebase-todo").path),
-            hasAutoStash: FileManager.default.fileExists(atPath: rebaseDirectory.appendingPathComponent("autostash").path)
+            hasAutoStash: rebaseAutostash(repository) != nil
         )
     }
 
@@ -2018,6 +2114,21 @@ extension GitRepositoryModule: RepositoryBrowserMutationDataSource, RepositorySt
         let action: String
         let revisionToken: String
         let subject: String
+    }
+
+    func rebaseAutostash(_ repository: ResolvedGitRepository) -> Commit? {
+        guard let directory = rebaseDirectoryURL(repository), directory.lastPathComponent == "rebase-merge",
+              let token = readRebaseFile("autostash", directory: directory)?.components(separatedBy: .newlines).first,
+              let id = try? ObjectID.parse(token),
+              let attributes = try? FileManager.default.attributesOfItem(atPath: directory.appendingPathComponent("autostash").path),
+              let modified = attributes[.modificationDate] as? Date else { return nil }
+        let parent = readRebaseFile("orig-head", directory: directory)?.components(separatedBy: .newlines).first.flatMap { try? ObjectID.parse($0) }
+        let date = Date(timeIntervalSince1970: floor(modified.timeIntervalSince1970))
+        var revision = Commit(id: .object(id), shortID: id.shortString, subject: "Autostash", body: "",
+            authorName: "", authorEmail: "", authorDate: date, committerName: "", committerEmail: "", commitDate: date,
+            parentIDs: parent.map { [$0] } ?? [], references: [])
+        revision.isAutostash = true
+        return revision
     }
 
     private func rebaseDirectoryURL(_ repository: ResolvedGitRepository) -> URL? {
@@ -2685,6 +2796,7 @@ enum GitCommitMessageFormatter {
 
 enum GitHunkPatchBuilder {
     static func patch(from diff: FileDiff, containing lineID: String) -> Data? {
+        guard !diff.lines.contains(where: { ($0.diffPrefix?.count ?? 0) > 1 }) else { return nil }
         guard let selectedIndex = diff.lines.firstIndex(where: { $0.id == lineID }) else { return nil }
         let hunkIndexes = diff.lines.indices.filter { diff.lines[$0].kind == .hunk }
         guard !hunkIndexes.isEmpty else { return nil }
@@ -2725,7 +2837,7 @@ enum GitSelectedLinePatchBuilder {
         let selectedChangedIDs = Set(diff.lines.filter {
             lineIDs.contains($0.id) && ($0.kind == .addition || $0.kind == .deletion)
         }.map(\.id))
-        guard !selectedChangedIDs.isEmpty,
+        guard !diff.lines.contains(where: { ($0.diffPrefix?.count ?? 0) > 1 }), !selectedChangedIDs.isEmpty,
               let firstHunk = diff.lines.firstIndex(where: { $0.kind == .hunk }) else { return nil }
 
         let hunkStarts = diff.lines.indices.filter { diff.lines[$0].kind == .hunk }

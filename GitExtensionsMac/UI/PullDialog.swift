@@ -97,7 +97,7 @@ private final class PullDialogViewController: NSViewController, NSWindowDelegate
     private let remoteCombo = NSComboBox()
     private let urlCombo = NSComboBox()
     private let browseButton = NSButton(title: "Browse…", target: nil, action: nil)
-    private let manageButton = NSButton(title: "Manage remotes", target: nil, action: nil)
+    private let manageButton = LeadingImageButton(title: "Manage remotes", target: nil, action: nil)
     private let localBranchField = NSTextField()
     private let remoteBranchCombo = NSComboBox()
     private let mergeMode = NSButton(radioButtonWithTitle: "Merge remote branch into current branch", target: nil, action: nil)
@@ -113,7 +113,7 @@ private final class PullDialogViewController: NSViewController, NSWindowDelegate
     private let stashButton = NSButton(title: "Stash changes", target: nil, action: nil)
     private let autoStash = NSButton(checkboxWithTitle: "Auto stash", target: nil, action: nil)
     private let statusLabel = NSTextField(labelWithString: "")
-    private let executeButton = NSButton(title: "Pull", target: nil, action: nil)
+    private let executeButton = LeadingImageButton(title: "Pull", target: nil, action: nil)
 
     init(
         initialAction: NetworkDialogInitialAction,
@@ -233,7 +233,7 @@ private final class PullDialogViewController: NSViewController, NSWindowDelegate
         urlChoice.target = self; urlChoice.action = #selector(sourceChanged(_:))
         manageButton.target = self; manageButton.action = #selector(manageRemotes)
         manageButton.image = AppKitFactory.resourceImage("Remotes", accessibilityDescription: "Manage remotes")
-        manageButton.imagePosition = .imageLeading
+        manageButton.imagePosition = .imageLeft
         browseButton.target = self; browseButton.action = #selector(browseForSource)
         for button in [mergeMode, rebaseMode, fetchMode] {
             button.target = self; button.action = #selector(modeChanged(_:))
@@ -261,7 +261,7 @@ private final class PullDialogViewController: NSViewController, NSWindowDelegate
         autoStash.state = settings.pullPreferences.autoStash ? .on : .off
         executeButton.target = self; executeButton.action = #selector(execute)
         executeButton.image = AppKitFactory.resourceImage("ArrowDown", accessibilityDescription: "Pull")
-        executeButton.imagePosition = .imageLeading
+        executeButton.imagePosition = .imageLeft
         executeButton.keyEquivalent = "\r"
         executeButton.widthAnchor.constraint(equalToConstant: 124).isActive = true
         statusLabel.textColor = .secondaryLabelColor
@@ -306,7 +306,8 @@ private final class PullDialogViewController: NSViewController, NSWindowDelegate
         ])
         sourceGrid.column(at: 0).width = 92
         sourceGrid.column(at: 1).xPlacement = .fill
-        sourceGrid.column(at: 2).width = 150
+        sourceGrid.column(at: 2).xPlacement = .fill
+        sourceGrid.column(at: 2).width = AppKitFactory.buttonColumnWidth(minimum: 150, [manageButton, browseButton])
         sourceGrid.columnSpacing = 7
         sourceGrid.rowSpacing = 5
         for combo in [remoteCombo, urlCombo] {
@@ -368,7 +369,7 @@ private final class PullDialogViewController: NSViewController, NSWindowDelegate
         else if let first = preferredRemoteName() { remoteCombo.stringValue = first }
         else { remoteCombo.stringValue = "[ All ]" }
         urlCombo.removeAllItems()
-        settings.pullPreferences.recentURLs.forEach { urlCombo.addItem(withObjectValue: $0) }
+        settings.remoteRepositoryHistory.forEach { urlCombo.addItem(withObjectValue: $0) }
         context.remotes.map(\.fetchURL).filter { !$0.isEmpty }.forEach { urlCombo.addItem(withObjectValue: $0) }
         updateRemoteURL(resetRemoteBranch: true)
     }
@@ -1031,8 +1032,7 @@ private final class PullDialogViewController: NSViewController, NSWindowDelegate
 
     private func group(_ title: String, _ content: NSView) -> NSBox {
         let box = NSBox()
-        box.title = title; box.titlePosition = .atTop; box.boxType = .custom
-        box.borderWidth = 1; box.cornerRadius = 0; box.fillColor = .clear
+        box.title = title; box.titlePosition = .atTop; box.boxType = .primary
         content.translatesAutoresizingMaskIntoConstraints = false
         box.contentView?.addSubview(content)
         if let holder = box.contentView {
@@ -1182,6 +1182,7 @@ private final class PullProcessViewController: NSViewController, NSWindowDelegat
     private let keepOpen = NSButton(checkboxWithTitle: "Keep dialog open", target: nil, action: nil)
     private let abortButton = NSButton(title: "Abort", target: nil, action: nil)
     private let closeButton = NSButton(title: "OK", target: nil, action: nil)
+    let processInput = ProcessInputController()
     private var task: Task<Void, Never>?
     private var result: Result<RepositoryPullResult, Error>?
     private var didClose = false
@@ -1222,8 +1223,9 @@ private final class PullProcessViewController: NSViewController, NSWindowDelegat
         closeButton.target = self; closeButton.action = #selector(close); closeButton.keyEquivalent = "\r"; closeButton.isEnabled = false
         let spacer = NSView(); spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
         let header = NSStackView(views: [progress, status]); header.orientation = .horizontal; header.alignment = .centerY; header.spacing = 8
-        let footer = NSStackView(views: [keepOpen, spacer, abortButton, closeButton]); footer.orientation = .horizontal; footer.alignment = .centerY; footer.spacing = 8
-        for subview in [header, scroll, footer] { subview.translatesAutoresizingMaskIntoConstraints = false; root.addSubview(subview) }
+        let footer = NSStackView(views: [keepOpen, processInput.toggle, spacer, abortButton, closeButton]); footer.orientation = .horizontal; footer.alignment = .centerY; footer.spacing = 8
+        let bottom = processInput.bottomStack(footer: footer)
+        for subview in [header, scroll, bottom] { subview.translatesAutoresizingMaskIntoConstraints = false; root.addSubview(subview) }
         NSLayoutConstraint.activate([
             header.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12),
             header.trailingAnchor.constraint(lessThanOrEqualTo: root.trailingAnchor, constant: -12),
@@ -1231,10 +1233,10 @@ private final class PullProcessViewController: NSViewController, NSWindowDelegat
             scroll.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12),
             scroll.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12),
             scroll.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 9),
-            scroll.bottomAnchor.constraint(equalTo: footer.topAnchor, constant: -9),
-            footer.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12),
-            footer.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12),
-            footer.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -10),
+            scroll.bottomAnchor.constraint(equalTo: bottom.topAnchor, constant: -9),
+            bottom.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12),
+            bottom.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12),
+            bottom.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -10),
             footer.heightAnchor.constraint(equalToConstant: 30)
         ])
         view = root
@@ -1244,12 +1246,17 @@ private final class PullProcessViewController: NSViewController, NSWindowDelegat
         guard task == nil else { return }
         progress.startAnimation(nil)
         status.stringValue = initialStatus
+        processInput.window = panel
         task = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
+                let processInput = processInput
+                let operation = operation
                 let value = try await OutputHistoryRecording.perform {
-                    try await operation { [weak self] event in
-                        Task { @MainActor in self?.append(event) }
+                    try await processInput.perform {
+                        try await operation { [weak self] event in
+                            Task { @MainActor in self?.append(event) }
+                        }
                     }
                 }
                 result = .success(value)
@@ -1265,12 +1272,14 @@ private final class PullProcessViewController: NSViewController, NSWindowDelegat
             } catch {
                 status.stringValue = "Failed"; result = .failure(error); appendText("\n\(error.localizedDescription)\n", color: .systemRed)
             }
+            processInput.finish()
             progress.stopAnimation(nil); abortButton.isEnabled = false; closeButton.isEnabled = true; task = nil
             if case .success(let value) = result, value.outcome == .completed, keepOpen.state == .off { finish() }
         }
     }
 
     private func append(_ event: GitOutputEvent) {
+        processInput.observeOutput(event.text)
         appendText(event.text, color: event.stream == .standardError ? .systemRed : .textColor)
         let lines = event.text.split(whereSeparator: { $0 == "\r" || $0 == "\n" })
         if let last = lines.last, !last.isEmpty {
@@ -1306,5 +1315,5 @@ private final class PullProcessViewController: NSViewController, NSWindowDelegat
     @objc private func abort() { status.stringValue = "Aborting…"; task?.cancel() }
     @objc private func close() { finish() }
     func windowWillClose(_ notification: Notification) { if task != nil { task?.cancel() }; finish() }
-    private func finish() { guard !didClose else { return }; didClose = true; onClose?(result) }
+    private func finish() { guard !didClose else { return }; didClose = true; processInput.finish(); onClose?(result) }
 }

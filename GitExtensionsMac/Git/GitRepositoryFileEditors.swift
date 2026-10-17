@@ -30,7 +30,26 @@ package protocol RepositoryFileEditingDataSource: Sendable {
 
     func loadEditableFile(at url: URL) async throws -> EditableFileText
 
+    func prepareEditableFile(at url: URL) async throws -> FilePreview<EditableFileText>
+
+    func editorCommentCharacter() async throws -> String
+
     func ignoredFiles(matching patterns: [String]) async throws -> [String]
+}
+
+package extension RepositoryFileEditingDataSource {
+    func editorCommentCharacter() async throws -> String { "#" }
+
+    func prepareEditableFile(at url: URL) async throws -> FilePreview<EditableFileText> {
+        let length = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        return try await FilePreview.prepare(length: length) { try await self.loadEditableFile(at: url) }
+    }
+
+    func prepareEditableFile(at url: URL, encoding: RepositoryTextEncoding) async throws -> FilePreview<EditableFileText> {
+        if encoding == .automatic { return try await prepareEditableFile(at: url) }
+        let length = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        return try await FilePreview.prepare(length: length) { try EditableFileIO.load(url, configuredEncoding: encoding) }
+    }
 }
 
 package enum RepositoryFileEditorCommands {
@@ -178,6 +197,16 @@ extension GitRepositoryModule: RepositoryFileEditingDataSource {
         }
         let url = RepositoryFileEditorCommands.resolveGitPath(result.standardOutputString, in: repository.rootURL)
         return file == .localExclude ? url.appendingPathComponent("exclude") : url
+    }
+
+    package func editorCommentCharacter() async throws -> String {
+        guard let repository = resolvedRepository else { throw RepositoryDataSourceError.unavailable }
+        let result = try await git.run(GitCommand(arguments: ["config", "--get", "core.commentchar"], accessesRemote: false, changesRepositoryState: false), in: repository.rootURL)
+        guard result.succeeded || result.exitStatus == 1 else {
+            throw GitError.commandFailed(arguments: result.arguments, status: result.exitStatus, stderr: result.standardErrorString)
+        }
+        let setting = result.standardOutputString.trimmingCharacters(in: .newlines)
+        return setting.utf16.count == 1 ? setting : "#"
     }
 
     package func loadEditableFile(at url: URL) async throws -> EditableFileText {

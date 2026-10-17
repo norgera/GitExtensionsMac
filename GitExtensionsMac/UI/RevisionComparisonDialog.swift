@@ -6,7 +6,7 @@ import GitExtensionsCore
 
 @MainActor
 final class CommitDiffWindowController: NSWindowController, NSWindowDelegate {
-    let diffController = RevisionDiffViewController(mode: .diff)
+    let diffController = RevisionDiffViewController(mode: .diff, groupsByRevision: false)
     let infoController = CommitDetailViewController()
     var onClose: (() -> Void)?
 
@@ -23,16 +23,18 @@ final class CommitDiffWindowController: NSWindowController, NSWindowDelegate {
         split.splitViewItems[0].preferredThicknessFraction = 0.3
         split.addSplitViewItem(NSSplitViewItem(viewController: diffController))
         let window = RevisionComparisonWindow(contentViewController: split)
-        window.title = "Diff - \(revision.shortID) - \(revision.authorDate) - \(revision.authorName) - \(repositoryURL?.path ?? "")"
+        window.title = "Diff - \(revision.shortID) - \(CommitInfoPresentation.fullDate(revision.authorDate)) - \(revision.authorName) - \(repositoryURL?.path ?? "")"
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
-        window.setContentSize(NSSize(width: 900, height: 700))
-        window.minSize = NSSize(width: 600, height: 400)
+        window.setContentSize(NSSize(width: 717, height: 529))
+        window.minSize = NSSize(width: 150, height: 148)
         window.setFrameAutosaveName("GitExtensionsMac.CommitDiff")
         window.contentView?.layoutSubtreeIfNeeded()
-        split.setRetainedPosition(180)
+        split.setRetainedPosition(160)
         window.isReleasedWhenClosed = false
         self.window = window
         window.delegate = self
+        diffController.filesController.supportsFindInCommitFilesGitGrep = false
+        diffController.filesController.canAutoRefresh = false
         diffController.fileStatusSource = source
         diffController.repositoryURL = repositoryURL
         diffController.onCommand = command
@@ -74,7 +76,7 @@ private final class RevisionComparisonWindow: NSWindow {
 
 @MainActor
 final class RevisionPairViewController: NSViewController {
-    let diff = RevisionDiffViewController(mode: .diff)
+    let diff = RevisionDiffViewController(mode: .diff, groupsByRevision: false)
     private(set) var first: Commit
     private(set) var second: Commit
     private var firstLabel: String
@@ -105,8 +107,15 @@ final class RevisionPairViewController: NSViewController {
             label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
             label.setContentHuggingPriority(.defaultLow, for: .horizontal)
             let branch = NSButton(title: "", target: self, action: #selector(pickBranch(_:)))
-            branch.image = AppKitFactory.resourceImage("Branch"); branch.toolTip = "Select another branch"; branch.tag = first ? 0 : 1
-            let commit = NSButton(title: "…", target: self, action: #selector(pickCommit(_:)))
+            branch.image = AppKitFactory.resourceImage("BranchCheckout"); branch.toolTip = "Select another branch"; branch.tag = first ? 0 : 1
+            let commit = NSButton(title: "", target: self, action: #selector(pickCommit(_:)))
+            commit.image = AppKitFactory.resourceImage("SelectRevision")
+            for button in [branch, commit] {
+                button.imagePosition = .imageOnly
+                button.translatesAutoresizingMaskIntoConstraints = false
+                button.widthAnchor.constraint(equalToConstant: 22).isActive = true
+                button.heightAnchor.constraint(equalToConstant: 22).isActive = true
+            }
             commit.toolTip = "Select another commit"; commit.tag = first ? 0 : 1
             let row = NSStackView(views: [label, branch, commit]); row.spacing = 5; row.distribution = .fill
             row.translatesAutoresizingMaskIntoConstraints = false
@@ -133,6 +142,8 @@ final class RevisionPairViewController: NSViewController {
         directoryButton.target = self; directoryButton.action = #selector(directoryClicked)
         let options = NSStackView(views: [baseCheckbox, directoryButton]); options.spacing = 20
         options.translatesAutoresizingMaskIntoConstraints = false
+        diff.filesController.supportsFindInCommitFilesGitGrep = false
+        diff.filesController.canAutoRefresh = false
         addChild(diff); diff.view.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(endpoints); root.addSubview(options); root.addSubview(diff.view)
         NSLayoutConstraint.activate([
@@ -172,7 +183,7 @@ final class RevisionPairViewController: NSViewController {
 @MainActor
 final class RevisionComparisonGridController: NSViewController {
     let grid = RevisionGridViewController()
-    let diff = RevisionDiffViewController(mode: .diff)
+    let diff = RevisionDiffViewController(mode: .diff, groupsByRevision: false)
     private let filters = RevisionFilterToolbar()
     private let parentButtons = NSStackView()
     private var parentIDs: [RevisionID] = []
@@ -184,27 +195,29 @@ final class RevisionComparisonGridController: NSViewController {
     private var selectionGeneration = 0
     private var headID: ObjectID?
     private let preselect: RevisionID?
+    private let showArtificial: Bool
+    private var focusedInitialSelection = false
     let choosing: Bool
+    var rebaseChoice: RebaseCommitChoice?
     var onChoose: ((Commit?) -> Void)?
     private(set) var revisions: [Commit] = []
     private(set) var isLoading = false
 
-    init(source: any RepositoryRevisionComparingDataSource, choosing: Bool = false, preselect: RevisionID? = nil) {
-        self.source = source; self.choosing = choosing; self.preselect = preselect
+    init(source: any RepositoryRevisionComparingDataSource, choosing: Bool = false, preselect: RevisionID? = nil, showArtificial: Bool = false) {
+        self.source = source; self.choosing = choosing; self.preselect = preselect; self.showArtificial = showArtificial
         super.init(nibName: nil, bundle: nil)
     }
     required init?(coder: NSCoder) { nil }
     override func loadView() {
         let root = NSView(frame: NSRect(x: 0, y: 0, width: 900, height: 650)); root.autoresizingMask = [.width, .height]
         filters.grid = grid
-        let toolbar = NSStackView(views: filters.views); toolbar.translatesAutoresizingMaskIntoConstraints = false
         filters.showAdvancedFilter = { [weak self] in self?.advancedFilter() }
         grid.onShowAdvancedFilter = filters.showAdvancedFilter
         grid.onRefreshRequested = { [weak self] in self?.reload() }
         grid.onFilterChanged = { [weak self] in self?.filters.filterChanged($0) }
         grid.onSelection = { [weak self] _ in self?.selectionChanged() }
         if choosing {
-            grid.allowsArtificialViewSelection = true
+            grid.allowsArtificialViewSelection = showArtificial
             grid.allowsMultipleRevisionSelection = false
             grid.onViewSelected = { [weak self] selected in self?.onChoose?(selected.first) }
         }
@@ -213,16 +226,23 @@ final class RevisionComparisonGridController: NSViewController {
         split.addSplitViewItem(NSSplitViewItem(viewController: grid))
         if !choosing { split.addSplitViewItem(NSSplitViewItem(viewController: diff)); split.setRetainedPosition(205) }
         addChild(split); split.view.translatesAutoresizingMaskIntoConstraints = false
-        root.addSubview(toolbar); root.addSubview(split.view)
-        NSLayoutConstraint.activate([toolbar.topAnchor.constraint(equalTo: root.topAnchor, constant: 3), toolbar.heightAnchor.constraint(equalToConstant: 28),
-            toolbar.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 5), toolbar.trailingAnchor.constraint(lessThanOrEqualTo: root.trailingAnchor, constant: -5),
-            split.view.topAnchor.constraint(equalTo: toolbar.bottomAnchor, constant: 3), split.view.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            split.view.trailingAnchor.constraint(equalTo: root.trailingAnchor), split.view.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: choosing ? -40 : 0)])
+        root.addSubview(split.view)
+        NSLayoutConstraint.activate([
+            split.view.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            split.view.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            split.view.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: choosing ? -40 : 0)
+        ])
+        split.view.topAnchor.constraint(equalTo: root.topAnchor).isActive = true
+        if !choosing {
+            diff.filesController.supportsFindInCommitFilesGitGrep = false
+            diff.filesController.canAutoRefresh = false
+        }
         if choosing {
             let ok = NSButton(title: "OK", target: self, action: #selector(chooseClicked)); ok.keyEquivalent = "\r"
             let cancel = NSButton(title: "Cancel", target: self, action: #selector(cancelClicked)); cancel.keyEquivalent = "\u{1b}"
             let goTo = NSButton(title: "Go to commit…", target: self, action: #selector(goToClicked))
-            let buttons = NSStackView(views: [goTo, parentButtons, cancel, ok]); buttons.translatesAutoresizingMaskIntoConstraints = false; root.addSubview(buttons)
+            let spacer = NSView(); spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            let buttons = NSStackView(views: [NSTextField(labelWithString: "Find specific commit:"), goTo, parentButtons, spacer, cancel, ok]); buttons.translatesAutoresizingMaskIntoConstraints = false; root.addSubview(buttons)
             NSLayoutConstraint.activate([buttons.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 10), buttons.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -10), buttons.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -6)])
         }
         view = root
@@ -240,12 +260,19 @@ final class RevisionComparisonGridController: NSViewController {
                 let request = try await source.comparisonReadRequest()
                 guard !Task.isCancelled, token == generation else { return }
                 reader = request.reader; headID = request.context.headID
+                grid.applyAuthorIdentity(request.identity)
                 diff.repositoryURL = URL(fileURLWithPath: request.identity.currentRepository.path)
                 diff.isBareRepository = request.identity.currentRepository.isBare
                 filters.references = { .init(local: request.branches.filter { !$0.isRemote }.map(\.name), remote: request.remoteBranchNames, tags: request.references.tags.map(\.name)) }
+                grid.referenceNames = { (request.branches.filter { !$0.isRemote }.map(\.name) + request.remoteBranchNames, request.references.tags.map(\.name)) }
                 var options = grid.readOptions
 
-                if choosing { options.showArtificialCommits = !request.identity.currentRepository.isBare }
+                if choosing { options.showArtificialCommits = showArtificial && !request.identity.currentRepository.isBare }
+                if let rebaseChoice {
+                    options.filter = rebaseChoice.options(options.filter)
+                    options.showArtificialCommits = false
+                    options.showStashes = false
+                }
                 for try await batch in await request.reader.read(request.context.with(options), maximumCount: AppSettingsStore.shared.browseDisplayPreferences.maximumRevisionCount) {
                     guard !Task.isCancelled, token == generation else { return }
                     revisions += batch; grid.appendIncrementalBatch(batch)
@@ -255,6 +282,10 @@ final class RevisionComparisonGridController: NSViewController {
                 if !selected.isEmpty { grid.selectCommits(ids: selected) }
                 else if let preselect { grid.selectCommit(id: preselect) }
                 selectionChanged()
+                if choosing && !focusedInitialSelection {
+                    focusedInitialSelection = true
+                    grid.focusRevisionList()
+                }
             } catch {
                 guard !Task.isCancelled, token == generation else { return }
                 isLoading = false; grid.finishLoading(failed: true)
@@ -270,6 +301,7 @@ final class RevisionComparisonGridController: NSViewController {
                 parentButtons.addArrangedSubview(NSTextField(labelWithString: "Parent(s):"))
                 for (index, id) in parentIDs.enumerated() {
                     let button = NSButton(title: id.objectID?.shortString ?? id.description, target: self, action: #selector(parentClicked(_:)))
+                    button.isBordered = false; button.contentTintColor = .linkColor
                     button.tag = index; parentButtons.addArrangedSubview(button)
                 }
             }
@@ -330,20 +362,25 @@ final class ComparisonBranchPicker: NSViewController, NSComboBoxDelegate {
         field.delegate = self; field.completes = true
         let compare = NSButton(title: "Compare", target: self, action: #selector(compareClicked)); compare.keyEquivalent = "\r"
         let cancel = NSButton(title: "Cancel", target: self, action: #selector(cancelClicked)); cancel.keyEquivalent = "\u{1b}"
-        let types = NSStackView(views: [local, remote]), buttons = NSStackView(views: [cancel, compare])
-        let stack = NSStackView(views: [types, field, count, buttons]); stack.orientation = .vertical; stack.alignment = .leading
+        let spacer = NSView(); spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let types = NSStackView(views: [local, remote]), buttons = NSStackView(views: [spacer, cancel, compare])
+        let selectLabel = NSTextField(labelWithString: "Select branch")
+        count.setContentHuggingPriority(.required, for: .horizontal)
+        let selector = NSStackView(views: [selectLabel, field, count]); selector.spacing = 8
+        let stack = NSStackView(views: [types, selector, buttons]); stack.orientation = .vertical; stack.alignment = .leading
         stack.translatesAutoresizingMaskIntoConstraints = false; root.addSubview(stack)
         NSLayoutConstraint.activate([stack.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 14), stack.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -14),
-            stack.topAnchor.constraint(equalTo: root.topAnchor, constant: 10), field.widthAnchor.constraint(equalTo: stack.widthAnchor)])
+            stack.topAnchor.constraint(equalTo: root.topAnchor, constant: 10), selector.widthAnchor.constraint(equalTo: stack.widthAnchor), buttons.widthAnchor.constraint(equalTo: stack.widthAnchor)])
         view = root; populate()
     }
     override func viewDidAppear() { super.viewDidAppear(); view.window?.makeFirstResponder(field) }
     private func populate() { field.removeAllItems(); field.addItems(withObjectValues: branches.filter { $0.isRemote == (remote.state == .on) }.map(RevisionComparisonReadRequest.branchName)); field.stringValue = ""; count.stringValue = "" }
     @objc private func branchTypeChanged(_ sender: NSButton) { local.state = sender === local ? .on : .off; remote.state = sender === remote ? .on : .off; task?.cancel(); populate(); view.window?.makeFirstResponder(field) }
     func controlTextDidChange(_ obj: Notification) { updateCount() }
-    func comboBoxSelectionDidChange(_ notification: Notification) { updateCount() }
-    private func updateCount() {
-        task?.cancel(); let expression = field.stringValue
+    func comboBoxSelectionDidChange(_ notification: Notification) { updateCount((field.objectValueOfSelectedItem as? String) ?? field.stringValue) }
+    var countText: String { count.stringValue }
+    private func updateCount(_ expression: String? = nil) {
+        task?.cancel(); let expression = expression ?? field.stringValue
         count.stringValue = ""
         task = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -355,4 +392,133 @@ final class ComparisonBranchPicker: NSViewController, NSComboBoxDelegate {
     @objc private func compareClicked() { let value = field.stringValue.trimmingCharacters(in: .whitespaces); if !value.isEmpty { completion?(value) } else { view.window?.makeFirstResponder(field) } }
     @objc private func cancelClicked() { completion?(nil) }
     func cancel() { task?.cancel() }
+}
+
+@MainActor
+enum RevisionCommitChooser {
+    static func choose(source: any RepositoryRevisionComparingDataSource, preselect: RevisionID?,
+                       showArtificial: Bool = false, rebaseChoice: RebaseCommitChoice? = nil, owner: NSWindow,
+                       configure: ((RevisionComparisonGridController, RevisionComparisonWindowController) -> Void)? = nil) async -> Commit? {
+        let content = RevisionComparisonGridController(source: source, choosing: true, preselect: preselect, showArtificial: showArtificial)
+        content.rebaseChoice = rebaseChoice
+        content.grid.dataSource = source as? any RepositoryRevisionGridDataSource
+        let controller = RevisionComparisonWindowController(content: content, title: "Choose commit", size: NSSize(width: 900, height: 550), autosave: "GitExtensionsMac.ChooseCommit")
+        configure?(content, controller)
+        guard let window = controller.window else { return nil }
+        return await withCheckedContinuation { continuation in
+            var completed = false
+            let finish: (Commit?) -> Void = { value in
+                guard !completed else { return }; completed = true
+                content.cancel(); content.onChoose = nil; controller.onClose = nil
+                owner.endSheet(window); window.orderOut(nil); continuation.resume(returning: value)
+            }
+            controller.onClose = { finish(nil) }
+            content.onChoose = { [controller] value in finish(value); _ = controller }
+            owner.beginSheet(window)
+        }
+    }
+}
+
+@MainActor
+final class CommitPickerSmallControl: NSStackView, NSTextFieldDelegate {
+    let field = NSTextField(string: "")
+    let pick = NSButton(image: AppKitFactory.resourceImage("SelectRevision", accessibilityDescription: "Choose commit") ?? NSImage(), target: nil, action: nil)
+    let count = NSTextField(labelWithString: "")
+    private let source: (any RepositoryRevisionComparingDataSource)?
+    private let revisions: [Commit]
+    private var displayedExpression = ""
+    private var inputChanged = false
+    private var generation = 0
+    private var countTask: Task<Void, Never>?
+    private var editingTask: Task<Void, Never>?
+    private(set) var selectedCommit: Commit?
+    weak var errorOwner: NSWindow?
+    var onSelectionChanged: ((Commit?) -> Void)?
+    var isEnabled = true {
+        didSet { field.isEnabled = isEnabled; pick.isEnabled = isEnabled && source != nil; count.textColor = isEnabled ? .secondaryLabelColor : .disabledControlTextColor }
+    }
+
+    init(source: (any RepositoryRevisionComparingDataSource)?, revisions: [Commit], selected: Commit?) {
+        self.source = source; self.revisions = revisions; selectedCommit = selected?.isArtificial == false ? selected : nil
+        super.init(frame: .zero)
+        orientation = .horizontal; alignment = .centerY; spacing = 3
+        field.delegate = self; field.formatter = CommitPickerHashFormatter()
+        field.setAccessibilityIdentifier("CommitPicker.Hash")
+        field.placeholderString = "Commit ID or revision"
+        field.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        field.widthAnchor.constraint(greaterThanOrEqualToConstant: 80).isActive = true
+        pick.target = self; pick.action = #selector(chooseCommit)
+        pick.setAccessibilityIdentifier("CommitPicker.Choose")
+        pick.isEnabled = source != nil
+        count.setAccessibilityIdentifier("CommitPicker.Count")
+        count.textColor = .secondaryLabelColor
+        for control in [pick, count] { control.setContentHuggingPriority(.required, for: .horizontal) }
+        [field, pick, count].forEach(addArrangedSubview)
+        presentSelection(hideHEAD: false)
+    }
+    required init?(coder: NSCoder) { nil }
+
+    func controlTextDidEndEditing(_ obj: Notification) {
+        editingTask?.cancel()
+        editingTask = Task { [weak self] in await self?.validateInput() }
+    }
+    func controlTextDidChange(_ obj: Notification) { inputChanged = true }
+    func validateInput(force: Bool = false) async {
+        let expression = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard force || inputChanged || expression != displayedExpression else { return }
+        generation += 1; let token = generation
+        do {
+            let commit: Commit?
+            if expression.isEmpty { commit = nil }
+            else if let source { commit = try await source.comparisonTarget(expression) }
+            else if let known = revisions.first(where: { $0.objectID?.string == expression || $0.shortID == expression || (expression == "HEAD" && $0.isHEAD) }) { commit = known }
+            else { throw RevisionComparisonError.invalidTarget(expression) }
+            guard !Task.isCancelled, token == generation else { return }
+            selectedCommit = commit; onSelectionChanged?(commit)
+        } catch {
+            guard !Task.isCancelled, token == generation else { return }
+            await MutationDialogs.showValidationError("The given commit hash is not valid for this repository and was therefore discarded.", caption: "Error", window: window?.isVisible == true ? window : errorOwner)
+            guard !Task.isCancelled, token == generation else { return }
+        }
+        presentSelection(hideHEAD: expression == "HEAD")
+    }
+    func setSelectedCommitHash(_ expression: String) async {
+        field.stringValue = expression
+        await validateInput(force: true)
+    }
+    private func presentSelection(hideHEAD: Bool) {
+        displayedExpression = hideHEAD ? "" : selectedCommit?.shortID ?? ""
+        inputChanged = false
+        field.stringValue = displayedExpression
+        countTask?.cancel(); count.stringValue = ""
+        guard !hideHEAD, let selected = selectedCommit, let source else { return }
+        countTask = Task { [weak self] in
+            guard let head = try? await source.comparisonTarget("HEAD"), let id = selected.objectID else { return }
+            let text = try? await source.comparisonCount(from: head.id, to: id.string, headID: head.objectID)
+            guard !Task.isCancelled, let self, self.selectedCommit?.id == selected.id else { return }
+            self.count.stringValue = text ?? ""
+        }
+    }
+    @objc private func chooseCommit() {
+        guard isEnabled, let source, let owner = window else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            let selected: Commit?
+            if let commands = GitUICommands.commands(for: source as AnyObject) {
+                selected = await commands.pickCommit(preselect: selectedCommit?.id, owner: owner)
+            } else {
+                selected = await RevisionCommitChooser.choose(source: source, preselect: selectedCommit?.id, owner: owner)
+            }
+            guard let selected else { return }
+            generation += 1; selectedCommit = selected
+            onSelectionChanged?(selected); presentSelection(hideHEAD: false)
+        }
+    }
+    func cancel() { generation += 1; editingTask?.cancel(); countTask?.cancel() }
+}
+
+private final class CommitPickerHashFormatter: Formatter {
+    override func string(for obj: Any?) -> String? { obj as? String }
+    override func getObjectValue(_ obj: AutoreleasingUnsafeMutablePointer<AnyObject?>?, for string: String, errorDescription error: AutoreleasingUnsafeMutablePointer<NSString?>?) -> Bool { obj?.pointee = string as NSString; return true }
+    override func isPartialStringValid(_ partialString: String, newEditingString: AutoreleasingUnsafeMutablePointer<NSString?>?, errorDescription: AutoreleasingUnsafeMutablePointer<NSString?>?) -> Bool { partialString.utf16.count <= 100 }
 }

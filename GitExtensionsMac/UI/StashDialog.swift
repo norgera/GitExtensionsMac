@@ -414,7 +414,7 @@ private final class StashViewController: RetainingSplitViewController, NSWindowD
                     imageName: "CommitSummary",
                     files: indexFiles
                 )
-            ].filter { !$0.files.isEmpty }
+            ]
 
         case .stash(let commitID):
             guard let stash = context.stashes.first(where: { $0.commitID == commitID }) else {

@@ -139,7 +139,10 @@ enum RevisionContextMenuBuilder {
         add(.separator)
         if !revision.isArtificial { add(copyMenu(selected, filter: context.clickedReference)) }
         add(.separator)
-        if !bareOrArtificial && revision.references.contains(where: { $0.kind == .stash }) {
+        if !bareOrArtificial && revision.isAutostash {
+            add(command("revision.stash.apply", "Apply stash"))
+        }
+        if !bareOrArtificial && revision.isStash {
             add(command("revision.stash.apply", "Apply stash"))
             add(command("revision.stash.pop", "Pop stash"))
             add(command("revision.stash.drop", "Drop stash…"))
@@ -206,8 +209,6 @@ enum RevisionContextMenuBuilder {
         }
         if !revision.isArtificial {
             add(command("revision.commit.archive", "Archive this commit…", enabled: (1...2).contains(selectedCount) && realSelection), advanced: true)
-
-            add(command("revision.other.formatPatch", "Format patch…", enabled: !context.isBareRepository && realSelection), advanced: true)
         }
         if !bareOrArtificial {
             add(submenu("revision.commit.advanced", "Advanced", children: [
@@ -547,11 +548,11 @@ enum RepositoryContextMenuBuilder {
                 .separator,
                 command("repository.remoteBranch.delete", "Delete remote branch…"),
                 .separator,
-                command("repository.remoteBranch.fetchCheckout", "Fetch and checkout", enabled: !isBareRepository),
-                command("repository.remoteBranch.pull", "Pull from remote branch", enabled: !isBareRepository),
-                command("repository.remoteBranch.fetchRebase", "Fetch and rebase", enabled: !isBareRepository),
-                command("repository.remoteBranch.fetchCreate", "Fetch and create branch", enabled: !isBareRepository),
-                command("repository.remoteBranch.fetch", "Fetch branch")
+                command("repository.remoteBranch.fetchCheckout", "Fetch & Checkout", enabled: !isBareRepository),
+                command("repository.remoteBranch.pull", "Fetch & Merge (Pull)", enabled: !isBareRepository),
+                command("repository.remoteBranch.fetchRebase", "Fetch & Rebase", enabled: !isBareRepository),
+                command("repository.remoteBranch.fetchCreate", "Fetch & Create Branch", enabled: !isBareRepository),
+                command("repository.remoteBranch.fetch", "Fetch")
             ]
 
         case .tag:
@@ -861,7 +862,7 @@ enum ChangedFileContextMenuBuilder {
     private static func toolEntry(_ id: String, _ title: String, tools: [String], enabled: Bool) -> ContextMenuEntry {
         guard !tools.isEmpty else { return command(id, title, enabled: enabled) }
         return .submenu(id: id + ".tools", title: title, isEnabled: enabled,
-                        children: [command(id, "Default difftool")] + tools.map { command(id + ".tool:" + $0, $0) }
+                        children: tools.map { command(id + ".tool:" + $0, $0) }
                             + [.separator, command("file.difftool.disableTools", "Disable")])
     }
 }

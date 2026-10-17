@@ -111,7 +111,7 @@ private final class RemoteManagementViewController: NSViewController, NSWindowDe
     private let separatePushURL = NSButton(checkboxWithTitle: "Separate Push Url", target: nil, action: nil)
     private let pushURLField = NSComboBox()
     private let prefixField = NSTextField()
-    private let colorWell = NSColorWell()
+    private let colorWell = RemoteColorWell()
     private let resetColorButton = NSButton(title: "Default color", target: nil, action: nil)
     private let urlLabel = NSTextField(labelWithString: "Url")
     private var pushURLRow: NSGridRow?
@@ -119,7 +119,7 @@ private final class RemoteManagementViewController: NSViewController, NSWindowDe
     private var prefixRow: NSGridRow?
     private let advancedButton = NSButton()
     private let remoteEditorBox = NSBox()
-    private let saveButton = NSButton()
+    private let saveButton = LeadingImageButton()
     private let deleteButton = NSButton()
     private let toggleButton = NSButton()
     private let status = NSTextField(labelWithString: "")
@@ -155,14 +155,14 @@ private final class RemoteManagementViewController: NSViewController, NSWindowDe
             combo.isEditable = true
             combo.completes = true
             combo.numberOfVisibleItems = 12
-            combo.addItems(withObjectValues: AppSettingsStore.shared.remoteManagementPreferences.recentURLs)
+            combo.addItems(withObjectValues: AppSettingsStore.shared.remoteRepositoryHistory)
         }
         tabs.translatesAutoresizingMaskIntoConstraints = false
         tabs.addTabViewItem(NSTabViewItem(identifier: "remotes"))
         tabs.tabViewItem(at: 0).label = "Remote repositories"
         tabs.tabViewItem(at: 0).view = makeRemotesPage()
         tabs.addTabViewItem(NSTabViewItem(identifier: "tracking"))
-        tabs.tabViewItem(at: 1).label = "Default pull behavior (fetch && merge)"
+        tabs.tabViewItem(at: 1).label = "Default pull behavior (fetch & merge)"
         tabs.tabViewItem(at: 1).view = makeTrackingPage()
         status.textColor = .secondaryLabelColor
         status.font = AppSettingsStore.shared.applicationFont(size: 10.5)
@@ -249,12 +249,12 @@ private final class RemoteManagementViewController: NSViewController, NSWindowDe
         box.boxType = .primary
         separatePushURL.target = self
         separatePushURL.action = #selector(separatePushChanged)
-        let browseURL = NSButton(title: "Browse…", target: self, action: #selector(browseRemoteURL))
+        let browseURL = LeadingImageButton(title: "Browse…", target: self, action: #selector(browseRemoteURL))
         browseURL.image = AppKitFactory.resourceImage("FolderClosed", accessibilityDescription: "Browse")
-        browseURL.imagePosition = .imageLeading
-        let browsePushURL = NSButton(title: "Browse…", target: self, action: #selector(browsePushRemoteURL))
+        browseURL.imagePosition = .imageLeft
+        let browsePushURL = LeadingImageButton(title: "Browse…", target: self, action: #selector(browsePushRemoteURL))
         browsePushURL.image = AppKitFactory.resourceImage("FolderClosed", accessibilityDescription: "Browse")
-        browsePushURL.imagePosition = .imageLeading
+        browsePushURL.imagePosition = .imageLeft
         let urlRow = NSStackView(views: [urlField, browseURL])
         urlRow.spacing = 8
         urlField.setContentHuggingPriority(.defaultLow, for: .horizontal)
@@ -292,7 +292,7 @@ private final class RemoteManagementViewController: NSViewController, NSWindowDe
         advancedButton.action = #selector(toggleAdvancedOptions)
         saveButton.title = "Save changes"
         saveButton.image = NSImage(systemSymbolName: "externaldrive.fill.badge.checkmark", accessibilityDescription: "Save")
-        saveButton.imagePosition = .imageLeading
+        saveButton.imagePosition = .imageLeft
         saveButton.target = self
         saveButton.action = #selector(saveRemote)
         saveButton.keyEquivalent = "\r"
@@ -377,13 +377,15 @@ private final class RemoteManagementViewController: NSViewController, NSWindowDe
         page.addSubview(details)
         page.addSubview(scroll)
         NSLayoutConstraint.activate([
-            details.leadingAnchor.constraint(equalTo: page.leadingAnchor, constant: 12),
-            details.trailingAnchor.constraint(equalTo: page.trailingAnchor, constant: -12),
-            details.topAnchor.constraint(equalTo: page.topAnchor, constant: 12),
             scroll.leadingAnchor.constraint(equalTo: page.leadingAnchor, constant: 12),
             scroll.trailingAnchor.constraint(equalTo: page.trailingAnchor, constant: -12),
-            scroll.topAnchor.constraint(equalTo: details.bottomAnchor, constant: 10),
-            scroll.bottomAnchor.constraint(equalTo: page.bottomAnchor, constant: -12)
+            scroll.topAnchor.constraint(equalTo: page.topAnchor, constant: 12),
+            details.leadingAnchor.constraint(equalTo: page.leadingAnchor, constant: 12),
+            details.trailingAnchor.constraint(equalTo: page.trailingAnchor, constant: -12),
+            details.topAnchor.constraint(equalTo: scroll.bottomAnchor, constant: 10),
+            details.bottomAnchor.constraint(equalTo: page.bottomAnchor, constant: -12),
+            detailsGrid.widthAnchor.constraint(equalTo: details.widthAnchor),
+            saveRow.widthAnchor.constraint(equalTo: details.widthAnchor)
         ])
         return page
     }
@@ -487,7 +489,7 @@ private final class RemoteManagementViewController: NSViewController, NSWindowDe
     private func show(_ remote: RepositoryRemoteConfiguration) {
         selected = remote
         isCreating = false
-        remoteEditorBox.title = "Edit Remote Details"
+        setEditorTitle("Edit Remote Details")
         nameField.stringValue = remote.name
         urlField.stringValue = remote.fetchURL
         pushURLField.stringValue = remote.pushURL ?? ""
@@ -505,10 +507,17 @@ private final class RemoteManagementViewController: NSViewController, NSWindowDe
         updateSaveButtonState()
     }
 
+    private func setEditorTitle(_ title: String) {
+        remoteEditorBox.title = title
+        remoteEditorBox.titleFont = remoteEditorBox.titleFont
+        remoteEditorBox.needsLayout = true
+        remoteEditorBox.needsDisplay = true
+    }
+
     private func beginNewRemote() {
         selected = nil
         isCreating = true
-        remoteEditorBox.title = "Create New Remote"
+        setEditorTitle("Create New Remote")
         outline.deselectAll(nil)
         [nameField, urlField, pushURLField, prefixField].forEach { $0.stringValue = ""; $0.isEnabled = true }
         separatePushURL.state = .off
@@ -621,6 +630,7 @@ private final class RemoteManagementViewController: NSViewController, NSWindowDe
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         mutate("Deleting remote…", selectingRemote: nil, selectingLocalBranch: nil, selectingTab: .remotes) { [source] in
             try await source.deleteRemote(named: selected.name, disabled: selected.isDisabled)
+            await MainActor.run { AppSettingsStore.shared.deleteRemoteURLHistory(selected.fetchURL) }
         }
     }
 
@@ -856,9 +866,8 @@ private final class RemoteManagementViewController: NSViewController, NSWindowDe
     private func populateGeneratedURLs(in combo: NSComboBox, usesPushURL: Bool) {
         let current = combo.stringValue
         let enteredName = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        let genericNames: Set<String> = ["origin", "upstream", "fork", "remote", "internal"]
-        let replacement = enteredName.isEmpty || genericNames.contains(enteredName) ? "TO_REPLACE" : enteredName
-        let recentURLs = AppSettingsStore.shared.remoteManagementPreferences.recentURLs
+        let replacement = RemoteURLSuggestions.replacementName(enteredName, customGenericNames: AppSettingsStore.shared.customGenericRemoteNames)
+        let recentURLs = AppSettingsStore.shared.remoteRepositoryHistory
         var generated = Set<String>()
         for remote in configurations {
             let value = usesPushURL ? (remote.pushURL ?? remote.fetchURL) : remote.fetchURL
@@ -926,5 +935,25 @@ extension NSColor {
     var hexString: String? {
         guard alphaComponent > 0, let rgb = usingColorSpace(.deviceRGB) else { return nil }
         return String(format: "#%02X%02X%02X", Int(rgb.redComponent * 255), Int(rgb.greenComponent * 255), Int(rgb.blueComponent * 255))
+    }
+}
+
+enum RemoteURLSuggestions {
+    static func replacementName(_ name: String, customGenericNames: [String]) -> String {
+        let generic = Set(["origin", "upstream", "fork", "remote", "internal"] + customGenericNames)
+        return name.isEmpty || generic.contains(name) ? "TO_REPLACE" : name
+    }
+}
+
+final class RemoteColorWell: NSColorWell {
+    static var themeColor: NSColor { ApplicationColors.color("RemoteBranch", fallback: .systemRed) }
+
+    var isUnset: Bool { color.alphaComponent == 0 }
+
+    override func activate(_ exclusive: Bool) {
+        let unset = isUnset
+        super.activate(exclusive)
+        NSColorPanel.shared.showsAlpha = false
+        if unset { NSColorPanel.shared.color = Self.themeColor }
     }
 }

@@ -36,6 +36,27 @@ package protocol RepositoryBisectingDataSource: RepositoryMutationStateDataSourc
     func startBisect() async throws -> RepositoryMutationResult
     func markBisect(_ mark: RepositoryBisectMark, revisions: [ObjectID]) async throws -> RepositoryMutationResult
     func resetBisect() async throws -> RepositoryMutationResult
+    func startBisect(output: @escaping GitOutputHandler) async throws -> RepositoryMutationResult
+    func markBisect(_ mark: RepositoryBisectMark, revisions: [ObjectID], output: @escaping GitOutputHandler) async throws -> RepositoryMutationResult
+    func resetBisect(output: @escaping GitOutputHandler) async throws -> RepositoryMutationResult
+}
+
+package extension RepositoryBisectingDataSource {
+    func startBisect(output: @escaping GitOutputHandler) async throws -> RepositoryMutationResult {
+        let result = try await startBisect()
+        output(GitOutputEvent(stream: .standardOutput, data: Data((result.message + "\n").utf8)))
+        return result
+    }
+    func markBisect(_ mark: RepositoryBisectMark, revisions: [ObjectID], output: @escaping GitOutputHandler) async throws -> RepositoryMutationResult {
+        let result = try await markBisect(mark, revisions: revisions)
+        output(GitOutputEvent(stream: .standardOutput, data: Data((result.message + "\n").utf8)))
+        return result
+    }
+    func resetBisect(output: @escaping GitOutputHandler) async throws -> RepositoryMutationResult {
+        let result = try await resetBisect()
+        output(GitOutputEvent(stream: .standardOutput, data: Data((result.message + "\n").utf8)))
+        return result
+    }
 }
 
 package enum GitBisectCommands {
@@ -66,7 +87,9 @@ extension GitRepositoryModule: RepositoryBisectingDataSource {
         return try await bisectState(in: repository)
     }
 
-    package func startBisect() async throws -> RepositoryMutationResult {
+    package func startBisect() async throws -> RepositoryMutationResult { try await startBisect(output: { _ in }) }
+
+    package func startBisect(output: @escaping GitOutputHandler) async throws -> RepositoryMutationResult {
         let repository = try mutationRepository()
         guard !(try await bisectState(in: repository)).isActive else {
             throw RepositoryBisectError.alreadyInProgress
@@ -74,14 +97,16 @@ extension GitRepositoryModule: RepositoryBisectingDataSource {
         return try await executeBisect(
             GitBisectCommands.start,
             in: repository,
-            successMessage: "Bisect started."
+            successMessage: "Bisect started.", output: output
         )
     }
 
     package func markBisect(
         _ mark: RepositoryBisectMark,
         revisions: [ObjectID] = []
-    ) async throws -> RepositoryMutationResult {
+    ) async throws -> RepositoryMutationResult { try await markBisect(mark, revisions: revisions, output: { _ in }) }
+
+    package func markBisect(_ mark: RepositoryBisectMark, revisions: [ObjectID], output: @escaping GitOutputHandler) async throws -> RepositoryMutationResult {
         let repository = try mutationRepository()
         guard (try await bisectState(in: repository)).isActive else {
             throw RepositoryBisectError.notInProgress
@@ -91,11 +116,13 @@ extension GitRepositoryModule: RepositoryBisectingDataSource {
         return try await executeBisect(
             GitBisectCommands.mark(mark, revisions: revisions),
             in: repository,
-            successMessage: "Marked \(target) as \(mark.rawValue)."
+            successMessage: "Marked \(target) as \(mark.rawValue).", output: output
         )
     }
 
-    package func resetBisect() async throws -> RepositoryMutationResult {
+    package func resetBisect() async throws -> RepositoryMutationResult { try await resetBisect(output: { _ in }) }
+
+    package func resetBisect(output: @escaping GitOutputHandler) async throws -> RepositoryMutationResult {
         let repository = try mutationRepository()
         guard (try await bisectState(in: repository)).isActive else {
             throw RepositoryBisectError.notInProgress
@@ -103,17 +130,18 @@ extension GitRepositoryModule: RepositoryBisectingDataSource {
         return try await executeBisect(
             GitBisectCommands.reset,
             in: repository,
-            successMessage: "Bisect stopped."
+            successMessage: "Bisect stopped.", output: output
         )
     }
 
     private func executeBisect(
         _ command: GitCommand,
         in repository: ResolvedGitRepository,
-        successMessage: String
+        successMessage: String,
+        output: @escaping GitOutputHandler
     ) async throws -> RepositoryMutationResult {
         let before = await bisectFingerprint(in: repository)
-        let result = try await git.run(command, in: repository.rootURL)
+        let result = try await git.runStreaming(command, in: repository.rootURL, output: output)
         let after = await bisectFingerprint(in: repository)
         guard result.succeeded || before != after else { throw commandError(from: result) }
 

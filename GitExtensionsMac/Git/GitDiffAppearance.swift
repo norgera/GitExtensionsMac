@@ -209,16 +209,27 @@ package enum GitDiffAppearance {
         return colorConfiguration(configured: configured, reverse: reverse) + arguments
     }
 
-    package static func parseColoredPatch(_ output: Data, file: ChangedFile, contentEncoding: String.Encoding = .utf8) -> FileDiff? {
+    package static func parseColoredPatch(_ output: Data, file: ChangedFile, contentEncoding: String.Encoding = .utf8, reverse: Bool = true) -> FileDiff? {
         let parsed = AnsiEscapeParser.parse(GitOutputParser.decodeDiff(output, contentEncoding: contentEncoding))
         guard let diff = GitOutputParser.parseUnifiedDiff(text: parsed.text, files: [file], contentEncoding: contentEncoding)[file.id] else { return nil }
-        var start = 0
+        var start = GitOutputParser.diffSection(parsed.text, file: file).offset
         let lines = diff.lines.map { line -> DiffLine in
-            let prefix = [.context, .addition, .deletion].contains(line.kind) && !line.text.hasPrefix("\\ No newline") ? 1 : 0
+            let prefix = line.diffPrefix?.utf16.count ?? 0
             let length = (line.text as NSString).length
             let styles = clip(parsed.styles, start: start + prefix, length: length)
             start += length + prefix + 1
-            return DiffLine(id: line.id, oldLineNumber: line.oldLineNumber, newLineNumber: line.newLineNumber, kind: line.kind, text: line.text, styles: styles)
+            func matches(_ style: DiffTextStyle) -> Bool {
+                guard case .palette(let id, _)? = reverse ? style.background : style.foreground else { return false }
+                return id & 7 == (line.kind == .deletion ? 1 : 2)
+            }
+            let lastWhitespace = styles.last.map { style in
+                (line.text as NSString).substring(with: NSRange(location: style.location, length: style.length)).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            } ?? false
+            let moved = line.isChange && !styles.isEmpty && !matches(styles[0])
+                && (styles.count <= 1 || !matches(styles[styles.count - 1]) || lastWhitespace)
+                && (styles.count <= 2 || !styles.dropFirst().dropLast().allSatisfy(matches))
+            return DiffLine(id: line.id, oldLineNumber: line.oldLineNumber, newLineNumber: line.newLineNumber, kind: line.kind, text: line.text,
+                            styles: styles, diffPrefix: line.diffPrefix, isMovedLine: moved, hunkRanges: line.hunkRanges)
         }
         return FileDiff(id: diff.id, fileID: file.id, lines: lines, contentEncoding: contentEncoding)
     }
@@ -247,13 +258,14 @@ package enum GitDiffAppearance {
 
     package static func parseWordDiff(_ output: Data, file: ChangedFile, contentEncoding: String.Encoding = .utf8) -> FileDiff {
         let parsed = AnsiEscapeParser.parse(GitOutputParser.decodeDiff(output, contentEncoding: contentEncoding))
+        let section = GitOutputParser.diffSection(parsed.text, file: file)
         let text = parsed.text as NSString
         var lines: [DiffLine] = []
         var left = 0
         var right = 0
         var headerFound = false
-        var lineStart = 0
-        var rawLines = parsed.text.components(separatedBy: "\n")
+        var lineStart = section.offset
+        var rawLines = section.text.components(separatedBy: "\n")
         if rawLines.last == "" { rawLines.removeLast() }
         for (index, rawLine) in rawLines.enumerated() {
             let fullLength = (rawLine as NSString).length
@@ -459,6 +471,7 @@ package enum GitDiffAppearance {
 
 package enum GitResetLinePatchBuilder {
     package static func patch(from diff: FileDiff, selecting lineIDs: Set<String>) -> Data? {
+        guard !diff.lines.contains(where: { ($0.diffPrefix?.count ?? 0) > 1 }) else { return nil }
         let selected = Set(diff.lines.filter { lineIDs.contains($0.id) && ($0.kind == .addition || $0.kind == .deletion) }.map(\.id))
         guard !selected.isEmpty, let firstHunk = diff.lines.firstIndex(where: { $0.kind == .hunk }) else { return nil }
         let hunkStarts = diff.lines.indices.filter { diff.lines[$0].kind == .hunk }

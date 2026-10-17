@@ -279,6 +279,7 @@ private final class ReflogViewController: NSViewController, NSWindowDelegate, NS
                 entries = loaded
                 table.sortDescriptors = []
                 table.reloadData()
+                AppKitFactory.autosizeColumns(table, ["sha", "ref", "action"])
                 if let selector, let index = loaded.firstIndex(where: { $0.selector == selector }) {
                     table.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
                 } else if !loaded.isEmpty {
@@ -311,6 +312,7 @@ private final class ReflogViewController: NSViewController, NSWindowDelegate, NS
         table.allowsMultipleSelection = false
         table.rowHeight = AppSettingsStore.shared.applicationRowHeight(minimum: 24)
         table.headerView?.frame.size.height = 30
+        table.columnAutoresizingStyle = .noColumnAutoresizing
         table.addTableColumn(column("sha", title: "SHA-1", width: 285))
         table.addTableColumn(column("ref", title: "Ref", width: 170))
         table.addTableColumn(column("action", title: "Action", width: 350))
@@ -337,7 +339,7 @@ private final class ReflogViewController: NSViewController, NSWindowDelegate, NS
         let column = NSTableColumn(identifier: .init(id))
         column.title = title
         column.width = width
-        column.minWidth = 60
+        column.minWidth = 20
         column.sortDescriptorPrototype = NSSortDescriptor(key: id, ascending: true)
         return column
     }
@@ -346,6 +348,7 @@ private final class ReflogViewController: NSViewController, NSWindowDelegate, NS
         let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
         item.target = self
         item.identifier = .init(key)
+        if let image = ["sha": "CommitId", "branch": "BranchCreate", "reset": "ResetCurrentBranchToHere"][key] { AppKitFactory.setMenuImage(image, for: item) }
         return item
     }
 
@@ -359,6 +362,25 @@ private final class ReflogViewController: NSViewController, NSWindowDelegate, NS
 
 private final class ReflogTableView: NSTableView {
     var prepareMenu: ((NSMenu) -> Void)?
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: bounds, options: [.activeInKeyWindow, .mouseMoved, .inVisibleRect], owner: self))
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        super.mouseMoved(with: event)
+        let row = self.row(at: convert(event.locationInWindow, from: nil))
+        if row >= 0, row != selectedRow { selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false) }
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        super.mouseDown(with: event)
+        guard row(at: convert(event.locationInWindow, from: nil)) >= 0, let menu else { return }
+        prepareMenu?(menu)
+        NSMenu.popUpContextMenu(menu, with: event, for: self)
+    }
 
     override func menu(for event: NSEvent) -> NSMenu? {
         let row = self.row(at: convert(event.locationInWindow, from: nil))

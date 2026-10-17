@@ -517,7 +517,7 @@ extension GitRepositoryModule: RepositoryRevisionGridDataSource {
         return AheadBehindData.parse(result.standardOutputString)
     }
 
-    package func superprojectInfo(branches: Bool, remoteBranches: Bool, tags: Bool) async -> SuperprojectInfo? {
+    package func superprojectLocation() async -> (superprojectURL: URL, path: String)? {
         guard let repository = resolvedRepository,
               let located = try? await git.run(SuperprojectInfo.Commands.superprojectWorkingTree, in: repository.rootURL), located.succeeded
         else { return nil }
@@ -526,7 +526,29 @@ extension GitRepositoryModule: RepositoryRevisionGridDataSource {
         let superURL = URL(fileURLWithPath: superPath).standardizedFileURL.resolvingSymlinksInPath()
         let root = repository.rootURL.standardizedFileURL.resolvingSymlinksInPath().path
         guard root.hasPrefix(superURL.path + "/") else { return nil }
-        let path = String(root.dropFirst(superURL.path.count + 1))
+        return (superURL, String(root.dropFirst(superURL.path.count + 1)))
+    }
+
+    package func loadSuperprojectSubmodule() async -> RepositorySuperprojectSubmodule? {
+        guard let location = await superprojectLocation(),
+              let result = try? await git.run(RepositorySuperprojectSubmodule.Commands.submodulePaths, in: location.superprojectURL),
+              result.succeeded,
+              RepositorySuperprojectSubmodule.registeredPaths(result.standardOutputString).contains(location.path)
+        else { return nil }
+        return RepositorySuperprojectSubmodule(superprojectURL: location.superprojectURL, path: location.path)
+    }
+
+    package func stageInSuperproject(_ submodule: RepositorySuperprojectSubmodule) async throws {
+        let result = try await git.run(RepositorySuperprojectSubmodule.Commands.stage(path: submodule.path), in: submodule.superprojectURL)
+        guard result.succeeded else {
+            throw GitError.commandFailed(arguments: result.arguments, status: result.exitStatus, stderr: result.standardErrorString)
+        }
+    }
+
+    package func superprojectInfo(branches: Bool, remoteBranches: Bool, tags: Bool) async -> SuperprojectInfo? {
+        guard let location = await superprojectLocation() else { return nil }
+        let superURL = location.superprojectURL
+        let path = location.path
         func run(_ command: GitCommand) async -> String? {
             guard let result = try? await git.run(command, in: superURL), result.succeeded else { return nil }
             return result.standardOutputString

@@ -4,6 +4,12 @@ import AppKit
 
 @MainActor
 enum PushDialog {
+    static let upstreamMinimumClientSize = NSSize(width: 584, height: 290)
+
+    static func minimumContentHeight(destination: CGFloat, tabHeader: CGFloat, tabContent: CGFloat, footer: CGFloat) -> CGFloat {
+        ceil(10 + destination + 6 + tabHeader + tabContent + 6 + 1 + footer + 8)
+    }
+
     static func present(
         source: any RepositoryPushingDataSource,
         context: RepositoryNetworkContext,
@@ -31,11 +37,12 @@ enum PushDialog {
         let window = NSWindow(contentViewController: controller)
         window.title = "Push (\(context.repository.path))"
         window.styleMask = [.titled, .closable, .resizable]
-        window.setContentSize(NSSize(width: 584, height: 290))
-        window.minSize = NSSize(width: 600, height: 329)
         window.isReleasedWhenClosed = false
         window.delegate = controller
         controller.window = window
+        controller.applyMinimumContentSize(growWindow: false)
+        window.setContentSize(NSSize(width: max(PushDialog.upstreamMinimumClientSize.width, window.contentMinSize.width),
+                                     height: max(PushDialog.upstreamMinimumClientSize.height, window.contentMinSize.height)))
         controller.onClose = onClose
         controller.onCompletion = onCompletion
         let windowController = NSWindowController(window: window)
@@ -53,6 +60,38 @@ private final class PushDialogViewController: NSViewController,
     private static let head = "HEAD"
 
     weak var window: NSWindow?
+    private var destinationView: NSView?
+    private var footerView: NSView?
+    private var branchRowView: NSView?
+
+    func minimumContentSize() -> NSSize {
+        view.layoutSubtreeIfNeeded()
+        let tabHeader = max(0, tabs.frame.height - tabs.contentRect.height)
+        let tabContent: CGFloat
+        if (tabs.selectedTabViewItem?.identifier as? String ?? "branches") == "branches" {
+            let options = advancedOptions.isHidden ? showOptionsButton.fittingSize.height : advancedOptions.fittingSize.height + 3
+            tabContent = 8 + (branchRowView?.fittingSize.height ?? 0) + 3 + options
+        } else {
+            tabContent = tabs.selectedTabViewItem?.view?.fittingSize.height ?? 0
+        }
+        let height = PushDialog.minimumContentHeight(destination: destinationView?.fittingSize.height ?? 0, tabHeader: tabHeader,
+                                                     tabContent: tabContent, footer: footerView?.fittingSize.height ?? 0)
+        return NSSize(width: max(PushDialog.upstreamMinimumClientSize.width, ceil(view.fittingSize.width)),
+                      height: max(PushDialog.upstreamMinimumClientSize.height, height))
+    }
+
+    func applyMinimumContentSize(growWindow: Bool) {
+        guard let window else { return }
+        let minimum = minimumContentSize()
+        window.contentMinSize = minimum
+        guard growWindow else { return }
+        let content = window.contentRect(forFrameRect: window.frame)
+        guard content.width < minimum.width || content.height < minimum.height else { return }
+        let grown = NSRect(x: content.minX, y: content.minY, width: max(content.width, minimum.width), height: max(content.height, minimum.height))
+        var frame = window.frameRect(forContentRect: grown)
+        frame.origin.y = window.frame.maxY - frame.height
+        window.setFrame(frame, display: true)
+    }
     var onClose: (() -> Void)?
     var onCompletion: ((Bool) -> Void)?
 
@@ -79,7 +118,7 @@ private final class PushDialogViewController: NSViewController,
     private let urlChoice = NSButton(radioButtonWithTitle: "Url", target: nil, action: nil)
     private let remoteCombo = NSComboBox()
     private let destinationCombo = NSComboBox()
-    private let manageRemotesButton = NSButton(title: "Manage remotes", target: nil, action: nil)
+    private let manageRemotesButton = LeadingImageButton(title: "Manage remotes", target: nil, action: nil)
     private let browseButton = NSButton(title: "Browse…", target: nil, action: nil)
     private let tabs = NSTabView()
     private let localBranchCombo = NSComboBox()
@@ -96,7 +135,7 @@ private final class PushDialogViewController: NSViewController,
     private let branchTable = NSTableView()
     private var branchRows: [PushBranchRow] = []
     private let pullButton = NSButton(title: "Pull", target: nil, action: nil)
-    private let pushButton = NSButton(title: "Push", target: nil, action: nil)
+    private let pushButton = LeadingImageButton(title: "Push", target: nil, action: nil)
     private let statusLabel = NSTextField(labelWithString: "Loading repository state…")
 
     init(
@@ -131,6 +170,8 @@ private final class PushDialogViewController: NSViewController,
         let separator = NSBox()
         separator.boxType = .separator
         let footer = makeFooter()
+        destinationView = destination
+        footerView = footer
         for child in [destination, tabView, separator, footer] {
             child.translatesAutoresizingMaskIntoConstraints = false
             root.addSubview(child)
@@ -139,7 +180,7 @@ private final class PushDialogViewController: NSViewController,
             destination.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12),
             destination.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12),
             destination.topAnchor.constraint(equalTo: root.topAnchor, constant: 10),
-            destination.heightAnchor.constraint(equalToConstant: 80),
+            destination.heightAnchor.constraint(greaterThanOrEqualToConstant: 80),
             tabView.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12),
             tabView.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12),
             tabView.topAnchor.constraint(equalTo: destination.bottomAnchor, constant: 6),
@@ -150,7 +191,7 @@ private final class PushDialogViewController: NSViewController,
             footer.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 11),
             footer.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12),
             footer.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -8),
-            footer.heightAnchor.constraint(equalToConstant: 34)
+            footer.heightAnchor.constraint(greaterThanOrEqualToConstant: 34)
         ])
         view = root
         configureActions()
@@ -174,16 +215,19 @@ private final class PushDialogViewController: NSViewController,
         destinationCombo.isEditable = true
         destinationCombo.completes = true
         destinationCombo.delegate = self
-        destinationCombo.addItems(withObjectValues: settings.pushPreferences.recentURLs)
+        destinationCombo.addItems(withObjectValues: settings.remoteRepositoryHistory)
         manageRemotesButton.image = AppKitFactory.resourceImage("Remotes", accessibilityDescription: "Manage remotes")
-        manageRemotesButton.imagePosition = .imageLeading
+        manageRemotesButton.imagePosition = .imageLeft
         let grid = NSGridView(views: [
             [remoteChoice, remoteCombo, manageRemotesButton],
             [urlChoice, destinationCombo, browseButton]
         ])
         grid.column(at: 0).width = 106
-        grid.column(at: 1).width = 262
-        grid.column(at: 2).width = 150
+        for combo in [remoteCombo, destinationCombo] {
+            combo.widthAnchor.constraint(greaterThanOrEqualToConstant: 262).isActive = true
+            combo.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        }
+        grid.column(at: 2).width = AppKitFactory.buttonColumnWidth(minimum: 150, [manageRemotesButton, browseButton])
         grid.column(at: 1).xPlacement = .fill
         grid.column(at: 2).xPlacement = .fill
         grid.rowSpacing = 5
@@ -221,10 +265,14 @@ private final class PushDialogViewController: NSViewController,
         branchLabel.alignment = .left
         let toLabel = NSTextField(labelWithString: "to")
         let branchRow = NSGridView(views: [[branchLabel, localBranchCombo, toLabel, remoteBranchCombo]])
+        branchRowView = branchRow
         branchRow.column(at: 0).width = 110
-        branchRow.column(at: 1).width = 197
         branchRow.column(at: 2).width = 20
-        branchRow.column(at: 3).width = 197
+        for combo in [localBranchCombo, remoteBranchCombo] {
+            combo.widthAnchor.constraint(greaterThanOrEqualToConstant: 150).isActive = true
+            combo.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        }
+        localBranchCombo.widthAnchor.constraint(equalTo: remoteBranchCombo.widthAnchor).isActive = true
         branchRow.column(at: 1).xPlacement = .fill
         branchRow.column(at: 3).xPlacement = .fill
         branchRow.columnSpacing = 4
@@ -338,7 +386,6 @@ private final class PushDialogViewController: NSViewController,
         menu.addItem(withTitle: "Select tracked", action: #selector(selectTrackedRows), keyEquivalent: "")
         menu.addItem(withTitle: "Select all", action: #selector(selectAllRows), keyEquivalent: "")
         menu.items.forEach { $0.target = self }
-        branchTable.menu = menu
         let header = PushBranchHeaderView()
         header.pushSelectionMenu = menu
         branchTable.headerView = header
@@ -354,7 +401,7 @@ private final class PushDialogViewController: NSViewController,
         pullButton.widthAnchor.constraint(equalToConstant: 101).isActive = true
         pushButton.widthAnchor.constraint(equalToConstant: 101).isActive = true
         pushButton.image = AppKitFactory.resourceImage("ArrowUp", accessibilityDescription: "Push")
-        pushButton.imagePosition = .imageLeading
+        pushButton.imagePosition = .imageLeft
         pushButton.keyEquivalent = "\r"
         statusLabel.textColor = .secondaryLabelColor
         statusLabel.font = AppSettingsStore.shared.applicationFont(size: 10.5)
@@ -631,6 +678,7 @@ private final class PushDialogViewController: NSViewController,
     }
 
     func tabView(_ tabView: NSTabView, didSelect tabViewItem: NSTabViewItem?) {
+        applyMinimumContentSize(growWindow: true)
         switch tabViewItem?.identifier as? String {
         case "tags": populateTags()
         case "multiple": populateMultipleBranches()
@@ -673,11 +721,7 @@ private final class PushDialogViewController: NSViewController,
     private func setAdvancedOptionsVisible(_ visible: Bool, resize: Bool) {
         advancedOptions.isHidden = !visible
         showOptionsButton.isHidden = visible
-        guard visible, resize, let window, window.frame.height < window.minSize.height + 50 else { return }
-        var frame = window.frame
-        frame.origin.y -= 50
-        frame.size.height += 50
-        window.setFrame(frame, display: true)
+        applyMinimumContentSize(growWindow: resize)
     }
 
     @objc private func forceWithLeaseChanged() {
@@ -1055,9 +1099,7 @@ private final class PushDialogViewController: NSViewController,
         let box = NSBox()
         box.title = title
         box.titlePosition = .atTop
-        box.boxType = .custom
-        box.borderWidth = 1
-        box.cornerRadius = 0
+        box.boxType = .primary
         content.translatesAutoresizingMaskIntoConstraints = false
         box.contentView?.addSubview(content)
         if let holder = box.contentView {
@@ -1146,6 +1188,12 @@ private final class PushBranchHeaderView: NSTableHeaderView {
         }
         super.mouseDown(with: event)
     }
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let columnIndex = column(at: convert(event.locationInWindow, from: nil))
+        guard columnIndex >= 0, tableView?.tableColumns[columnIndex].identifier.rawValue == "push" else { return nil }
+        return pushSelectionMenu
+    }
 }
 
 private extension String {
@@ -1176,11 +1224,12 @@ enum RemoteBranchDeleteDialog {
         controller.scriptHooks = scriptHooks
         window.title = "Delete branch"
         window.styleMask = [.titled, .closable]
-        window.setContentSize(NSSize(width: 403, height: 150))
+        window.setContentSize(NSSize(width: 403, height: 139))
         window.contentMinSize = NSSize(width: 403, height: 102)
         window.isReleasedWhenClosed = false
         window.delegate = controller
         controller.window = window
+        OwnedModalWindow.center(window, over: OwnedModalWindow.defaultOwner)
         let windowController = NSWindowController(window: window)
         windowController.showWindow(nil)
         window.makeKeyAndOrderFront(nil)
@@ -1189,7 +1238,7 @@ enum RemoteBranchDeleteDialog {
 }
 
 @MainActor
-private final class RemoteBranchDeleteViewController: NSViewController, NSWindowDelegate {
+final class RemoteBranchDeleteViewController: NSViewController, NSWindowDelegate, NSComboBoxDelegate {
     var scriptHooks: ApplicationScriptHooks?
     weak var window: NSWindow?
     private let source: any RepositoryPushingDataSource
@@ -1197,11 +1246,12 @@ private final class RemoteBranchDeleteViewController: NSViewController, NSWindow
     private let initialBranch: String
     private let onRepositoryChanged: (RevisionID?) -> Void
     private let onClose: () -> Void
-    private let branchesButton = NSPopUpButton()
+    private let branchesSelector = NSComboBox()
+    private var multipleSelectionPanel: NSPanel?
+    private var multipleSelectionController: MultipleBranchSelectionViewController?
     private let deleteRemote = NSButton(checkboxWithTitle: "Delete branch(es) from remote repository", target: nil, action: nil)
     private let deleteTracking = NSButton(checkboxWithTitle: "Delete local tracking branch (if available)", target: nil, action: nil)
     private let trackingCandidates = NSTextField(wrappingLabelWithString: "")
-    private let status = NSTextField(labelWithString: "Loading branches…")
     private let deleteButton = NSButton(title: "Delete", target: nil, action: nil)
     private var state: RepositoryPushState?
     private var mergedRemoteBranches: Set<String> = []
@@ -1227,12 +1277,24 @@ private final class RemoteBranchDeleteViewController: NSViewController, NSWindow
     required init?(coder: NSCoder) { nil }
     deinit { task?.cancel() }
 
+    static let helpURL = URL(string: ApplicationShellLinks.documentationURL.absoluteString + "branches#delete-branch")!
+
     override func loadView() {
         let root = NSView()
-        branchesButton.setAccessibilityLabel("Select remote branches")
-        branchesButton.autoenablesItems = false
-        branchesButton.target = self
-        branchesButton.action = #selector(branchSelectionChanged(_:))
+        branchesSelector.setAccessibilityIdentifier("DeleteRemoteBranch.Branches")
+        branchesSelector.setAccessibilityLabel("Select branches")
+        branchesSelector.completes = true
+        branchesSelector.delegate = self
+        let multiple = NSButton(title: "…", target: self, action: #selector(selectMultipleBranches))
+        multiple.setAccessibilityLabel("Select multiple branches")
+        multiple.toolTip = "Select multiple branches"
+        multiple.image = AppKitFactory.resourceImage("SelectBranch", accessibilityDescription: "Select multiple branches")
+        multiple.imagePosition = .imageOnly
+        multiple.widthAnchor.constraint(equalToConstant: 28).isActive = true
+        let selectorRow = NSStackView(views: [branchesSelector, multiple])
+        selectorRow.orientation = .horizontal
+        selectorRow.spacing = 4
+        selectorRow.alignment = .centerY
         deleteRemote.target = self
         deleteRemote.action = #selector(deleteOptionsChanged)
         deleteTracking.target = self
@@ -1243,26 +1305,27 @@ private final class RemoteBranchDeleteViewController: NSViewController, NSWindow
         deleteButton.keyEquivalent = "\r"
         deleteButton.isEnabled = false
         deleteButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 75).isActive = true
-        status.textColor = .secondaryLabelColor
-        status.font = AppSettingsStore.shared.applicationFont(size: 10.5)
         trackingCandidates.font = AppSettingsStore.shared.applicationFont(size: 11)
-        trackingCandidates.textColor = .secondaryLabelColor
-
         let label = NSTextField(labelWithString: "Select branches")
-        let branchRow = NSGridView(views: [[label, branchesButton]])
-        branchRow.column(at: 0).width = 89
-        branchRow.columnSpacing = 0
-        let options = NSStackView(views: [deleteRemote, deleteTracking, trackingCandidates])
-        options.orientation = .vertical
-        options.alignment = .leading
-        options.spacing = 3
-        let body = NSStackView(views: [branchRow, options])
-        body.orientation = .vertical
-        body.alignment = .leading
-        body.spacing = 3
+        label.setContentCompressionResistancePriority(.required, for: .horizontal)
+        let body = NSGridView(views: [
+            [label, selectorRow],
+            [NSGridCell.emptyContentView, deleteRemote],
+            [NSGridCell.emptyContentView, deleteTracking],
+            [NSGridCell.emptyContentView, trackingCandidates]
+        ])
+        body.columnSpacing = 6
+        body.rowSpacing = 3
+        body.column(at: 0).xPlacement = .leading
+        body.column(at: 1).xPlacement = .fill
+        body.row(at: 0).yPlacement = .center
+        let help = NSButton(title: "", target: self, action: #selector(openHelp))
+        help.bezelStyle = .helpButton
+        help.setAccessibilityLabel("Help")
+        help.toolTip = "Help"
         let spacer = NSView()
         spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let footer = NSStackView(views: [status, spacer, deleteButton])
+        let footer = NSStackView(views: [help, spacer, deleteButton])
         footer.orientation = .horizontal
         footer.alignment = .centerY
         footer.spacing = 8
@@ -1276,7 +1339,7 @@ private final class RemoteBranchDeleteViewController: NSViewController, NSWindow
             body.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 9),
             body.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -9),
             body.topAnchor.constraint(equalTo: root.topAnchor, constant: 9),
-            branchesButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 290),
+            branchesSelector.widthAnchor.constraint(greaterThanOrEqualToConstant: 160),
             separator.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             separator.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             separator.bottomAnchor.constraint(equalTo: footer.topAnchor, constant: -3),
@@ -1290,9 +1353,11 @@ private final class RemoteBranchDeleteViewController: NSViewController, NSWindow
         loadState()
     }
 
+    @objc private func openHelp() { NSWorkspace.shared.open(Self.helpURL) }
+
     override func viewDidAppear() {
         super.viewDidAppear()
-        view.window?.makeFirstResponder(branchesButton)
+        view.window?.makeFirstResponder(branchesSelector)
     }
 
     private func loadState() {
@@ -1312,52 +1377,66 @@ private final class RemoteBranchDeleteViewController: NSViewController, NSWindow
                 }
                 populateBranches()
                 updateTrackingCandidates()
-                status.stringValue = "Ready"
                 task = nil
+                deleteOptionsChanged()
             } catch is CancellationError {
                 return
             } catch {
-                status.stringValue = error.localizedDescription
                 task = nil
+                if let window { await showError(error, window: window) }
             }
         }
     }
 
-    private func populateBranches() {
-        branchesButton.removeAllItems()
-        guard let state else { return }
-        for branch in state.remoteBranches.sorted(by: {
-            ("\($0.remote)/\($0.name)").localizedStandardCompare("\($1.remote)/\($1.name)") == .orderedAscending
-        }) {
-            let fullName = "\(branch.remote)/\(branch.name)"
-            branchesButton.addItem(withTitle: fullName)
-            guard let item = branchesButton.lastItem else { continue }
-            item.representedObject = fullName
-            item.state = selectedBranches.contains(fullName) ? .on : .off
+    private var selectableBranches: [Branch] {
+        (state?.remoteBranches ?? []).map {
+            let name = "\($0.remote)/\($0.name)"
+            return Branch(id: "refs/remotes/" + name, name: name, commitID: $0.objectID, isCurrent: false, isRemote: true, remoteName: $0.remote, ahead: 0, behind: 0)
         }
-        updateBranchButtonTitle()
     }
 
-    @objc private func branchSelectionChanged(_ sender: NSPopUpButton) {
-        guard let fullName = sender.selectedItem?.representedObject as? String else { return }
-        if selectedBranches.contains(fullName) { selectedBranches.remove(fullName) }
-        else { selectedBranches.insert(fullName) }
-        for item in sender.itemArray {
-            guard let name = item.representedObject as? String else { continue }
-            item.state = selectedBranches.contains(name) ? .on : .off
-        }
-        updateBranchButtonTitle()
+    private func populateBranches() {
+        branchesSelector.removeAllItems()
+        branchesSelector.addItems(withObjectValues: selectableBranches.map(\.name))
+        branchesSelector.stringValue = selectableBranches.map(\.name).filter(selectedBranches.contains).joined(separator: " ")
+    }
+
+    func controlTextDidChange(_ notification: Notification) {
+        updateSelectedBranches()
+    }
+
+    func comboBoxSelectionDidChange(_ notification: Notification) {
+        DispatchQueue.main.async { [weak self] in self?.updateSelectedBranches() }
+    }
+
+    private func updateSelectedBranches() {
+        let names = Set(selectableBranches.map(\.name))
+        selectedBranches = Set(branchesSelector.stringValue.split(separator: " ").map(String.init).filter(names.contains))
         updateTrackingCandidates()
     }
 
-    private func updateBranchButtonTitle() {
-        let names = selectedBranches.sorted()
-        branchesButton.title = switch names.count {
-        case 0: "Select branches…"
-        case 1: names[0]
-        default: "\(names.count) branches selected"
+    @objc private func selectMultipleBranches() {
+        guard let window, multipleSelectionPanel == nil, state != nil else { return }
+        updateSelectedBranches()
+        let controller = MultipleBranchSelectionViewController(branches: selectableBranches, selected: selectedBranches)
+        let child = NSPanel(contentViewController: controller)
+        child.title = "Select multiple branches"
+        child.styleMask = [.titled, .closable, .resizable]
+        child.setContentSize(NSSize(width: 263, height: 252))
+        child.minSize = NSSize(width: 200, height: 200)
+        child.isReleasedWhenClosed = false
+        controller.panel = child
+        controller.onClose = { [weak self, weak window, weak child, weak controller] _ in
+            guard let self, let window, let child, let controller else { return }
+            window.endSheet(child)
+            self.branchesSelector.stringValue = controller.branches.map(\.name).filter(controller.selected.contains).joined(separator: " ")
+            self.multipleSelectionPanel = nil
+            self.multipleSelectionController = nil
+            self.updateSelectedBranches()
         }
-        deleteOptionsChanged()
+        multipleSelectionPanel = child
+        multipleSelectionController = controller
+        window.beginSheet(child)
     }
 
     private func localTrackingCandidates() -> [String] {
@@ -1386,7 +1465,7 @@ private final class RemoteBranchDeleteViewController: NSViewController, NSWindow
 
     private func resizeForCandidates(_ count: Int) {
         guard let window else { return }
-        let desiredHeight = CGFloat(150 + min(count, 8) * 15 + (count > 0 ? 15 : 0))
+        let desiredHeight = CGFloat(139 + min(count, 8) * 15 + (count > 0 ? 15 : 0))
         guard abs(window.contentLayoutRect.height - desiredHeight) > 1 else { return }
         var frame = window.frame
         let delta = desiredHeight - window.contentLayoutRect.height
@@ -1396,13 +1475,22 @@ private final class RemoteBranchDeleteViewController: NSViewController, NSWindow
     }
 
     @objc private func deleteOptionsChanged() {
-        deleteButton.isEnabled = deleteRemote.state == .on && !selectedBranches.isEmpty && task == nil
+        deleteButton.isEnabled = deleteRemote.state == .on && task == nil && state != nil
     }
 
     @objc private func deleteSelectedBranches() {
-        guard task == nil, let window, state != nil else { return }
+        guard task == nil, let window, state != nil, deleteRemote.state == .on else { return }
+        updateSelectedBranches()
         task = Task { @MainActor [weak self, weak window] in
             guard let self, let window else { return }
+            let names = Set(selectableBranches.map(\.name))
+            for name in branchesSelector.stringValue.split(separator: " ").map(String.init) where !names.contains(name) {
+                let alert = NSAlert()
+                alert.alertStyle = .critical
+                alert.messageText = "Error"
+                alert.informativeText = "Branch '\(name)' is not selectable, this branch has been removed from the selection."
+                _ = await begin(alert, window: window)
+            }
             let unmerged = selectedBranches.filter { !self.mergedRemoteBranches.contains($0) }
             if !unmerged.isEmpty {
                 let alert = NSAlert()
@@ -1432,7 +1520,6 @@ private final class RemoteBranchDeleteViewController: NSViewController, NSWindow
                     recursiveSubmodules: .none
                 )
                 guard let processResult = await PushProcessDialog.run(request: request, source: source, parent: window, scriptHooks: scriptHooks) else {
-                    status.stringValue = "Deletion cancelled"
                     task = nil
                     deleteOptionsChanged()
                     return
@@ -1441,12 +1528,15 @@ private final class RemoteBranchDeleteViewController: NSViewController, NSWindow
                 case .success(let result) where result.outcome == .completed:
                     onRepositoryChanged(result.selectedCommitID)
                 case .success(let result):
-                    status.stringValue = result.message
+                    let alert = NSAlert()
+                    alert.messageText = "Delete remote branches"
+                    alert.informativeText = result.message
+                    _ = await begin(alert, window: window)
                     task = nil
                     deleteOptionsChanged()
                     return
                 case .failure(let error):
-                    status.stringValue = error.localizedDescription
+                    await showError(error, window: window)
                     task = nil
                     deleteOptionsChanged()
                     return
@@ -1563,6 +1653,7 @@ private final class PushProcessViewController: NSViewController, NSWindowDelegat
     private let keepOpen = NSButton(checkboxWithTitle: "Keep dialog open", target: nil, action: nil)
     private let abortButton = NSButton(title: "Abort", target: nil, action: nil)
     private let closeButton = NSButton(title: "OK", target: nil, action: nil)
+    let processInput = ProcessInputController()
     private var task: Task<Void, Never>?
     private var result: Result<RepositoryPushResult, Error>?
     private var didClose = false
@@ -1611,19 +1702,20 @@ private final class PushProcessViewController: NSViewController, NSWindowDelegat
         spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
         let header = NSStackView(views: [progress, status])
         header.orientation = .horizontal; header.alignment = .centerY; header.spacing = 8
-        let footer = NSStackView(views: [keepOpen, spacer, abortButton, closeButton])
+        let footer = NSStackView(views: [keepOpen, processInput.toggle, spacer, abortButton, closeButton])
         footer.orientation = .horizontal; footer.alignment = .centerY; footer.spacing = 8
-        for child in [header, scroll, footer] { child.translatesAutoresizingMaskIntoConstraints = false; root.addSubview(child) }
+        let bottom = processInput.bottomStack(footer: footer)
+        for child in [header, scroll, bottom] { child.translatesAutoresizingMaskIntoConstraints = false; root.addSubview(child) }
         NSLayoutConstraint.activate([
             header.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12),
             header.topAnchor.constraint(equalTo: root.topAnchor, constant: 12),
             scroll.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12),
             scroll.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12),
             scroll.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 9),
-            scroll.bottomAnchor.constraint(equalTo: footer.topAnchor, constant: -9),
-            footer.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12),
-            footer.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12),
-            footer.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -10),
+            scroll.bottomAnchor.constraint(equalTo: bottom.topAnchor, constant: -9),
+            bottom.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12),
+            bottom.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12),
+            bottom.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -10),
             footer.heightAnchor.constraint(equalToConstant: 30)
         ])
         view = root
@@ -1633,12 +1725,17 @@ private final class PushProcessViewController: NSViewController, NSWindowDelegat
         guard task == nil else { return }
         progress.startAnimation(nil)
         status.stringValue = initialStatus
+        processInput.window = panel
         task = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
+                let processInput = processInput
+                let operation = operation
                 let value = try await OutputHistoryRecording.perform {
-                    try await operation { [weak self] event in
-                        Task { @MainActor in self?.append(event) }
+                    try await processInput.perform {
+                        try await operation { [weak self] event in
+                            Task { @MainActor in self?.append(event) }
+                        }
                     }
                 }
                 result = .success(value)
@@ -1656,6 +1753,7 @@ private final class PushProcessViewController: NSViewController, NSWindowDelegat
                 result = .failure(error)
                 appendText("\n\(error.localizedDescription)\n", color: .systemRed)
             }
+            processInput.finish()
             progress.stopAnimation(nil)
             abortButton.isEnabled = false
             closeButton.isEnabled = true
@@ -1665,6 +1763,7 @@ private final class PushProcessViewController: NSViewController, NSWindowDelegat
     }
 
     private func append(_ event: GitOutputEvent) {
+        processInput.observeOutput(event.text)
         appendText(event.text, color: event.stream == .standardError ? .systemRed : .textColor)
         let lines = event.text.split(whereSeparator: { $0 == "\r" || $0 == "\n" })
         if let last = lines.last, !last.isEmpty {
@@ -1702,5 +1801,5 @@ private final class PushProcessViewController: NSViewController, NSWindowDelegat
     @objc private func abort() { status.stringValue = "Aborting…"; task?.cancel() }
     @objc private func close() { finish() }
     func windowWillClose(_ notification: Notification) { if task != nil { task?.cancel() }; finish() }
-    private func finish() { guard !didClose else { return }; didClose = true; onClose?(result) }
+    private func finish() { guard !didClose else { return }; didClose = true; processInput.finish(); onClose?(result) }
 }

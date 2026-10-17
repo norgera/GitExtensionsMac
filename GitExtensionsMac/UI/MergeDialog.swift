@@ -188,16 +188,16 @@ private final class MergeDialogViewController: NSViewController, NSWindowDelegat
         helpPane.addSubview(helpNotice)
         helpPane.addSubview(helpToggle)
         NSLayoutConstraint.activate([
-            helpImage.leadingAnchor.constraint(equalTo: helpPane.leadingAnchor),
-            helpImage.trailingAnchor.constraint(equalTo: helpPane.trailingAnchor),
-            helpImage.topAnchor.constraint(equalTo: helpPane.topAnchor),
-            helpImage.heightAnchor.constraint(equalToConstant: 373),
+            helpToggle.centerXAnchor.constraint(equalTo: helpPane.centerXAnchor),
+            helpToggle.topAnchor.constraint(equalTo: helpPane.topAnchor, constant: 4),
+            helpToggle.heightAnchor.constraint(equalToConstant: 24),
             helpNotice.leadingAnchor.constraint(equalTo: helpPane.leadingAnchor, constant: 4),
             helpNotice.trailingAnchor.constraint(equalTo: helpPane.trailingAnchor, constant: -4),
-            helpNotice.topAnchor.constraint(equalTo: helpImage.bottomAnchor, constant: 3),
-            helpToggle.centerXAnchor.constraint(equalTo: helpPane.centerXAnchor),
-            helpToggle.bottomAnchor.constraint(equalTo: helpPane.bottomAnchor, constant: -4),
-            helpToggle.heightAnchor.constraint(equalToConstant: 24)
+            helpNotice.topAnchor.constraint(equalTo: helpToggle.bottomAnchor, constant: 3),
+            helpImage.leadingAnchor.constraint(equalTo: helpPane.leadingAnchor),
+            helpImage.trailingAnchor.constraint(equalTo: helpPane.trailingAnchor),
+            helpImage.topAnchor.constraint(equalTo: helpNotice.bottomAnchor, constant: 3),
+            helpImage.heightAnchor.constraint(equalToConstant: 373)
         ])
     }
 
@@ -731,6 +731,7 @@ private final class MergeTargetSelectionViewController: NSViewController, NSWind
             list.addArrangedSubview(button)
         }
         let document = TopAlignedDocumentView()
+        document.translatesAutoresizingMaskIntoConstraints = false
         list.translatesAutoresizingMaskIntoConstraints = false
         document.addSubview(list)
         NSLayoutConstraint.activate([
@@ -745,13 +746,14 @@ private final class MergeTargetSelectionViewController: NSViewController, NSWind
         scroll.hasVerticalScroller = true
         scroll.hasHorizontalScroller = true
         scroll.borderType = .bezelBorder
+        document.widthAnchor.constraint(greaterThanOrEqualTo: scroll.contentView.widthAnchor).isActive = true
+        document.topAnchor.constraint(equalTo: scroll.contentView.topAnchor).isActive = true
+        document.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor).isActive = true
         let ok = NSButton(title: "OK", target: self, action: #selector(accept))
         ok.keyEquivalent = "\r"
-        let cancel = NSButton(title: "Cancel", target: self, action: #selector(cancel))
-        cancel.keyEquivalent = "\u{1b}"
         let spacer = NSView()
         spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let buttons = NSStackView(views: [spacer, cancel, ok])
+        let buttons = NSStackView(views: [spacer, ok])
         buttons.orientation = .horizontal
         buttons.spacing = 8
         for subview in [label, scroll, buttons] {
@@ -782,8 +784,7 @@ private final class MergeTargetSelectionViewController: NSViewController, NSWind
         finish(choices.compactMap { selected.contains($0.value) ? $0.value : nil })
     }
 
-    @objc private func cancel() { finish(nil) }
-    func windowWillClose(_ notification: Notification) { finish(nil) }
+    func windowWillClose(_ notification: Notification) { accept() }
     private func finish(_ value: [String]?) {
         guard !didClose else { return }
         didClose = true
@@ -832,6 +833,7 @@ private final class MergeProcessViewController: NSViewController, NSWindowDelega
     private let keepOpen = NSButton(checkboxWithTitle: "Keep dialog open", target: nil, action: nil)
     private let abortButton = NSButton(title: "Abort", target: nil, action: nil)
     private let closeButton = NSButton(title: "OK", target: nil, action: nil)
+    let processInput = ProcessInputController()
     private var task: Task<Void, Never>?
     private var result: Result<RepositoryMergeResult, Error>?
     private var didClose = false
@@ -880,11 +882,12 @@ private final class MergeProcessViewController: NSViewController, NSWindowDelega
         header.orientation = .horizontal
         header.alignment = .centerY
         header.spacing = 8
-        let footer = NSStackView(views: [keepOpen, spacer, abortButton, closeButton])
+        let footer = NSStackView(views: [keepOpen, processInput.toggle, spacer, abortButton, closeButton])
         footer.orientation = .horizontal
         footer.alignment = .centerY
         footer.spacing = 8
-        for subview in [header, scroll, footer] {
+        let bottom = processInput.bottomStack(footer: footer)
+        for subview in [header, scroll, bottom] {
             subview.translatesAutoresizingMaskIntoConstraints = false
             root.addSubview(subview)
         }
@@ -895,10 +898,10 @@ private final class MergeProcessViewController: NSViewController, NSWindowDelega
             scroll.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12),
             scroll.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12),
             scroll.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 9),
-            scroll.bottomAnchor.constraint(equalTo: footer.topAnchor, constant: -9),
-            footer.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12),
-            footer.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12),
-            footer.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -10),
+            scroll.bottomAnchor.constraint(equalTo: bottom.topAnchor, constant: -9),
+            bottom.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12),
+            bottom.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12),
+            bottom.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -10),
             footer.heightAnchor.constraint(equalToConstant: 30)
         ])
         view = root
@@ -908,12 +911,17 @@ private final class MergeProcessViewController: NSViewController, NSWindowDelega
         guard task == nil else { return }
         progress.startAnimation(nil)
         status.stringValue = "Merging…"
+        processInput.window = panel
         task = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
+                let processInput = processInput
+                let operation = operation
                 let value = try await OutputHistoryRecording.perform {
-                    try await operation { [weak self] event in
-                        Task { @MainActor in self?.append(event) }
+                    try await processInput.perform {
+                        try await operation { [weak self] event in
+                            Task { @MainActor in self?.append(event) }
+                        }
                     }
                 }
                 result = .success(value)
@@ -935,6 +943,7 @@ private final class MergeProcessViewController: NSViewController, NSWindowDelega
                 result = .failure(error)
                 appendText("\n\(error.localizedDescription)\n", color: .systemRed)
             }
+            processInput.finish()
             progress.stopAnimation(nil)
             abortButton.isEnabled = false
             closeButton.isEnabled = true
@@ -948,6 +957,7 @@ private final class MergeProcessViewController: NSViewController, NSWindowDelega
     }
 
     private func append(_ event: GitOutputEvent) {
+        processInput.observeOutput(event.text)
         appendText(event.text, color: event.stream == .standardError ? .systemRed : .textColor)
         let lines = event.text.split(whereSeparator: { $0 == "\r" || $0 == "\n" })
         if let last = lines.last, !last.isEmpty { status.stringValue = String(last) }
@@ -982,6 +992,7 @@ private final class MergeProcessViewController: NSViewController, NSWindowDelega
     private func finish() {
         guard !didClose else { return }
         didClose = true
+        processInput.finish()
         onClose?(result)
     }
 }

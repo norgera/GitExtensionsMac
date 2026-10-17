@@ -16,7 +16,11 @@ struct ApplicationKeyChord: Codable, Equatable {
             + (flags.contains(.shift) ? "⇧" : "") + (flags.contains(.command) ? "⌘" : "")
         let special = ["\r": "Return", "\u{f702}": "←", "\u{f703}": "→", "\u{f700}": "↑", "\u{f701}": "↓", "\u{f708}": "F5", "\u{1b}": "Escape", " ": "Space",
                        "\u{f705}": "F2", "\u{f706}": "F3", "\u{f707}": "F4", "\u{7f}": "Delete"]
-        return prefix + (special[key] ?? key.uppercased())
+        if let value = key.unicodeScalars.first?.value, key.unicodeScalars.count == 1, (0xF704...0xF726).contains(value) {
+            return prefix + "F\(value - 0xF703)"
+        }
+        let navigation = ["\t": "Tab", "\u{8}": "Backspace", "\u{f728}": "Forward Delete", "\u{f729}": "Home", "\u{f72b}": "End", "\u{f72c}": "Page Up", "\u{f72d}": "Page Down"]
+        return prefix + (special[key] ?? navigation[key] ?? key.uppercased())
     }
     var swiftUI: KeyboardShortcut? {
         guard let character = key.first else { return nil }
@@ -156,7 +160,8 @@ final class ApplicationHotkeys: ObservableObject {
             ("staged", "Focus staged files", .init("3", .command)),
             ("message", "Focus commit message", .init("4", .command)),
             ("stageAll", "Stage all", .init("s", .command)),
-            ("filter", "Filter files", .init("f", .command)),
+            ("toggleSelectionFilter", "Toggle selection filter", .init("f", .command)),
+            ("filter", "Filter files", .init("f", [.command, .option])),
             ("refresh", "Refresh", .init("r", .command)),
             ("createBranch", "Create branch", .init("b", .command)),
             ("openWithDifftool", "Open with difftool", .init("\u{f706}")),
@@ -177,9 +182,9 @@ final class ApplicationHotkeys: ObservableObject {
             ("refresh", "Refresh", .init("\u{f708}"))
         ]
         let conflicts: [(String, String, ApplicationKeyChord)] = [
-            ("base", "Choose base", .init("b")),
-            ("local", "Choose local", .init("l")),
-            ("remote", "Choose remote", .init("r")),
+            ("base", "Choose base", .init("3", .command)),
+            ("local", "Choose local", .init("1", .command)),
+            ("remote", "Choose remote", .init("2", .command)),
             ("merge", "Merge", .init("m")),
             ("rescan", "Rescan", .init("\u{f708}"))
         ]
@@ -191,6 +196,8 @@ final class ApplicationHotkeys: ObservableObject {
         ]
 
         let files: [(String, String, ApplicationKeyChord)] = [
+            ("file.copyPaths", "Copy full native paths", .init("c", .command)),
+            ("file.save", "Save selected files as", .init("s", .command)),
             ("file.ignore.gitignore", "Add file to .gitignore", .init("")),
             ("file.blame", "Blame", .init("b")),
             ("file.delete", "Delete selected files", .init("\u{7f}")),
@@ -306,6 +313,8 @@ enum FileViewerShortcut: String, CaseIterable {
 }
 
 final class FileViewerTableView: NSTableView {
+    var onCopy: (() -> Void)?
+    @objc func copy(_ sender: Any?) { onCopy?() }
     var onShortcut: ((FileViewerShortcut) -> Bool)?
     var onScrollBoundary: ((Bool) -> Void)?
     private var lastBoundary = -Double.infinity
@@ -389,5 +398,210 @@ final class SettingsHotkeyRecorder: NSButton {
         guard window?.firstResponder === self else { return super.performKeyEquivalent(with: event) }
         keyDown(with: event)
         return true
+    }
+}
+
+@MainActor
+final class HotkeysSettingsEditor: NSView, NSTableViewDataSource, NSTableViewDelegate {
+    let categories = NSTableView()
+    let commands = NSTableView()
+    let recorder = SettingsHotkeyRecorder(frame: .zero)
+    let applyBinding = NSButton(title: "Apply", target: nil, action: nil)
+    let clearBinding = NSButton(title: "Clear", target: nil, action: nil)
+    let reset = NSButton(title: "Reset all Hotkeys to defaults", target: nil, action: nil)
+    private(set) var overrides: [String: ApplicationKeyChord]
+    private(set) var pendingChord = ApplicationKeyChord("")
+    private(set) var selectedCategory: String?
+    private(set) var selectedCommand: String?
+    var onChange: (([String: ApplicationKeyChord]) -> Void)?
+    var onSelection: ((String?, String?) -> Void)?
+    private let definitions: [ApplicationHotkeyDefinition]
+    let categoryNames: [String]
+    private let usedChords: [ApplicationKeyChord]
+    private var recordColor: NSColor = .systemRed
+    var displayedCommands: [ApplicationHotkeyDefinition] {
+        let values = definitions.filter { $0.category == selectedCategory || (selectedCategory == "Browse" && $0.category == "Browse panes") }
+        let order = Self.commandOrder[selectedCategory ?? ""] ?? []
+        let ranks = Dictionary(uniqueKeysWithValues: order.enumerated().map { ($0.element, $0.offset) })
+        return values.enumerated().sorted {
+            let left = ranks[$0.element.id] ?? (order.count + $0.offset)
+            let right = ranks[$1.element.id] ?? (order.count + $1.offset)
+            return left < right
+        }.map(\.element)
+    }
+    private var visibleCommands: [ApplicationHotkeyDefinition] { displayedCommands }
+    private static let commandOrder: [String: [String]] = [
+        "Browse": ["addNotes", "checkoutBranch", "closeToDashboard", "commit", "createBranch", "createTag", "editFile", "findFileInSelectedCommit",
+                   "focus.tree", "focus.grid", "focus.details", "focus.diff", "focus.files", "focus.gpg", "focus.build", "focus.output",
+                   "focusNextTab", "focusPrevTab", "focusFilter", "gitBash", "gitGui", "gitK", "goToChild", "goToParent", "goToSubmodule", "goToSuperproject",
+                   "manageWorktrees", "mergeBranches", "openAsTempFile", "openAsTempFileWith", "openCommitsWithDifftool", "openRepository", "settings",
+                   "openWithDifftool", "openWithDifftoolFirstToLocal", "openWithDifftoolSelectedToLocal", "pullFetch", "push", "quickFetch", "quickPull", "quickPullOrFetch", "quickPush",
+                   "rebase", "stash", "stashPop", "stashStaged", "toggleArtificialAndHead", "toggleLeftPanel"],
+        "Commit": ["commit.addSelectionToMessage", "commit.conventionalType", "commit.conventionalScope", "commit.createBranch", "commit.unstaged", "commit.diff", "commit.staged", "commit.message",
+                   "commit.openWithDifftool", "commit.refresh.alternative", "commit.nextFile", "commit.nextFile.vertical", "commit.nextFile.alternative", "commit.previousFile", "commit.previousFile.vertical", "commit.previousFile.alternative",
+                   "commit.stageAll", "commit.toggleSelectionFilter"],
+        "Repository tree": ["tree.delete", "tree.rename", "tree.multiSelectWithChildren"],
+        "Revision grid": ["revision.compare.selected", "revision.compare.base", "revision.compare.branch", "revision.compare.current", "revision.compare.worktree",
+                          "revision.commit.amend", "revision.commit.fixup", "revision.commit.squash", "revision.ref.delete", "revision.navigate.child", "revision.navigate.commit", "revision.navigate.firstParent", "revision.navigate.lastParent", "revision.navigate.mergeBase", "revision.navigate.parent",
+                          "revision.navigate.backward", "revision.navigate.forward", "revision.search.next", "revision.compare.difftool", "revision.search.previous", "revision.ref.rename", "revision.filter.resetPath", "revision.filter.reset", "revision.filter.advanced",
+                          "revision.compare.setBase", "revision.navigate.current", "revision.navigate.forkPoint", "revision.branches.all", "revision.branches.current", "revision.branches.filtered", "revision.firstParent", "revision.other.reflog", "revision.view.remoteBranches",
+                          "revision.view.authorDate", "revision.navigate.toggleArtificial", "revision.view.nonRelativesGray", "revision.view.highlightBranch", "revision.sort.authorDate", "revision.column.graph", "revision.view.gitNotes", "revision.column.notes", "revision.hideMerges", "revision.view.relativeDate"],
+        "File viewer": ["viewer.find", "viewer.replace", "viewer.findNext", "viewer.findPrevious", "viewer.goToLine", "viewer.increaseContext", "viewer.decreaseContext", "viewer.nextChange", "viewer.previousChange",
+                        "viewer.entireFile", "viewer.syntax", "viewer.wordDiff", "viewer.difftastic", "viewer.treatAsText", "viewer.nextOccurrence", "viewer.previousOccurrence", "viewer.stageLines", "viewer.unstageLines", "viewer.resetLines", "viewer.ignoreWhitespace"],
+        "File status list": ["file.ignore.gitignore", "file.blame", "file.delete", "file.edit.local", "file.filterGrid", "file.find", "file.findCommit", "file.findCommitFileTree", "file.goToFirstParent", "file.goToLastParent",
+                             "file.open.revision", "file.open.revisionWith", "file.difftool", "file.difftool.firstToLocal", "file.difftool.selectedToLocal", "file.open.local", "file.open.localWith", "file.move", "file.reset.first", "file.selectFirstGroup", "file.showFileTree", "file.history", "file.stage", "file.unstage"]
+    ]
+
+    init(overrides: [String: ApplicationKeyChord], category: String? = nil, command: String? = nil) {
+        self.overrides = overrides
+        let registry = ApplicationHotkeys.definitions
+        definitions = registry
+        usedChords = registry.map { overrides[$0.id] ?? $0.defaultChord }
+        let names = registry.map { $0.category == "Browse panes" ? "Browse" : $0.category }.reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }
+        let sourceOrder = ["Commit", "Browse", "Repository tree", "Revision grid", "File viewer", "Conflict resolver", "File status list", "Stash", "Scripts"]
+        categoryNames = sourceOrder.filter { names.contains($0) } + names.filter { !sourceOrder.contains($0) }
+        selectedCategory = category
+        selectedCommand = command
+        super.init(frame: .zero)
+        setAccessibilityIdentifier("Hotkeys.Editor")
+        func list(_ table: NSTableView, id: String) -> NSScrollView {
+            table.delegate = self
+            table.dataSource = self
+            table.rowHeight = AppSettingsStore.shared.applicationRowHeight(minimum: 22)
+            table.allowsEmptySelection = true
+            table.allowsMultipleSelection = false
+            table.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
+            table.setAccessibilityIdentifier(id)
+            let scroll = NSScrollView()
+            scroll.documentView = table
+            scroll.hasVerticalScroller = true
+            scroll.hasHorizontalScroller = true
+            scroll.borderType = .bezelBorder
+            return scroll
+        }
+        categories.addTableColumn(NSTableColumn(identifier: .init("Category")))
+        categories.headerView = nil
+        let categoryScroll = list(categories, id: "Hotkeys.Categories")
+        let commandColumn = NSTableColumn(identifier: .init("Command"))
+        commandColumn.title = "Command"
+        commandColumn.width = 222
+        commandColumn.resizingMask = .userResizingMask
+        let keyColumn = NSTableColumn(identifier: .init("Key"))
+        keyColumn.title = "Key"
+        keyColumn.resizingMask = [.autoresizingMask, .userResizingMask]
+        commands.addTableColumn(commandColumn)
+        commands.addTableColumn(keyColumn)
+        let commandScroll = list(commands, id: "Hotkeys.Commands")
+        let caption = NSTextField(labelWithString: "Hotkeyable Items")
+        let hotkeyCaption = NSTextField(labelWithString: "Hotkey")
+        hotkeyCaption.widthAnchor.constraint(equalToConstant: 120).isActive = true
+        recorder.setAccessibilityIdentifier("Hotkeys.Recorder")
+        recorder.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        recorder.onRecord = { [weak self] chord in
+            guard let self, !chord.key.isEmpty else { return }
+            self.pendingChord = chord
+            self.updateRecorder()
+        }
+        applyBinding.target = self
+        applyBinding.action = #selector(applySelected)
+        applyBinding.setAccessibilityIdentifier("Hotkeys.ApplyBinding")
+        clearBinding.target = self
+        clearBinding.action = #selector(clearSelected)
+        clearBinding.setAccessibilityIdentifier("Hotkeys.ClearBinding")
+        for button in [applyBinding, clearBinding] { button.widthAnchor.constraint(equalToConstant: 100).isActive = true }
+        reset.target = self
+        reset.action = #selector(resetDefaults)
+        reset.setAccessibilityIdentifier("Hotkeys.Reset")
+        let binding = NSStackView(views: [hotkeyCaption, recorder, applyBinding, clearBinding])
+        binding.spacing = 6
+        binding.distribution = .fill
+        binding.alignment = .centerY
+        for child in [caption, categoryScroll, commandScroll, binding, reset] {
+            child.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(child)
+        }
+        NSLayoutConstraint.activate([
+            caption.leadingAnchor.constraint(equalTo: leadingAnchor), caption.topAnchor.constraint(equalTo: topAnchor),
+            categoryScroll.leadingAnchor.constraint(equalTo: leadingAnchor), categoryScroll.widthAnchor.constraint(equalToConstant: 232),
+            categoryScroll.topAnchor.constraint(equalTo: caption.bottomAnchor, constant: 4), categoryScroll.bottomAnchor.constraint(equalTo: binding.topAnchor, constant: -6),
+            commandScroll.leadingAnchor.constraint(equalTo: categoryScroll.trailingAnchor, constant: 6), commandScroll.trailingAnchor.constraint(equalTo: trailingAnchor),
+            commandScroll.topAnchor.constraint(equalTo: categoryScroll.topAnchor), commandScroll.bottomAnchor.constraint(equalTo: categoryScroll.bottomAnchor),
+            binding.leadingAnchor.constraint(equalTo: leadingAnchor), binding.trailingAnchor.constraint(equalTo: trailingAnchor),
+            binding.bottomAnchor.constraint(equalTo: reset.topAnchor, constant: -6),
+            reset.leadingAnchor.constraint(equalTo: leadingAnchor), reset.bottomAnchor.constraint(equalTo: bottomAnchor)
+        ])
+        if let category, let index = categoryNames.firstIndex(of: category) {
+            categories.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
+            if let command, let row = visibleCommands.firstIndex(where: { $0.id == command }) { commands.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false) }
+        }
+        updateRecorder()
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    func numberOfRows(in tableView: NSTableView) -> Int { tableView === categories ? categoryNames.count : visibleCommands.count }
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        let text: String
+        if tableView === categories { text = categoryNames[row] }
+        else {
+            let command = visibleCommands[row]
+            text = tableColumn?.identifier.rawValue == "Command" ? command.title : ApplicationHotkeys.chord(command.id, overrides: overrides).title
+        }
+        let label = NSTextField(labelWithString: text)
+        label.lineBreakMode = .byTruncatingTail
+        label.toolTip = text
+        return label
+    }
+
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        if notification.object as? NSTableView === categories {
+            selectedCategory = categoryNames.indices.contains(categories.selectedRow) ? categoryNames[categories.selectedRow] : nil
+            reloadCommands()
+        } else {
+            selectedCommand = visibleCommands.indices.contains(commands.selectedRow) ? visibleCommands[commands.selectedRow].id : nil
+            pendingChord = selectedCommand.map { ApplicationHotkeys.chord($0, overrides: overrides) } ?? .init("")
+            updateRecorder()
+            onSelection?(selectedCategory, selectedCommand)
+        }
+    }
+
+    private func updateRecorder() {
+        if !pendingChord.key.isEmpty { recordColor = usedChords.contains(pendingChord) ? .systemRed : .labelColor }
+        recorder.title = pendingChord.title
+        recorder.attributedTitle = NSAttributedString(string: pendingChord.title, attributes: [.font: AppSettingsStore.shared.applicationFont(size: 13), .foregroundColor: recordColor])
+    }
+
+    private func reloadCommands() {
+        selectedCommand = nil
+        pendingChord = .init("")
+        commands.deselectAll(nil)
+        commands.reloadData()
+        updateRecorder()
+        onSelection?(selectedCategory, nil)
+    }
+
+    @objc private func applySelected() {
+        guard let selectedCommand else { return }
+        window?.makeFirstResponder(commands)
+        overrides[selectedCommand] = pendingChord
+        onChange?(overrides)
+        reloadCommands()
+    }
+
+    @objc private func clearSelected() {
+        guard let selectedCommand else { return }
+        window?.makeFirstResponder(commands)
+        overrides[selectedCommand] = .init("")
+        onChange?(overrides)
+        reloadCommands()
+    }
+
+    @objc private func resetDefaults() {
+        overrides = [:]
+        selectedCategory = nil
+        selectedCommand = nil
+        categories.deselectAll(nil)
+        reloadCommands()
+        onChange?(overrides)
     }
 }

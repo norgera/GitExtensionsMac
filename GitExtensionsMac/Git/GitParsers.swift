@@ -35,14 +35,40 @@ package struct GitStatusRecord: Sendable {
 }
 
 extension GitStatusRecord {
+    private var hasIndexEntry: Bool {
+        indexStatus != "." && indexStatus != " " && !(isConflict && indexStatus == "U" && worktreeStatus == "U")
+    }
+    package static func entryCount(_ records: [Self]) -> Int {
+        records.reduce(0) { $0 + ($1.hasIndexEntry ? 1 : 0)
+            + (($1.worktreeStatus != "." && $1.worktreeStatus != " " || $1.isUntracked) ? 1 : 0) }
+    }
+    package static func visualState(_ records: [Self]?) -> RepositoryVisualState {
+        guard let records else { return .unknown }
+        let index = records.filter { $0.hasIndexEntry }.count
+        let worktree = records.filter { $0.worktreeStatus != "." && $0.worktreeStatus != " " || $0.isUntracked }
+        return .classify(index: index, worktree: worktree.count,
+                         untracked: records.filter(\.isUntracked).count,
+                         worktreeSubmodules: worktree.filter { $0.submoduleStatus.hasPrefix("S") }.count)
+    }
+
+    package static func allRevisionChangeCounts(_ records: [Self]) -> RevisionChangeCounts {
+        var result = RevisionChangeCounts()
+        for record in records {
+            result.append(revisionChangeCounts([record], staged: true))
+            result.append(revisionChangeCounts([record], staged: false))
+        }
+        return result
+    }
+
     package static func revisionChangeCounts(_ records: [GitStatusRecord], staged: Bool) -> RevisionChangeCounts {
         var result = RevisionChangeCounts()
         for record in records {
+            if staged && !record.hasIndexEntry { continue }
             let status = staged ? record.indexStatus : record.worktreeStatus
             guard status != "." && status != " " else { continue }
             if record.submoduleStatus.hasPrefix("S") {
                 let flags = Array(record.submoduleStatus)
-                if staged || (flags.count > 1 && flags[1] == "C") { result.submodulesChanged.append(record.path) }
+                if staged && (status == "M" || status == "T") || !staged && (flags.count > 1 && flags[1] == "C") { result.submodulesChanged.append(record.path) }
                 if !staged && flags.dropFirst(2).contains(where: { $0 != "." }) { result.submodulesDirty.append(record.path) }
             } else if status == "A" || record.isUntracked {
                 result.added.append(record.path)
@@ -260,18 +286,58 @@ package enum GitOutputParser {
         parseUnifiedDiff(text: decodeDiff(data, contentEncoding: contentEncoding), files: files, contentEncoding: contentEncoding)
     }
 
-    package static func parseUnifiedDiff(text: String, files: [ChangedFile], contentEncoding: String.Encoding) -> [String: FileDiff] {
+    package static func parseUnifiedDiff(text: String, files: [ChangedFile], contentEncoding: String.Encoding, numberUnprefixedContext: Bool = false) -> [String: FileDiff] {
         let sections = splitDiffSections(text)
         var result: [String: FileDiff] = [:]
-        for (file, section) in zip(files, sections) {
+        for (index, file) in files.enumerated() {
+            guard let section = sections.first(where: { diffSectionPath($0) == file.path })
+                    ?? (sections.indices.contains(index) ? sections[index] : nil) else { continue }
             result[file.id] = FileDiff(
                 id: "diff:\(file.id)",
                 fileID: file.id,
-                lines: parseDiffLines(section, fileID: file.id),
+                lines: parseDiffLines(section, fileID: file.id, numberUnprefixedContext: numberUnprefixedContext),
                 contentEncoding: contentEncoding
             )
         }
         return result
+    }
+
+    package static func diffSection(_ text: String, file: ChangedFile) -> (text: String, offset: Int) {
+        let sections = splitDiffSections(text)
+        var offset = 0
+        for section in sections {
+            if diffSectionPath(section) == file.path { return (section, offset) }
+            offset += section.utf16.count + 1
+        }
+        return (sections.first ?? text, 0)
+    }
+
+    private static func diffSectionPath(_ text: String) -> String? {
+        func path(_ value: String, prefixed: Bool) -> String {
+            let name = PatchPreviewParser.unquote(value)
+            guard prefixed, let slash = name.firstIndex(of: "/") else { return name }
+            return String(name[name.index(after: slash)...])
+        }
+        let lines = text.components(separatedBy: "\n")
+        if let next = lines.first(where: { $0.hasPrefix("+++ ") && $0 != "+++ /dev/null" }) {
+            return path(String(next.dropFirst(4)), prefixed: true)
+        }
+        for marker in ["rename to ", "copy to "] {
+            if let line = lines.first(where: { $0.hasPrefix(marker) }) { return path(String(line.dropFirst(marker.count)), prefixed: false) }
+        }
+        if lines.contains("+++ /dev/null"), let old = lines.first(where: { $0.hasPrefix("--- ") }) {
+            return path(String(old.dropFirst(4)), prefixed: true)
+        }
+        guard let header = lines.first else { return nil }
+        for marker in ["diff --cc ", "diff --combined "] where header.hasPrefix(marker) {
+            return path(String(header.dropFirst(marker.count)), prefixed: false)
+        }
+        guard header.hasPrefix("diff --git ") else { return nil }
+        let names = String(header.dropFirst(11))
+        let pattern = try! NSRegularExpression(pattern: #"^("?[^/\s]+/.*?) ("?[^/\s]+/.*?)$"#)
+        guard let match = pattern.firstMatch(in: names, range: NSRange(names.startIndex..., in: names)),
+              let range = Range(match.range(at: 2), in: names) else { return nil }
+        return path(String(names[range]), prefixed: true)
     }
 
     package static func decodeDiff(_ data: Data, contentEncoding: String.Encoding) -> String {
@@ -421,74 +487,82 @@ package enum GitOutputParser {
     }
 
     private static func splitDiffSections(_ text: String) -> [String] {
-        let marker = "diff --git "
-        guard text.hasPrefix(marker) else { return text.isEmpty ? [] : [text] }
+        let markers = ["diff --git ", "diff --cc ", "diff --combined "]
         var sections: [String] = []
-        var start = text.startIndex
-        while let next = text.range(of: "\n\(marker)", range: text.index(after: start)..<text.endIndex) {
-            sections.append(String(text[start..<next.lowerBound]))
-            start = text.index(after: next.lowerBound)
+        var lines: [String] = []
+        for line in text.components(separatedBy: "\n") {
+            if markers.contains(where: { line.hasPrefix($0) }), !lines.isEmpty {
+                sections.append(lines.joined(separator: "\n"))
+                lines = []
+            }
+            lines.append(line)
         }
-        sections.append(String(text[start...]))
-        return sections
+        if !lines.isEmpty { sections.append(lines.joined(separator: "\n")) }
+        return text.isEmpty ? [] : sections
     }
 
-    private static func parseDiffLines(_ section: String, fileID: String) -> [DiffLine] {
+    package static func parseDiffLines(_ section: String, fileID: String, numberUnprefixedContext: Bool = false) -> [DiffLine] {
         var oldLine: Int?
         var newLine: Int?
-        return section.split(separator: "\n", omittingEmptySubsequences: false).enumerated().map { index, rawLine in
-            let line = String(rawLine)
-            let kind: DiffLine.Kind
-            let text: String
-            let oldNumber: Int?
-            let newNumber: Int?
-
-            if line.hasPrefix("@@") {
-                let starts = hunkStarts(line)
-                oldLine = starts.old
-                newLine = starts.new
+        var combined = false
+        let rawLines = section.components(separatedBy: "\n")
+        return rawLines.enumerated().map { index, line in
+            var oldNumber: Int?, newNumber: Int?
+            var prefix: String?
+            var ranges: DiffHunkRanges?
+            var text = line
+            var kind: DiffLine.Kind = .header
+            if line.hasPrefix("diff ") {
+                oldLine = nil; newLine = nil; combined = false
+            } else if line.hasPrefix("@@") {
+                let fields = (line.hasSuffix("\r") ? line.dropLast() : line[...]).split(separator: " ")
+                combined = line.hasPrefix("@@@")
+                let parents = fields.dropFirst().prefix { $0.hasPrefix("-") }
+                let result = fields.dropFirst(1 + parents.count).first
+                let closing = fields.dropFirst(2 + parents.count).first
+                func range(_ value: Substring?) -> DiffHunkRanges.Lines? {
+                    guard let value else { return nil }
+                    let parts = value.dropFirst().split(separator: ",", omittingEmptySubsequences: false)
+                    guard (1...2).contains(parts.count), let start = Int(parts[0]), start >= 0, start <= Int(Int32.max),
+                          let count = parts.count == 1 ? 1 : Int(parts[1]), count >= 0, count <= Int(Int32.max) else { return nil }
+                    return .init(start: start, count: count)
+                }
+                let parentRanges = parents.compactMap { range($0) }
+                let resultRange = range(result)
+                let valid = parents.count == (combined ? 2 : 1) && parentRanges.count == parents.count && resultRange != nil && result?.hasPrefix("+") == true
+                    && closing == (combined ? "@@@" : "@@")
+                oldLine = valid && !combined ? parentRanges.first?.start : nil
+                newLine = valid ? resultRange?.start : nil
+                if valid, let resultRange { ranges = .init(parents: parentRanges, result: resultRange) }
                 kind = .hunk
-                text = line
-                oldNumber = nil
-                newNumber = nil
-            } else if line.hasPrefix("+") && !line.hasPrefix("+++") {
-                kind = .addition
-                text = String(line.dropFirst())
-                oldNumber = nil
-                newNumber = newLine
-                if let value = newLine { newLine = value + 1 }
-            } else if line.hasPrefix("-") && !line.hasPrefix("---") {
-                kind = .deletion
-                text = String(line.dropFirst())
-                oldNumber = oldLine
-                newNumber = nil
-                if let value = oldLine { oldLine = value + 1 }
-            } else if line.hasPrefix(" "), oldLine != nil || newLine != nil {
-                kind = .context
-                text = String(line.dropFirst())
-                oldNumber = oldLine
-                newNumber = newLine
-                if let value = oldLine { oldLine = value + 1 }
-                if let value = newLine { newLine = value + 1 }
-            } else {
-                kind = .header
-                text = line
-                oldNumber = nil
-                newNumber = nil
+            } else if combined, newLine != nil, !(line.isEmpty && index == rawLines.count - 1) {
+                prefix = String(line.prefix(2))
+                text = String(line.dropFirst(2))
+                switch prefix {
+                case "--", "- ", " -": kind = .deletion
+                case "++", "+ ", " +": kind = .addition
+                default: kind = .context
+                }
+                if kind != .deletion { newNumber = newLine; newLine = newLine.map { $0 + 1 } }
+            } else if !combined && line.hasPrefix("+") && (!line.hasPrefix("+++") || newLine != nil) {
+                kind = .addition; prefix = "+"; text = String(line.dropFirst())
+                newNumber = newLine; newLine = newLine.map { $0 + 1 }
+            } else if !combined && line.hasPrefix("-") && (!line.hasPrefix("---") || oldLine != nil) {
+                kind = .deletion; prefix = "-"; text = String(line.dropFirst())
+                oldNumber = oldLine; oldLine = oldLine.map { $0 + 1 }
+            } else if !combined && line.hasPrefix(" ") && (oldLine != nil || newLine != nil) {
+                kind = .context; prefix = " "; text = String(line.dropFirst())
+                oldNumber = oldLine; newNumber = newLine
+                oldLine = oldLine.map { $0 + 1 }; newLine = newLine.map { $0 + 1 }
+            } else if numberUnprefixedContext, !combined, oldLine != nil || newLine != nil,
+                      !line.hasPrefix("\\"), !((line.isEmpty || line == "\r") && index == rawLines.count - 1) {
+                kind = .context; prefix = ""
+                oldNumber = oldLine; newNumber = newLine
+                oldLine = oldLine.map { $0 + 1 }; newLine = newLine.map { $0 + 1 }
             }
-
-            return DiffLine(id: "\(fileID):\(index)", oldLineNumber: oldNumber, newLineNumber: newNumber, kind: kind, text: text)
+            return DiffLine(id: "\(fileID):\(index)", oldLineNumber: oldNumber, newLineNumber: newNumber,
+                            kind: kind, text: text, diffPrefix: prefix, hunkRanges: ranges)
         }
-    }
-
-    private static func hunkStarts(_ line: String) -> (old: Int?, new: Int?) {
-        let components = line.split(separator: " ")
-        guard components.count >= 3 else { return (nil, nil) }
-        func start(_ field: Substring) -> Int? {
-            let value = field.dropFirst().split(separator: ",", maxSplits: 1).first
-            return value.flatMap { Int($0) }
-        }
-        return (start(components[1]), start(components[2]))
     }
 
     private static func changeType(_ status: Character) -> FileChangeType {

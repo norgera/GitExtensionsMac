@@ -3,15 +3,7 @@ import AppKit
 
 package enum CloneSourceParser {
     package static func extract(from text: String?) -> String? {
-        guard let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
-        return text.split(whereSeparator: \.isWhitespace).lazy.map(String.init).first(where: { value in
-            value.contains("://")
-                || value.hasPrefix("git@")
-                || value.hasPrefix("ssh:")
-                || value.hasPrefix("git:")
-                || value.hasPrefix("file:")
-                || value.hasPrefix("/")
-        })
+        CloneSourcePath.extract(text)
     }
 }
 
@@ -45,6 +37,14 @@ extension GitUICommands {
 
 @MainActor
 private enum RepositoryCreationDialogs {
+    static func showValidation(_ message: String, caption: String, window: NSWindow?, focus: NSView) {
+        Task { @MainActor [weak window, weak focus] in
+            guard let window, window.attachedSheet == nil else { return }
+            await MutationDialogs.showValidationError(message, caption: caption, window: window)
+            if window.isVisible { window.makeFirstResponder(focus) }
+        }
+    }
+
     static func presentClone(
         source: any RepositoryCreating,
         owner: NSWindow,
@@ -112,7 +112,6 @@ private final class CloneRepositoryViewController: NSViewController, NSWindowDel
     private let errorLabel = NSTextField(wrappingLabelWithString: "")
     private let cloneButton = NSButton(title: "Clone", target: nil, action: nil)
     private var branchTask: Task<Void, Never>?
-    private var isSubdirectoryUserEdited = false
 
     init(
         source: any RepositoryCreating,
@@ -134,14 +133,14 @@ private final class CloneRepositoryViewController: NSViewController, NSWindowDel
         let root = NSView()
         let preferences = AppSettingsStore.shared.repositoryCreationPreferences
         sourceField.usesDataSource = false
-        sourceField.addItems(withObjectValues: preferences.recentSources)
+        sourceField.addItems(withObjectValues: AppSettingsStore.shared.remoteRepositoryHistory)
         sourceField.placeholderString = "Repository URL or local path"
         sourceField.delegate = self
         if let clipboard = Self.cloneSourceFromPasteboard() {
             sourceField.stringValue = clipboard
         } else if let initialSource, !initialSource.isEmpty {
             sourceField.stringValue = initialSource
-        } else if let first = preferences.recentSources.first {
+        } else if let first = AppSettingsStore.shared.remoteRepositoryHistory.first {
             sourceField.stringValue = first
         }
 
@@ -154,7 +153,7 @@ private final class CloneRepositoryViewController: NSViewController, NSWindowDel
         }
         destinationField.addItems(withObjectValues: recentParents)
         destinationField.stringValue = preferences.cloneDestinationPath.isEmpty
-            ? (initialDestination?.path ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Documents", isDirectory: true).path)
+            ? (initialDestination?.path ?? "")
             : preferences.cloneDestinationPath
         subdirectoryField.delegate = self
         subdirectoryField.stringValue = source.suggestedCloneSubdirectory(for: sourceField.stringValue)
@@ -194,9 +193,12 @@ private final class CloneRepositoryViewController: NSViewController, NSWindowDel
         let spacer = NSView(); spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
         let buttons = NSStackView(views: [spacer, cancel, cloneButton])
         buttons.orientation = .horizontal; buttons.spacing = 8
-        let options = NSStackView(views: [recursive, fullHistory, personal, bare])
-        options.orientation = .vertical; options.alignment = .leading; options.spacing = 7
-        let content = NSStackView(views: [grid, destinationStatus, options, errorLabel, buttons])
+        let kinds = NSStackView(views: [personal, bare])
+        kinds.orientation = .vertical; kinds.alignment = .leading; kinds.spacing = 7
+        let repositoryType = AppKitFactory.titledBox("Repository type", kinds)
+        let options = NSStackView(views: [recursive, fullHistory])
+        options.orientation = .horizontal; options.alignment = .centerY; options.spacing = 16
+        let content = NSStackView(views: [grid, destinationStatus, repositoryType, options, errorLabel, buttons])
         content.orientation = .vertical; content.alignment = .leading; content.spacing = 10
         content.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(content)
@@ -206,6 +208,7 @@ private final class CloneRepositoryViewController: NSViewController, NSWindowDel
             content.topAnchor.constraint(equalTo: root.topAnchor, constant: 16),
             content.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -14),
             grid.widthAnchor.constraint(equalTo: content.widthAnchor),
+            repositoryType.widthAnchor.constraint(equalTo: content.widthAnchor),
             destinationStatus.widthAnchor.constraint(equalTo: content.widthAnchor),
             errorLabel.widthAnchor.constraint(equalTo: content.widthAnchor),
             buttons.widthAnchor.constraint(equalTo: content.widthAnchor)
@@ -223,12 +226,9 @@ private final class CloneRepositoryViewController: NSViewController, NSWindowDel
 
     func controlTextDidChange(_ obj: Notification) {
         if obj.object as? NSControl === sourceField {
-            if !isSubdirectoryUserEdited {
-                subdirectoryField.stringValue = source.suggestedCloneSubdirectory(for: sourceField.stringValue)
-            }
+            let name = source.suggestedCloneSubdirectory(for: sourceField.stringValue)
+            if !name.isEmpty { subdirectoryField.stringValue = name }
             resetBranches()
-        } else if obj.object as? NSControl === subdirectoryField {
-            isSubdirectoryUserEdited = true
         }
         updateDestinationStatus()
     }
@@ -236,6 +236,11 @@ private final class CloneRepositoryViewController: NSViewController, NSWindowDel
     func comboBoxWillPopUp(_ notification: Notification) {
         guard notification.object as? NSComboBox === branchField else { return }
         loadRemoteBranches()
+    }
+
+    func comboBoxSelectionDidChange(_ notification: Notification) {
+        guard notification.object as? NSComboBox === sourceField else { return }
+        controlTextDidChange(notification)
     }
 
     private func resetBranches() {
@@ -277,7 +282,6 @@ private final class CloneRepositoryViewController: NSViewController, NSWindowDel
         let name = subdirectoryField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !parent.isEmpty, !name.isEmpty else {
             destinationStatus.stringValue = "Enter a destination directory and subdirectory."
-            cloneButton.isEnabled = false
             return
         }
         let url = URL(fileURLWithPath: parent, isDirectory: true).appendingPathComponent(name, isDirectory: true)
@@ -292,7 +296,6 @@ private final class CloneRepositoryViewController: NSViewController, NSWindowDel
             destinationStatus.stringValue = "A new directory will be created: \(url.path)"
             destinationStatus.textColor = .secondaryLabelColor
         }
-        cloneButton.isEnabled = !sourceField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     @objc private func repositoryKindChanged(_ sender: NSButton) {
@@ -306,7 +309,7 @@ private final class CloneRepositoryViewController: NSViewController, NSWindowDel
         picker.canChooseDirectories = true; picker.canChooseFiles = false; picker.allowsMultipleSelection = false
         guard picker.runModal() == .OK, let url = picker.url else { return }
         sourceField.stringValue = url.path
-        if !isSubdirectoryUserEdited { subdirectoryField.stringValue = source.suggestedCloneSubdirectory(for: url.path) }
+        subdirectoryField.stringValue = source.suggestedCloneSubdirectory(for: url.path)
         resetBranches(); updateDestinationStatus()
     }
 
@@ -314,6 +317,7 @@ private final class CloneRepositoryViewController: NSViewController, NSWindowDel
         let picker = NSOpenPanel()
         picker.title = "Select destination parent directory"
         picker.canChooseDirectories = true; picker.canChooseFiles = false; picker.canCreateDirectories = true; picker.allowsMultipleSelection = false
+        picker.directoryURL = ClonePickerLocation.directory(for: destinationField.stringValue)
         guard picker.runModal() == .OK, let url = picker.url else { return }
         destinationField.stringValue = url.path
         updateDestinationStatus()
@@ -321,13 +325,15 @@ private final class CloneRepositoryViewController: NSViewController, NSWindowDel
 
     @objc private func clone() {
         guard let panel, let owner = panel.sheetParent else { return }
+        branchTask?.cancel()
         let parentPath = NSString(string: destinationField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)).expandingTildeInPath
         let sourceValue = sourceField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         let subdirectory = subdirectoryField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !sourceValue.isEmpty else { showValidation("Enter a repository URL or path to clone."); sourceField.becomeFirstResponder(); return }
-        guard parentPath.hasPrefix("/") else { showValidation("The destination must be an absolute directory path."); destinationField.becomeFirstResponder(); return }
+        guard !parentPath.isEmpty else { showValidation("You need to specify destination folder.", focus: destinationField); return }
+        guard parentPath.hasPrefix("/"), !parentPath.utf8.contains(0) else { showValidation("Destination folder must be an absolute path.", focus: destinationField); return }
+        guard !sourceValue.isEmpty else { showValidation("Enter a repository URL or path to clone.", focus: sourceField); return }
         guard !subdirectory.isEmpty, subdirectory != ".", subdirectory != "..", !subdirectory.contains("/"), !subdirectory.contains("\\") else {
-            showValidation("Enter a valid subdirectory name."); subdirectoryField.becomeFirstResponder(); return
+            showValidation("Enter a valid subdirectory name.", focus: subdirectoryField); return
         }
         let branch: RepositoryCloneBranch = switch branchField.stringValue {
         case Self.defaultBranchTitle, "": .remoteHEAD
@@ -372,7 +378,9 @@ private final class CloneRepositoryViewController: NSViewController, NSWindowDel
         }
     }
 
-    private func showValidation(_ message: String) { errorLabel.stringValue = message; errorLabel.isHidden = false }
+    private func showValidation(_ message: String, focus: NSView) {
+        RepositoryCreationDialogs.showValidation(message, caption: "Clone Failed", window: panel, focus: focus)
+    }
 
     @objc private func cancel() { closePanel() }
     override func cancelOperation(_ sender: Any?) { closePanel() }
@@ -421,7 +429,7 @@ private final class InitializeRepositoryViewController: NSViewController, NSWind
         directoryField.addItems(withObjectValues: AppSettingsStore.shared.recentRepositories.map(\.path))
         directoryField.delegate = self
         let last = AppSettingsStore.shared.repositoryCreationPreferences.cloneDestinationPath
-        directoryField.stringValue = last.isEmpty ? (initialDirectory?.path ?? FileManager.default.homeDirectoryForCurrentUser.path) : last
+        directoryField.stringValue = initialDirectory?.path ?? last
         let browse = NSButton(title: "Browse…", target: self, action: #selector(browseDirectory))
         let row = NSGridView(views: [[formLabel("Directory:"), fieldAndButton(directoryField, browse)]])
         row.column(at: 0).xPlacement = .trailing; row.column(at: 1).xPlacement = .fill; row.column(at: 1).width = 390
@@ -446,24 +454,27 @@ private final class InitializeRepositoryViewController: NSViewController, NSWind
             buttons.widthAnchor.constraint(equalTo: content.widthAnchor)
         ])
         view = root
-        controlTextDidChange(Notification(name: NSControl.textDidChangeNotification))
     }
 
     override func viewDidAppear() { super.viewDidAppear(); panel?.delegate = self; panel?.initialFirstResponder = directoryField; directoryField.becomeFirstResponder() }
-    func controlTextDidChange(_ obj: Notification) { createButton.isEnabled = !directoryField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     @objc private func repositoryKindChanged(_ sender: NSButton) { personal.state = sender === personal ? .on : .off; bare.state = sender === bare ? .on : .off }
     @objc private func browseDirectory() {
         let picker = NSOpenPanel(); picker.title = "Select or create repository directory"
         picker.canChooseDirectories = true; picker.canChooseFiles = false; picker.canCreateDirectories = true; picker.allowsMultipleSelection = false
         guard picker.runModal() == .OK, let url = picker.url else { return }
-        directoryField.stringValue = url.path; createButton.isEnabled = true
+        directoryField.stringValue = url.path
     }
     @objc private func create() {
         guard let panel, let owner = panel.sheetParent else { return }
         let path = NSString(string: directoryField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)).expandingTildeInPath
-        guard path.hasPrefix("/") else {
-            errorLabel.stringValue = "The repository directory must be an absolute path."
-            errorLabel.isHidden = false; directoryField.becomeFirstResponder(); return
+        guard path.hasPrefix("/"), !path.utf8.contains(0) else {
+            RepositoryCreationDialogs.showValidation("Please choose a directory.", caption: "Choose directory", window: panel, focus: directoryField)
+            return
+        }
+        var isDirectory: ObjCBool = false
+        if FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), !isDirectory.boolValue {
+            RepositoryCreationDialogs.showValidation("Cannot initialize a new repository on a file.\nPlease choose a directory.", caption: "Error", window: panel, focus: directoryField)
+            return
         }
         let request = RepositoryInitRequest(directory: URL(fileURLWithPath: path, isDirectory: true), isBare: bare.state == .on)
         errorLabel.isHidden = true
@@ -534,6 +545,7 @@ private final class RepositoryCreationProcessViewController: NSViewController, N
     private let keepOpen = NSButton(checkboxWithTitle: "Keep dialog open", target: nil, action: nil)
     private let abortButton = NSButton(title: "Abort", target: nil, action: nil)
     private let closeButton = NSButton(title: "OK", target: nil, action: nil)
+    let processInput = ProcessInputController()
     private var task: Task<Void, Never>?
     private var result: Result<RepositoryCreationResult, Error>?
     private var didClose = false
@@ -562,14 +574,15 @@ private final class RepositoryCreationProcessViewController: NSViewController, N
         closeButton.target = self; closeButton.action = #selector(close); closeButton.keyEquivalent = "\r"; closeButton.isEnabled = false
         let spacer = NSView(); spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
         let header = NSStackView(views: [progress, status]); header.orientation = .horizontal; header.alignment = .centerY; header.spacing = 8
-        let footer = NSStackView(views: [keepOpen, spacer, abortButton, closeButton]); footer.orientation = .horizontal; footer.alignment = .centerY; footer.spacing = 8
-        for item in [header, scroll, footer] { item.translatesAutoresizingMaskIntoConstraints = false; root.addSubview(item) }
+        let footer = NSStackView(views: [keepOpen, processInput.toggle, spacer, abortButton, closeButton]); footer.orientation = .horizontal; footer.alignment = .centerY; footer.spacing = 8
+        let bottom = processInput.bottomStack(footer: footer)
+        for item in [header, scroll, bottom] { item.translatesAutoresizingMaskIntoConstraints = false; root.addSubview(item) }
         NSLayoutConstraint.activate([
             header.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12), header.topAnchor.constraint(equalTo: root.topAnchor, constant: 12),
             scroll.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12), scroll.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12),
-            scroll.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 9), scroll.bottomAnchor.constraint(equalTo: footer.topAnchor, constant: -9),
-            footer.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12), footer.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12),
-            footer.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -10), footer.heightAnchor.constraint(equalToConstant: 30)
+            scroll.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 9), scroll.bottomAnchor.constraint(equalTo: bottom.topAnchor, constant: -9),
+            bottom.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12), bottom.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12),
+            bottom.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -10), footer.heightAnchor.constraint(equalToConstant: 30)
         ])
         view = root
     }
@@ -577,11 +590,16 @@ private final class RepositoryCreationProcessViewController: NSViewController, N
     func start() {
         guard task == nil else { return }
         progress.startAnimation(nil); status.stringValue = initialStatus
+        processInput.window = panel
         task = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
+                let processInput = processInput
+                let operation = operation
                 let value = try await OutputHistoryRecording.perform {
-                    try await operation { [weak self] event in Task { @MainActor in self?.append(event) } }
+                    try await processInput.perform {
+                        try await operation { [weak self] event in Task { @MainActor in self?.append(event) } }
+                    }
                 }
                 result = .success(value); status.stringValue = "Completed successfully"
             } catch is CancellationError {
@@ -589,12 +607,14 @@ private final class RepositoryCreationProcessViewController: NSViewController, N
             } catch {
                 result = .failure(error); status.stringValue = "Failed"; appendText("\n\(error.localizedDescription)\n", color: .systemRed)
             }
+            processInput.finish()
             progress.stopAnimation(nil); abortButton.isEnabled = false; closeButton.isEnabled = true; task = nil
             if case .success = result, keepOpen.state == .off { finish() }
         }
     }
 
     private func append(_ event: GitOutputEvent) {
+        processInput.observeOutput(event.text)
         appendText(event.text, color: event.stream == .standardError ? .systemRed : .textColor)
         let lines = event.text.split(whereSeparator: { $0 == "\r" || $0 == "\n" })
         if let last = lines.last, !last.isEmpty {
@@ -619,7 +639,7 @@ private final class RepositoryCreationProcessViewController: NSViewController, N
     @objc private func abort() { status.stringValue = "Aborting…"; task?.cancel() }
     @objc private func close() { finish() }
     func windowWillClose(_ notification: Notification) { if task != nil { task?.cancel() }; finish() }
-    private func finish() { guard !didClose else { return }; didClose = true; onClose?(result) }
+    private func finish() { guard !didClose else { return }; didClose = true; processInput.finish(); onClose?(result) }
 }
 
 @MainActor
@@ -632,4 +652,14 @@ private func fieldAndButton(_ field: NSView, _ button: NSButton) -> NSView {
     let row = NSStackView(views: [field, button]); row.orientation = .horizontal; row.alignment = .centerY; row.spacing = 8
     field.setContentHuggingPriority(.defaultLow, for: .horizontal)
     return row
+}
+
+enum ClonePickerLocation {
+    static func directory(for destination: String) -> URL? {
+        let path = NSString(string: destination.trimmingCharacters(in: .whitespacesAndNewlines)).expandingTildeInPath
+        guard path.hasPrefix("/") else { return nil }
+        var url = URL(fileURLWithPath: path, isDirectory: true)
+        while !FileManager.default.fileExists(atPath: url.path), url.path != "/" { url.deleteLastPathComponent() }
+        return url
+    }
 }

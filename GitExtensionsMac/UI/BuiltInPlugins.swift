@@ -27,12 +27,12 @@ enum BuiltInPluginKind: CaseIterable {
         switch self {
         case .backgroundFetch:
             return [value("Arguments of git command to run", "fetch --all"),
-                value("Fetch every (seconds) - set to 0 to disable", "0", .number(minimum: 0, maximum: Int.max)),
+                value("Fetch every (seconds) - set to 0 to disable", "0", .number(minimum: 0, maximum: Int(Int32.max))),
                 value("Refresh view after fetch", "false", .boolean), value("Fetch all submodules", "false", .boolean),
                 value("Fetch immediately on repository opening", "false", .boolean),
                 .init(name: "Warning", caption: "Background fetch updates remote refs. Without refreshing, force-with-lease may overwrite remote changes you have not reviewed.", kind: .information)]
         case .deleteBranches:
-            return [value("Delete obsolete branches older than (days)", "30", .number(minimum: 0, maximum: Int.max)),
+            return [value("Delete obsolete branches older than (days)", "30", .number(minimum: 0, maximum: Int(Int32.max))),
                 value("Branch where all branches should be merged in", "HEAD"),
                 value("Delete obsolete branches from remote", "false", .boolean),
                 value("Remote name obsoleted branches should be deleted from", "origin"),

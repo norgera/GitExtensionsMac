@@ -16,6 +16,7 @@ final class CommitDetailViewController: NSViewController, NSTextViewDelegate {
     private let documentView = CommitInfoDocumentView()
     private let stack = NSStackView()
     private let avatar = AuthorAvatarView()
+    private var avatarSizeConstraints: [NSLayoutConstraint] = []
     let headerText = CommitInfoTextView()
     let messageText = CommitInfoTextView()
     let revisionInfoText = CommitInfoTextView()
@@ -23,7 +24,7 @@ final class CommitDetailViewController: NSViewController, NSTextViewDelegate {
     private let scrollView = NSScrollView()
 
     private(set) var commit: Commit?
-    private var childIDs: [ObjectID] = []
+    private var childIDs: [RevisionID] = []
     private(set) var headerRows: [CommitInfoPresentation.HeaderRow] = []
     private var loadTask: Task<Void, Never>?
     private var tagOrderTask: Task<Void, Never>?
@@ -49,7 +50,9 @@ final class CommitDetailViewController: NSViewController, NSTextViewDelegate {
         stack.translatesAutoresizingMaskIntoConstraints = false
         avatar.translatesAutoresizingMaskIntoConstraints = false
         avatar.commitInfoMode = true
-        NSLayoutConstraint.activate([avatar.widthAnchor.constraint(equalToConstant: 80), avatar.heightAnchor.constraint(equalToConstant: 80)])
+        avatarSizeConstraints = [avatar.widthAnchor.constraint(equalToConstant: 80), avatar.heightAnchor.constraint(equalToConstant: 80)]
+        NSLayoutConstraint.activate(avatarSizeConstraints)
+        updateAvatarSize()
         for text in [headerText, messageText, revisionInfoText] {
             text.delegate = self
             text.owner = self
@@ -109,7 +112,7 @@ final class CommitDetailViewController: NSViewController, NSTextViewDelegate {
 
 
 
-    func apply(commit: Commit, children: [ObjectID]) {
+    func apply(commit: Commit, children: [RevisionID]) {
         if self.commit?.id != commit.id { linksInfo = [] }
         self.commit = commit
         childIDs = children
@@ -117,10 +120,18 @@ final class CommitDetailViewController: NSViewController, NSTextViewDelegate {
         stack.isHidden = false
         headerRows = CommitInfoPresentation.header(commit, children: children)
         headerText.setContent(renderHeader(headerRows))
+        updateAvatarSize()
         avatar.apply(name: commit.authorName, email: commit.authorEmail)
         reloadCommitInfo()
     }
 
+
+    var displayedAvatarSize: CGFloat { avatarSizeConstraints.first?.constant ?? 0 }
+
+    func updateAvatarSize() {
+        let size = CGFloat(AppSettingsStore.shared.authorImageSizeInCommitInfo)
+        avatarSizeConstraints.forEach { $0.constant = size }
+    }
 
     func clear() {
         loadTask?.cancel()
@@ -165,7 +176,7 @@ final class CommitDetailViewController: NSViewController, NSTextViewDelegate {
         body = commit.body.isEmpty ? commit.subject : commit.subject + "\n\n" + commit.body
         notes = commit.notes
         renderMessage(links: [:])
-        guard !commit.isArtificial, let objectID = commit.objectID, let source else {
+        guard commit.loadsCommitInfo, let objectID = commit.objectID, let source else {
             revisionInfoText.setContent(NSAttributedString())
             return
         }
@@ -263,10 +274,10 @@ final class CommitDetailViewController: NSViewController, NSTextViewDelegate {
         let text = CommitInfoPresentation.bodyAndNotes(body, notes: notes).trimmingCharacters(in: .whitespacesAndNewlines)
         let font = messageText.font ?? .systemFont(ofSize: 12)
         let result = NSMutableAttributedString(string: text, attributes: [.font: font, .foregroundColor: NSColor.labelColor])
-        if commit?.isArtificial == false {
+        if commit?.loadsCommitInfo == true {
             for candidate in CommitInfoPresentation.hashCandidates(in: text) {
                 guard let id = links[candidate.hash] else { continue }
-                result.addAttribute(.link, value: CommitInfoPresentation.Link.commit(id).url, range: NSRange(candidate.range, in: text))
+                result.addAttribute(.link, value: CommitInfoPresentation.Link.commit(.object(id)).url, range: NSRange(candidate.range, in: text))
             }
         }
         messageText.setContent(result)
@@ -324,7 +335,7 @@ final class CommitDetailViewController: NSViewController, NSTextViewDelegate {
         guard let link = CommitInfoPresentation.Link(url: url) else { return }
         switch link {
         case .commit(let id):
-            onGoToRevision?(.object(id))
+            onGoToRevision?(id)
         case .branch(let name), .tag(let name):
             guard let source else { return }
             Task { @MainActor [weak self] in

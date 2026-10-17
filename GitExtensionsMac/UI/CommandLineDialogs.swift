@@ -7,7 +7,7 @@ final class CommandLineHelpWindow: NSWindowController {
     init() {
         let text = NSTextView()
         text.isEditable = false
-        text.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
+        text.font = AppSettingsStore.shared.applicationFont(size: 12)
         text.textContainerInset = NSSize(width: 10, height: 10)
         text.string = CommandLineSession.header + "\n\n" + CommandLineSession.usage
         text.isVerticallyResizable = true
@@ -15,12 +15,13 @@ final class CommandLineHelpWindow: NSWindowController {
         let scroll = NSScrollView()
         scroll.documentView = text
         scroll.hasVerticalScroller = true
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 720, height: 660), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 394, height: 662), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         window.title = "Commandline usage"
+        window.minSize = NSSize(width: 410, height: 700)
         window.contentView = scroll
         window.isReleasedWhenClosed = false
         super.init(window: window)
-        window.center()
+        OwnedModalWindow.center(window, over: OwnedModalWindow.defaultOwner)
     }
     required init?(coder: NSCoder) { nil }
 }
@@ -31,10 +32,13 @@ final class CommandLineAddFilesWindow: NSWindowController {
         let controller = AddFilesController(source: source, paths: paths, changed: changed)
         let window = NSWindow(contentViewController: controller)
         window.title = "Add files"
-        window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
-        window.setContentSize(NSSize(width: 600, height: 150))
+        window.styleMask = [.titled, .closable, .resizable]
+        window.setContentSize(NSSize(width: 552, height: 73))
+        window.contentMinSize = NSSize(width: 552, height: 73)
+        window.contentMaxSize = NSSize(width: 10_000, height: 73)
         window.isReleasedWhenClosed = false
         super.init(window: window)
+        OwnedModalWindow.center(window, over: OwnedModalWindow.defaultOwner)
     }
     required init?(coder: NSCoder) { nil }
 
@@ -55,21 +59,31 @@ final class CommandLineAddFilesWindow: NSWindowController {
             let root = NSView()
             let preview = NSButton(title: "Show files", target: self, action: #selector(showFiles))
             let add = NSButton(title: "Add files", target: self, action: #selector(addFiles))
-            add.keyEquivalent = "\r"
-            let cancel = NSButton(title: "Cancel", target: self, action: #selector(cancel))
-            cancel.keyEquivalent = "\u{1b}"
-            let buttons = NSStackView(views: [force, preview, add, cancel])
-            let stack = NSStackView(views: [NSTextField(labelWithString: "Filter"), filter, buttons])
-            stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 12
-            stack.translatesAutoresizingMaskIntoConstraints = false
-            root.addSubview(stack)
-            NSLayoutConstraint.activate([stack.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 16), stack.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -16), stack.topAnchor.constraint(equalTo: root.topAnchor, constant: 16), stack.bottomAnchor.constraint(lessThanOrEqualTo: root.bottomAnchor, constant: -16), filter.widthAnchor.constraint(equalTo: stack.widthAnchor)])
+            let label = NSTextField(labelWithString: "Filter")
+            label.setContentCompressionResistancePriority(.required, for: .horizontal)
+            let row = NSStackView(views: [label, filter, preview, add])
+            row.alignment = .centerY
+            row.spacing = 8
+            for button in [preview, add] { button.setContentCompressionResistancePriority(.required, for: .horizontal) }
+            row.translatesAutoresizingMaskIntoConstraints = false
+            force.translatesAutoresizingMaskIntoConstraints = false
+            root.addSubview(row)
+            root.addSubview(force)
+            NSLayoutConstraint.activate([
+                row.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 12),
+                row.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -12),
+                row.topAnchor.constraint(equalTo: root.topAnchor, constant: 6),
+                filter.widthAnchor.constraint(greaterThanOrEqualToConstant: 160),
+                force.leadingAnchor.constraint(equalTo: filter.leadingAnchor),
+                force.topAnchor.constraint(equalTo: row.bottomAnchor, constant: 6),
+                force.bottomAnchor.constraint(lessThanOrEqualTo: root.bottomAnchor, constant: -6)
+            ])
             view = root
         }
         override func viewDidAppear() { super.viewDidAppear(); view.window?.makeFirstResponder(filter) }
         @objc func showFiles() { execute(dryRun: true) }
         @objc func addFiles() { execute(dryRun: false) }
-        @objc func cancel() { task?.cancel(); view.window?.close() }
+        override func cancelOperation(_ sender: Any?) { task?.cancel(); view.window?.close() }
         func execute(dryRun: Bool) {
             guard task == nil, let owner = view.window else { return }
             let value = filter.stringValue, forced = force.state == .on
@@ -91,7 +105,7 @@ final class CommandLineAddFilesWindow: NSWindowController {
 @MainActor
 final class CommandLinePresentation {
     private let owner: NSWindow
-    private let existing: Set<ObjectIdentifier>
+    private let existing = NSHashTable<NSWindow>.weakObjects()
     private var windows: [ObjectIdentifier: NSWindow] = [:]
     private var observers: [NSObjectProtocol] = []
     private(set) var presented = false
@@ -102,7 +116,7 @@ final class CommandLinePresentation {
 
     init(owner: NSWindow, notifier: RepositoryChangedNotifier? = nil) {
         self.owner = owner
-        existing = Set(NSApp.windows.map(ObjectIdentifier.init))
+        for window in NSApp.windows { existing.add(window) }
         if let notifier { subscription = notifier.subscribe { [weak self] _, _ in self?.mutated = true } }
         for name in [NSWindow.didBecomeKeyNotification, NSWindow.didBecomeMainNotification, NSWindow.willCloseNotification] {
             observers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] notification in
@@ -116,7 +130,7 @@ final class CommandLinePresentation {
     }
     private func capture(_ window: NSWindow) {
         let identity = ObjectIdentifier(window)
-        guard window !== owner, !existing.contains(identity) else { return }
+        guard window !== owner, !existing.allObjects.contains(where: { $0 === window }) else { return }
         windows[identity] = window
         presented = true
         if hidesOwner, window.sheetParent == nil, owner.attachedSheet == nil { owner.orderOut(nil) }

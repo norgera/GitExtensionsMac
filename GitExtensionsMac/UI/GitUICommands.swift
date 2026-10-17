@@ -42,6 +42,14 @@ final class GitUICommands {
     private var commandLineWindows: [NSWindowController] = []
     private static var applicationCommandLineWindows: [NSWindowController] = []
 
+    private final class WeakCommands { weak var value: GitUICommands?; init(_ value: GitUICommands) { self.value = value } }
+    private static var registered: [ObjectIdentifier: WeakCommands] = [:]
+
+    static func commands(for source: AnyObject) -> GitUICommands? {
+        registered = registered.filter { $0.value.value != nil }
+        return registered[ObjectIdentifier(source)]?.value
+    }
+
     init(
         repositoryModule: any RepositoryBrowsingDataSource,
         browser: RepositoryBrowserViewController
@@ -49,6 +57,7 @@ final class GitUICommands {
         self.repositoryModule = repositoryModule
         self.browser = browser
         repositoryChangedNotifier = RepositoryChangedNotifier {}
+        Self.registered[ObjectIdentifier(repositoryModule as AnyObject)] = WeakCommands(self)
     }
 
     func perform(
@@ -85,6 +94,7 @@ final class GitUICommands {
     }
 
     static func runApplicationCommandLine(_ request: CommandLineRequest, owner: NSWindow,
+                                         fileEditingSource: (any RepositoryFileEditingDataSource)? = nil,
                                          openRepository: @escaping (URL) -> Void) async throws -> CommandLineDispatch {
         let executable = URL(fileURLWithPath: AppSettingsStore.shared.preferences.gitExecutablePath)
         switch request.verb {
@@ -111,7 +121,7 @@ final class GitUICommands {
             guard let name = request.arguments.first else { throw CLIError.invalid("No file selected.") }
             return .completed(try await withCheckedThrowingContinuation { continuation in
                 var controller: FileEditorWindowController!
-                controller = FileEditorWindowController(fileURL: request.path(name), source: StandaloneFileEditingDataSource(), showWarning: false, onClose: {
+                controller = FileEditorWindowController(fileURL: request.path(name), source: fileEditingSource ?? StandaloneFileEditingDataSource(), showWarning: false, displayName: name, onClose: {
                     continuation.resume(returning: controller.acceptedClose)
                     applicationCommandLineWindows.removeAll { $0 === controller }
                     controller = nil
@@ -120,6 +130,7 @@ final class GitUICommands {
                     do {
                         try await controller.load()
                         applicationCommandLineWindows.append(controller)
+                        if CommandLineSession.active { owner.orderOut(nil) }
                         controller.showWindow(nil); controller.window?.makeKeyAndOrderFront(nil)
                     } catch { continuation.resume(throwing: error); controller = nil }
                 }
@@ -200,7 +211,7 @@ final class GitUICommands {
             return .completed(true)
         case .fileeditor:
             return .completed(await withCheckedContinuation { continuation in
-                startFileEditor(request.path(request.arguments[0]), onFinished: { continuation.resume(returning: $0) })
+                startFileEditor(request.path(request.arguments[0]), displayName: request.arguments[0], onFinished: { continuation.resume(returning: $0) })
             })
         case .formatpatch: startPatch(.format, selected: identity.headID.map { id in browser.revisions.filter { $0.id == .object(id) } } ?? [])
         case .gitignore: startEditGitIgnore(localExclude: false)
@@ -269,7 +280,7 @@ final class GitUICommands {
             return .completed(result)
         case .settings:
             return .completed(await ApplicationShellDialogs.presentSettings(from: owner, source: repositoryModule as? any RepositorySettingsDataSource,
-                repositoryChanged: { [weak self] in self?.notifyRepositoryChanged() }))
+                pluginPages: try await pluginSettingsPages(), repositoryChanged: { [weak self] in self?.notifyRepositoryChanged() }))
         case .stash: startStashManagement()
         case .synchronize:
             var allSucceeded = true
@@ -363,14 +374,23 @@ final class GitUICommands {
                     defer { repositoryChangedNotifier.unlock(requestNotify: false) }
                     if try await plugin.execute(in: host) { notifyRepositoryChanged() }
                 } else if action == .alertSecondButtonReturn {
-                    if let view = try plugin.settingsController(in: host) {
-                        let window = NSWindow(contentViewController: view)
+                    if !(plugin is BuiltInPlugin), !(plugin is GitHubRepositoryPlugin),
+                       let custom = try plugin.settingsController(in: host), !(custom is PluginSettingsViewController) {
+                        let window = NSWindow(contentViewController: custom)
                         window.title = "Settings — \(plugin.name)"; window.isReleasedWhenClosed = false
                         let controller = NSWindowController(window: window)
                         pluginWindows.append(controller); controller.showWindow(nil)
-                    } else {
-                        let message = NSAlert(); message.messageText = "\(plugin.name) has no settings."; message.runModal()
+                        return
                     }
+                    guard !plugin.settings.isEmpty else {
+                        let message = NSAlert(); message.messageText = "\(plugin.name) has no settings."; message.runModal(); return
+                    }
+                    guard let owner = browser?.view.window else { return }
+                    _ = await ApplicationShellDialogs.presentSettings(from: owner,
+                        source: repositoryModule as? any RepositorySettingsDataSource,
+                        initialPage: PluginSettingsPageEntry(plugin: plugin, host: host).id,
+                        pluginPages: try await pluginSettingsPages(),
+                        repositoryChanged: { [weak self] in self?.notifyRepositoryChanged() })
                 }
             } catch { NSAlert(error: error).runModal() }
         }
@@ -505,23 +525,24 @@ final class GitUICommands {
         let response = alert.runModal()
         guard response != .alertThirdButtonReturn else { return }
         let plugin = entries[choices.indexOfSelectedItem].plugin
-        let settings = ApplicationPluginSettings(identifier: plugin.identifier, legacyName: plugin.pluginDescription,
-            locations: nil, defaults: .standard)
-        let host = GitExtensionPluginHost(refresh: {}, navigate: { _ in throw PluginError.invalid("Open a repository first.") },
-            readSetting: { try settings.value($0, scope: DistributedSettingsScope(rawValue: $1.rawValue)!) },
-            writeSetting: { try settings.set($0, value: $1, scope: DistributedSettingsScope(rawValue: $2.rawValue)!) })
-        host.update(context: [:], owner: owner)
+        let host = globalPluginSettingsHost(plugin, owner: owner)
         Task { @MainActor in
             do {
                 if response == .alertFirstButtonReturn {
-                    if let controller = try plugin.settingsController(in: host) {
-                        let window = NSWindow(contentViewController: controller)
+                    if !(plugin is BuiltInPlugin), !(plugin is GitHubRepositoryPlugin),
+                       let custom = try plugin.settingsController(in: host), !(custom is PluginSettingsViewController) {
+                        let window = NSWindow(contentViewController: custom)
                         window.title = "Settings — \(plugin.name)"; window.isReleasedWhenClosed = false
                         let presentation = NSWindowController(window: window)
                         globalPluginWindows.append(presentation); presentation.showWindow(nil)
-                    } else {
-                        let message = NSAlert(); message.messageText = "\(plugin.name) has no settings."; message.runModal()
+                        return
                     }
+                    guard !plugin.settings.isEmpty else {
+                        let message = NSAlert(); message.messageText = "\(plugin.name) has no settings."; message.runModal(); return
+                    }
+                    guard let owner else { return }
+                    _ = await ApplicationShellDialogs.presentSettings(from: owner,
+                        initialPage: PluginSettingsPageEntry(plugin: plugin, host: host).id)
                 } else if !plugin.requiresRepository {
                     defer { plugin.unregister(from: host) }
                     try plugin.register(with: host)
@@ -529,6 +550,28 @@ final class GitUICommands {
                 }
             } catch { NSAlert(error: error).runModal() }
         }
+    }
+
+    static func globalPluginSettingsPages(owner: NSWindow?) -> [PluginSettingsPageEntry] {
+        globalPluginRegistry.load()
+        return PluginSettingsPageEntry.pages(globalPluginRegistry.entries.map {
+            ($0.plugin, globalPluginSettingsHost($0.plugin, owner: owner))
+        })
+    }
+
+    private static func globalPluginSettingsHost(_ plugin: any GitExtensionPlugin, owner: NSWindow?) -> GitExtensionPluginHost {
+        let settings = ApplicationPluginSettings(identifier: plugin.identifier, legacyName: plugin.pluginDescription,
+            locations: nil, defaults: .standard)
+        let host = GitExtensionPluginHost(refresh: {}, navigate: { _ in throw PluginError.invalid("Open a repository first.") },
+            readSetting: { try settings.value($0, scope: DistributedSettingsScope(rawValue: $1.rawValue)!) },
+            writeSetting: { try settings.set($0, value: $1, scope: DistributedSettingsScope(rawValue: $2.rawValue)!) })
+        host.update(context: [:], owner: owner)
+        return host
+    }
+
+    private func pluginSettingsPages() async throws -> [PluginSettingsPageEntry] {
+        try await initializePlugins()
+        return PluginSettingsPageEntry.pages(pluginSession.registered)
     }
 
     private func executePlugin(named name: String, context: [String: [String]], module: (any RepositoryBrowsingDataSource)? = nil) async throws {
@@ -656,26 +699,21 @@ final class GitUICommands {
 
     func startArchive(selected: [Commit]) {
         guard let browser, let owner = browser.view.window,
-              let source = repositoryModule as? any RepositoryArchivingDataSource else { return }
+              let source = repositoryModule as? any RepositoryArchivingDataSource,
+              repositoryModule is any RepositoryRevisionComparingDataSource else { return }
         guard (1...2).contains(selected.count), selected.allSatisfy({ !$0.isArtificial }) else {
             Task { await MutationDialogs.showInformation("Select only one or two real revisions.", title: "Archive", window: owner) }
             return
         }
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            do {
-                let request = try await repositoryModule.revisionReadRequest()
-                var history: [Commit] = []
-                for try await batch in await request.reader.read(request.context) { history += batch }
-                let id = UUID()
-                let controller = ArchiveWindowController(source: source,
-                    repositoryName: browser.repositoryIdentity?.currentRepository.name ?? "repository",
-                    history: history, selected: selected, closed: { [weak self] in self?.archiveWindows[id] = nil })
-                archiveWindows[id] = controller
-                controller.window?.setFrameOrigin(NSPoint(x: owner.frame.minX + 30, y: owner.frame.minY + 30))
-                controller.showWindow(nil); controller.window?.makeKeyAndOrderFront(nil)
-            } catch { await MutationDialogs.showError(error, title: "Archive", window: owner) }
-        }
+        let id = UUID()
+        let controller = ArchiveWindowController(source: source,
+            repositoryName: browser.repositoryIdentity?.currentRepository.name ?? "repository",
+            selected: selected, chooseCommit: { [weak self] revision, owner in
+                await self?.pickCommit(preselect: revision, owner: owner)
+            }, closed: { [weak self] in self?.archiveWindows[id] = nil })
+        archiveWindows[id] = controller
+        controller.window?.setFrameOrigin(NSPoint(x: owner.frame.minX + 30, y: owner.frame.minY + 30))
+        controller.showWindow(nil); controller.window?.makeKeyAndOrderFront(nil)
     }
 
     func startScripts() {
@@ -728,19 +766,18 @@ final class GitUICommands {
         options.merge(fileContext ?? ["SelectedRelativePaths": [], "LineNumber": ["1"], "ColumnNumber": ["1"]]) { _, value in value }
         options.merge(context) { _, value in value }
         return ScriptOptionSelection.resolve(options, arguments: script.arguments) { [weak self] option, values in
-            (self?.scriptOptionChooser ?? Self.chooseScriptOption)(option, values)
+            if let chooser = self?.scriptOptionChooser { return chooser(option, values) }
+            return Self.chooseScriptOption(option, values, options: options, owner: self?.browser?.view.window,
+                                           anchor: self?.browser?.scriptChooserAnchor)
         }
     }
 
     var scriptOptionChooser: ((String, [String]) -> Int?)?
 
-    static func chooseScriptOption(_ option: String, _ values: [String]) -> Int? {
-        let alert = NSAlert(); alert.messageText = "Select \(option)"
-        let choices = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 400, height: 26))
-        choices.addItems(withTitles: values); alert.accessoryView = choices
-        alert.addButton(withTitle: "OK"); alert.addButton(withTitle: "Cancel")
-        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
-        return choices.indexOfSelectedItem
+    static func chooseScriptOption(_ option: String, _ values: [String], options: [String: [String]] = [:],
+                                   owner: NSWindow? = nil, anchor: NSPoint? = nil) -> Int? {
+        ScriptChoiceWindow(presentation: ScriptChoicePresentation(option: option, values: values, options: options))
+            .run(owner: owner, anchor: anchor)
     }
 
     func startScript(_ script: ScriptDefinition) {
@@ -876,10 +913,13 @@ final class GitUICommands {
         guard let owner = browser?.view.window else { return }
         Task { @MainActor [weak self] in
             guard let self else { return }
-            let accepted = await ApplicationShellDialogs.presentSettings(from: owner, source: repositoryModule as? any RepositorySettingsDataSource,
-                initialPage: initialPage, initialScope: initialScope,
-                repositoryChanged: { [weak self] in self?.notifyRepositoryChanged() })
-            pluginEvent("PostSettings", succeeded: accepted)
+            do {
+                let pages = try await pluginSettingsPages()
+                let accepted = await ApplicationShellDialogs.presentSettings(from: owner, source: repositoryModule as? any RepositorySettingsDataSource,
+                    initialPage: initialPage, initialScope: initialScope, pluginPages: pages,
+                    repositoryChanged: { [weak self] in self?.notifyRepositoryChanged() })
+                pluginEvent("PostSettings", succeeded: accepted)
+            } catch { await MutationDialogs.showError(error, title: "Settings", window: owner) }
         }
     }
 
@@ -970,7 +1010,8 @@ final class GitUICommands {
             open: { [weak self] submodule, pull in
                 if pull { self?.startSubmodulePull(path: submodule.path) }
                 else { self?.startOpenSubmodule(submodule) }
-            }, closed: { [weak self] in self?.submoduleWindowController = nil })
+            }, pullRepository: { [weak self] in self?.startPull(action: AppSettingsStore.shared.pullPreferences.formAction, immediately: false) },
+            closed: { [weak self] in self?.submoduleWindowController = nil })
     }
 
     static func resolveSubmoduleConflict(source: any RepositorySubmoduleManagingDataSource, path: String, owner: NSWindow,
@@ -1063,6 +1104,7 @@ final class GitUICommands {
                         guard let self, let remotes = child as? any RepositoryRemoteManagingDataSource else { return }
                         self.submoduleRemoteWindowController = RemoteManagementDialog.present(source: remotes, selectedRemote: remote, selectedLocalBranch: branch,
                             onFetchRemote: { name, owner in
+                                Self.rememberFetchPullAction()
                                 _ = await PullProcessDialog.run(request: RepositoryPullRequest(source: .remote(name), mode: .fetch), source: pullSource, parent: owner, scriptHooks: self.scriptHooks(for: child))
                             }, onRepositoryChanged: { [weak self] in self?.notifyRepositoryChanged() },
                             onClose: { [weak self] in self?.submoduleRemoteWindowController = nil })
@@ -1178,20 +1220,24 @@ final class GitUICommands {
 
     static let dontConfirmUndoLastCommitKey = "GitExtensionsMac.DontConfirmUndoLastCommit"
 
+    static func confirmUndoLastCommit(respond: (NSAlert) -> NSApplication.ModalResponse = { $0.runModal() }) -> Bool {
+        if UserDefaults.standard.bool(forKey: dontConfirmUndoLastCommitKey) { return true }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Undo last commit"
+        alert.informativeText = "You will still be able to find all the commit's changes in the staging area\n\nDo you want to continue?"
+        alert.addButton(withTitle: "Yes"); alert.addButton(withTitle: "No")
+        alert.showsSuppressionButton = true
+        let response = respond(alert)
+        if alert.suppressionButton?.state == .on { UserDefaults.standard.set(true, forKey: dontConfirmUndoLastCommitKey) }
+        return response == .alertFirstButtonReturn
+    }
+
 
     func startUndoLastCommit() {
         guard let browser, let owner = browser.view.window,
               let source = repositoryModule as? any RepositoryBrowserMaintenanceDataSource else { return }
-        if !UserDefaults.standard.bool(forKey: Self.dontConfirmUndoLastCommitKey) {
-            let alert = NSAlert()
-            alert.alertStyle = .warning
-            alert.messageText = "Undo last commit"
-            alert.informativeText = "You will still be able to find all the commit's changes in the staging area\n\nDo you want to continue?"
-            alert.addButton(withTitle: "Yes"); alert.addButton(withTitle: "No")
-            alert.showsSuppressionButton = true
-            guard alert.runModal() == .alertFirstButtonReturn else { return }
-            if alert.suppressionButton?.state == .on { UserDefaults.standard.set(true, forKey: Self.dontConfirmUndoLastCommitKey) }
-        }
+        guard Self.confirmUndoLastCommit() else { return }
         Task { @MainActor [weak self] in
             do {
                 let result = try await source.undoLastCommit()
@@ -1209,11 +1255,19 @@ final class GitUICommands {
     }
 
 
-    func openTerminal() {
-        guard let path = browser?.repositoryIdentity?.currentRepository.path,
-              let terminal = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.Terminal") else { return }
-        NSWorkspace.shared.open([URL(fileURLWithPath: path, isDirectory: true)], withApplicationAt: terminal,
-                                configuration: NSWorkspace.OpenConfiguration())
+    func openTerminal(shellID: String? = nil) {
+        guard let browser, let path = browser.repositoryIdentity?.currentRepository.path else { return }
+        let provider = browser.shellProvider
+        let shell = shellID.flatMap { id in provider.available.first { $0.id == id } } ?? provider.preferred(AppSettingsStore.shared.preferences.defaultShell)
+        guard let shell else { return }
+        Task { @MainActor [weak browser] in
+            do { try await provider.open(shell, directory: URL(fileURLWithPath: path, isDirectory: true)) }
+            catch {
+                if let owner = browser?.view.window {
+                    await MutationDialogs.showValidationError("Failed to run shell \"\(shell.name)\".\n\(error.localizedDescription)", caption: "Error", window: owner)
+                }
+            }
+        }
     }
 
 
@@ -1300,12 +1354,12 @@ final class GitUICommands {
     }
 
 
-    func startFileEditor(_ url: URL, showWarning: Bool = false, lineNumber: Int? = nil, owner: NSWindow? = nil, onClosed: (() -> Void)? = nil, onFinished: ((Bool) -> Void)? = nil) {
+    func startFileEditor(_ url: URL, showWarning: Bool = false, lineNumber: Int? = nil, displayName: String? = nil, owner: NSWindow? = nil, onClosed: (() -> Void)? = nil, onFinished: ((Bool) -> Void)? = nil) {
         let key = "file:" + url.standardizedFileURL.path
         if focusFileEditor(key) { return }
         guard let browser, let owner = owner ?? browser.view.window,
               let source = repositoryModule as? any RepositoryFileEditingDataSource else { onFinished?(false); return }
-        let controller = FileEditorWindowController(fileURL: url, source: source, showWarning: showWarning, lineNumber: lineNumber) { [weak self] in
+        let controller = FileEditorWindowController(fileURL: url, source: source, showWarning: showWarning, lineNumber: lineNumber, displayName: displayName) { [weak self] in
             let accepted = (self?.fileEditorWindows[key] as? FileEditorWindowController)?.acceptedClose ?? false
             self?.fileEditorWindows[key] = nil
             onClosed?()
@@ -1528,7 +1582,7 @@ final class GitUICommands {
         content.onPickCommit = { [weak self, weak controller, weak content] first in
             guard let self, let content, let window = controller?.window else { return }
             Task { @MainActor in
-                if let revision = await self.pickComparisonCommit(preselect: (first ? content.first : content.second).id, owner: window) {
+                if let revision = await self.pickCommit(preselect: (first ? content.first : content.second).id, showArtificial: true, owner: window) {
                     content.replaceEndpoint(first: first, revision: revision)
                 }
             }
@@ -1600,27 +1654,15 @@ final class GitUICommands {
         }
     }
 
-    private func pickComparisonCommit(preselect: RevisionID, owner: NSWindow) async -> Commit? {
+    func pickCommit(preselect: RevisionID?, showArtificial: Bool = false, owner: NSWindow) async -> Commit? {
         guard let source = repositoryModule as? any RepositoryRevisionComparingDataSource else { return nil }
-        let content = RevisionComparisonGridController(source: source, choosing: true, preselect: preselect)
-        content.grid.dataSource = repositoryModule as? any RepositoryRevisionGridDataSource
-        let controller = RevisionComparisonWindowController(content: content, title: "Choose commit", size: NSSize(width: 900, height: 550), autosave: "GitExtensionsMac.ChooseCommit")
-        configureComparisonGrid(content, controller: controller)
-        guard let window = controller.window else { return nil }
-        let subscription = repositoryChangedNotifier.subscribe { [weak content] _, _ in content?.reload() }
-        return await withCheckedContinuation { continuation in
-            var completed = false
-            let finish: (Commit?) -> Void = { value in
-                guard !completed else { return }; completed = true
-                subscription.cancel(); content.cancel(); content.onChoose = nil; controller.onClose = nil
-                owner.endSheet(window); window.orderOut(nil); continuation.resume(returning: value)
-            }
-            controller.onClose = { finish(nil) }
-            content.onChoose = finish
-            owner.beginSheet(window)
-
-            content.onChoose = { [controller] value in finish(value); _ = controller }
+        var subscription: RepositoryChangedSubscription?
+        let result = await RevisionCommitChooser.choose(source: source, preselect: preselect, showArtificial: showArtificial, owner: owner) { content, controller in
+            self.configureComparisonGrid(content, controller: controller)
+            subscription = self.repositoryChangedNotifier.subscribe { [weak content] _, _ in content?.reload() }
         }
+        subscription?.cancel()
+        return result
     }
 
     private func configureComparisonDiff(_ diff: RevisionDiffViewController, owner: NSWindow?) {
@@ -1680,7 +1722,7 @@ final class GitUICommands {
         (controller as? BlameWindowController)?.onClose = closed
         (controller as? CommitDiffWindowController)?.onClose = closed
         blameWindows[id] = controller
-        controller.window?.setFrameOrigin(NSPoint(x: owner.frame.minX + 30, y: owner.frame.minY + 30))
+        if let window = controller.window { OwnedModalWindow.center(window, over: owner, includingHiddenOwner: true) }
         controller.showWindow(nil)
         controller.window?.makeKeyAndOrderFront(nil)
     }
@@ -2139,6 +2181,7 @@ final class GitUICommands {
                 guard let self, let remotes = child as? any RepositoryRemoteManagingDataSource else { return }
                 self.submoduleRemoteWindowController = RemoteManagementDialog.present(source: remotes, selectedRemote: remote, selectedLocalBranch: branch,
                     onFetchRemote: { name, window in
+                        Self.rememberFetchPullAction()
                         if let pull = child as? any RepositoryPullingDataSource { _ = await PullProcessDialog.run(request: .init(source: .remote(name), mode: .fetch), source: pull, parent: window, scriptHooks: self.scriptHooks(for: child)) }
                     }, onRepositoryChanged: { [weak self] in self?.notifyRepositoryChanged() }, onClose: { [weak self] in self?.submoduleRemoteWindowController = nil })
             }, scriptHooks: scriptHooks(for: child), onRepositoryChanged: { [weak self] _ in self?.notifyRepositoryChanged() },
@@ -2177,7 +2220,7 @@ final class GitUICommands {
     }
 
 
-    private static func openWith(_ url: URL, owner: NSWindow) {
+    static func openWith(_ url: URL, owner: NSWindow) {
         let panel = NSOpenPanel()
         panel.directoryURL = URL(fileURLWithPath: "/Applications", isDirectory: true)
         panel.allowedContentTypes = [.application]
@@ -2377,10 +2420,17 @@ final class GitUICommands {
         )
     }
 
+    static func rememberFetchPullAction() {
+        var preferences = AppSettingsStore.shared.pullPreferences
+        preferences.formAction = .fetch
+        AppSettingsStore.shared.savePullPreferences(preferences)
+    }
+
     private func fetchAfterSavingRemote(named remote: String, parent: NSWindow) async {
         guard let source = repositoryModule as? any RepositoryPullingDataSource else { return }
         scriptHooks.begin()
         defer { scriptHooks.end() }
+        Self.rememberFetchPullAction()
         let request = RepositoryPullRequest(source: .remote(remote), mode: .fetch)
         guard let processResult = await PullProcessDialog.run(
             request: request,
@@ -2685,7 +2735,7 @@ final class GitUICommands {
         )
     }
 
-    func startCheckoutRevision(_ commit: Commit) {
+    func startCheckoutRevision(_ commit: Commit?) {
         makeCheckoutWorkflowCoordinator()?.checkoutRevision(commit)
     }
 
@@ -2996,6 +3046,7 @@ final class GitUICommands {
                 initial: initial,
                 revisions: browser.revisions,
                 remote: remote,
+                source: repositoryModule as? any RepositoryRevisionComparingDataSource,
                 window: window
             ) {
                 initial = value
@@ -3056,12 +3107,11 @@ final class GitUICommands {
             browser.showStatus("There are no tags to delete")
             return
         }
-        let activeRemotes = navigation.remotes.filter { !$0.isDisabled }
-        let preferredRemote = preferredTagRemote(browser: browser) ?? activeRemotes.first?.name ?? ""
         var initial = DeleteTagDialogValue(
-            name: initialName ?? references.tags.first?.name ?? "",
-            remote: preferredRemote
+            name: initialName ?? "",
+            remote: Self.currentRemote(references: references)
         )
+        let activeRemotes = navigation.remotes.filter { !$0.isDisabled }
         Task { @MainActor [weak self, weak browser, weak window] in
             guard let self, let browser, let window else { return }
             while let value = await TagDialogs.deleteTag(
@@ -3107,6 +3157,10 @@ final class GitUICommands {
                 }
             }
         }
+    }
+
+    static func currentRemote(references: RepositoryReferenceState) -> String {
+        references.branches.first(where: \.isCurrent)?.remoteName ?? ""
     }
 
     private func preferredTagRemote(browser: RepositoryBrowserViewController) -> String? {
