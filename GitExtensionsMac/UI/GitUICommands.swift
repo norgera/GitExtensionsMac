@@ -2467,6 +2467,7 @@ final class GitUICommands {
             context: context,
             initialBranch: initialBranch,
             executeImmediately: immediately,
+            owner: browser.view.window,
             initialForceWithLease: forceWithLease,
             onManageRemotes: { [weak self] remote, localBranch in
                 self?.startRemoteManagement(selectedRemote: remote, selectedLocalBranch: localBranch)

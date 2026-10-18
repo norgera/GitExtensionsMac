@@ -2638,6 +2638,7 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
             context: context,
             initialBranch: context.branches.first(where: \.isCurrent)?.name,
             executeImmediately: true,
+            owner: commitWindow,
             initialForceWithLease: forceWithLease,
             onManageRemotes: onManageRemotes ?? { _, _ in },
             scriptHooks: scriptHooks,

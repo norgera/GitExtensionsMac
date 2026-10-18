@@ -15,6 +15,7 @@ enum PushDialog {
         context: RepositoryNetworkContext,
         initialBranch: String? = nil,
         executeImmediately: Bool = false,
+        owner: NSWindow? = nil,
         initialForceWithLease: Bool = false,
         onManageRemotes: @escaping (String?, String?) -> Void,
         scriptHooks: ApplicationScriptHooks? = nil,
@@ -46,8 +47,13 @@ enum PushDialog {
         controller.onClose = onClose
         controller.onCompletion = onCompletion
         let windowController = NSWindowController(window: window)
-        windowController.showWindow(nil)
-        window.makeKeyAndOrderFront(nil)
+        if executeImmediately, let owner {
+            controller.hiddenOwner = owner
+            window.center()
+        } else {
+            windowController.showWindow(nil)
+            window.makeKeyAndOrderFront(nil)
+        }
         return windowController
     }
 }
@@ -56,6 +62,7 @@ enum PushDialog {
 private final class PushDialogViewController: NSViewController,
     NSWindowDelegate, NSComboBoxDelegate, NSTextFieldDelegate, NSTabViewDelegate, NSTableViewDataSource, NSTableViewDelegate {
     var scriptHooks: ApplicationScriptHooks?
+    weak var hiddenOwner: NSWindow?
     private static let allRefs = "[ All ]"
     private static let head = "HEAD"
 
@@ -462,6 +469,7 @@ private final class PushDialogViewController: NSViewController,
             } catch {
                 statusLabel.stringValue = error.localizedDescription
                 operationTask = nil
+                if executeImmediately { revealIfHidden() }
             }
         }
     }
@@ -776,6 +784,16 @@ private final class PushDialogViewController: NSViewController,
         )
     }
 
+    private var presentationWindow: NSWindow? {
+        guard let window, !window.isVisible, let hiddenOwner else { return window }
+        return hiddenOwner
+    }
+
+    private func revealIfHidden() {
+        guard let window, !window.isVisible, !didClose else { return }
+        window.makeKeyAndOrderFront(nil)
+    }
+
     private func attemptImmediateExecutionIfReady() {
         guard executeImmediately, !didAttemptImmediateExecution else { return }
         didAttemptImmediateExecution = true
@@ -783,9 +801,11 @@ private final class PushDialogViewController: NSViewController,
     }
 
     @objc private func push() {
-        guard operationTask == nil, let window, let state = pushState else { return }
+        guard operationTask == nil, let window = presentationWindow, let state = pushState else { return }
         operationTask = Task { @MainActor [weak self, weak window] in
             guard let self, let window else { return }
+            var completed = false
+            defer { if !completed { revealIfHidden() } }
             do {
                 guard var request = try await makeValidatedRequest(state: state, window: window) else {
                     operationTask = nil
@@ -816,8 +836,10 @@ private final class PushDialogViewController: NSViewController,
                                 _ = await scriptHooks?.run(.afterPush)
                             }
                             lastPushCompleted = true
+                            completed = true
                             openPullRequestIfRequested(request: request)
                             self.window?.close()
+                            finish()
                             operationTask = nil
                             return
                         }

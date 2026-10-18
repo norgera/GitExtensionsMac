@@ -457,6 +457,67 @@ extension UIIntegrationTests {
             #expect(try fixture.git(["ls-files", "--stage", "--", "sub"], in: superproject).hasPrefix("160000 \(head) 0"), "gitlink points at the new commit")
         }
 
+        @Test("Commit and push pushes without showing the Push window") private static func commitAndPushWindows() async throws {
+            func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
+            func wait(_ message: String, _ condition: () throws -> Bool) async throws {
+                let deadline = ContinuousClock.now + .seconds(20)
+                while try !condition() {
+                    try #require(ContinuousClock.now < deadline, Comment(rawValue: message))
+                    try await Task.sleep(for: .milliseconds(20))
+                }
+            }
+            func pushWindows() -> [NSWindow] { NSApp.windows.filter { $0.title.hasPrefix("Push (") } }
+            for failing in [false, true] {
+                let fixture = try FileStatusFixture.make()
+                defer { fixture.remove() }
+                try fixture.write("base.txt", "base\n")
+                try fixture.commitAll("base")
+                let remote = fixture.root.appendingPathComponent("remote.git")
+                _ = try fixture.git(["init", "-q", "--bare", remote.path])
+                _ = try fixture.git(["remote", "add", "origin", remote.path])
+                _ = try fixture.git(["push", "-q", "-u", "origin", "HEAD"])
+                if failing { _ = try fixture.git(["remote", "set-url", "origin", fixture.root.appendingPathComponent("missing.git").path]) }
+                try fixture.write("base.txt", "changed\n")
+                _ = try fixture.git(["add", "base.txt"])
+                let browser = RepositoryBrowserViewController(repositoryModule: GitRepositoryModule(repositoryURL: fixture.repo, git: FileStatusFixtureGit()))
+                let window = NSWindow(contentRect: .init(x: 0, y: 0, width: 1200, height: 800), styleMask: [.titled, .resizable, .closable], backing: .buffered, defer: false)
+                window.isReleasedWhenClosed = false
+                window.contentViewController = browser
+                window.makeKeyAndOrderFront(nil)
+                defer {
+                    pushWindows().forEach { $0.close() }
+                    browser.commitWindowController?.window?.close()
+                    browser.viewWillDisappear()
+                    window.close()
+                }
+                try await wait("browser loads") { browser.repositoryIdentity != nil && !browser.revisions.isEmpty }
+                browser.uiCommands.startCommit()
+                func commitAndPushButton() -> NSButton? {
+                    browser.commitWindowController?.window.flatMap { descendants($0.contentView!).compactMap { $0 as? NSButton }.first { $0.title == "Commit & push" && $0.isEnabled } }
+                }
+                try await wait("commit dialog ready") { commitAndPushButton() != nil }
+                let dialog = try #require(browser.commitWindowController?.window)
+                try #require(descendants(dialog.contentView!).compactMap { $0 as? CommitMessageTextView }.first).string = "commit and push"
+                try #require(commitAndPushButton()).performClick(nil)
+                try await wait("push output attaches to the Commit window") { dialog.attachedSheet?.title == "Push to origin" }
+                #expect(pushWindows().allSatisfy { !$0.isVisible }, "Push window stays hidden while pushing")
+                let sheet = try #require(dialog.attachedSheet)
+                func ok() -> NSButton? { descendants(sheet.contentView!).compactMap { $0 as? NSButton }.first { $0.title == "OK" && $0.isEnabled } }
+                try await wait("push finishes") { dialog.attachedSheet !== sheet || ok() != nil }
+                if dialog.attachedSheet === sheet { ok()?.performClick(nil) }
+                if failing {
+                    try await wait("failed push shows the Push window") { pushWindows().contains { $0.isVisible } }
+                } else {
+                    let remoteHead = try fixture.git(["ls-remote", remote.path, "refs/heads/main"])
+                    let localHead = try fixture.git(["rev-parse", "HEAD"]).trimmingCharacters(in: .whitespacesAndNewlines)
+                    #expect(!localHead.isEmpty && remoteHead.hasPrefix(localHead), "remote receives the pushed commit")
+                    try await Task.sleep(for: .milliseconds(300))
+                    #expect(pushWindows().allSatisfy { !$0.isVisible }, "successful push never shows the Push window")
+                    #expect(try fixture.git(["log", "-1", "--format=%s"]).trimmingCharacters(in: .whitespacesAndNewlines) == "commit and push")
+                }
+            }
+        }
+
         @Test("Commit dialog superproject") private static func commitDialogSuperproject() async throws {
             let fixture = try Fixture()
             defer { fixture.remove() }
