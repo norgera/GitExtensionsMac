@@ -313,7 +313,9 @@ final class PluginSettingsViewController: NSViewController {
     let host: GitExtensionPluginHost
     private let embedded: Bool
     private let additionalContent: NSViewController?
-    let scope = NSPopUpButton()
+    lazy var scope = SettingsSourceHeader(
+        options: (host.context["WorkingDir"] == nil ? [DistributedSettingsScope.global] : DistributedSettingsScope.allCases).map { ($0.rawValue, $0.title) },
+        selected: host.context["WorkingDir"] == nil ? "global" : "effective")
     var fields: [(GitExtensionPluginSetting, NSControl)] = []
     let rows = NSStackView()
     let apply = NSButton(title: "Apply", target: nil, action: nil)
@@ -330,23 +332,21 @@ final class PluginSettingsViewController: NSViewController {
     required init?(coder: NSCoder) { nil }
     override func loadView() {
         let root = NSStackView(); root.orientation = .vertical; root.alignment = .leading; root.spacing = 10
-        root.edgeInsets = NSEdgeInsets(top: 16, left: 16, bottom: 16, right: 16)
+        let inset: CGFloat = embedded ? 0 : 16
+        root.edgeInsets = NSEdgeInsets(top: inset, left: inset, bottom: inset, right: inset)
         view = root
         root.frame = NSRect(x: 0, y: 0, width: 560, height: max(280, settings.count * 36 + 160))
-        root.widthAnchor.constraint(greaterThanOrEqualToConstant: 540).isActive = true
-        scope.addItems(withTitles: host.context["WorkingDir"] == nil
-            ? ["global"] : ["effective", "local", "distributed", "global"])
-        for item in scope.itemArray { item.representedObject = item.title }
-        scope.target = self; scope.action = #selector(reload)
-        root.addArrangedSubview(NSTextField(labelWithString: "Settings source:")); root.addArrangedSubview(scope)
+        root.widthAnchor.constraint(greaterThanOrEqualToConstant: embedded ? 480 : 540).isActive = true
+        scope.onChange = { [weak self] _ in self?.reload() }
+        root.addArrangedSubview(scope)
         if let additionalContent {
             addChild(additionalContent)
             root.addArrangedSubview(additionalContent.view)
-            additionalContent.view.widthAnchor.constraint(equalTo: root.widthAnchor, constant: -32).isActive = true
+            additionalContent.view.widthAnchor.constraint(equalTo: root.widthAnchor, constant: -2 * inset).isActive = true
         }
         rows.orientation = .vertical; rows.alignment = .leading; rows.spacing = 8
         root.addArrangedSubview(rows)
-        rows.widthAnchor.constraint(equalTo: root.widthAnchor, constant: -32).isActive = true
+        rows.widthAnchor.constraint(equalTo: root.widthAnchor, constant: -2 * inset).isActive = true
         reset.target = self; reset.action = #selector(resetValues); root.addArrangedSubview(reset)
         apply.target = self; apply.action = #selector(save)
         let ok = NSButton(title: "OK", target: self, action: #selector(accept)); ok.keyEquivalent = "\r"
@@ -358,7 +358,7 @@ final class PluginSettingsViewController: NSViewController {
         reload()
     }
     private var currentScope: GitExtensionPluginSettingsScope {
-        .init(rawValue: scope.selectedItem?.representedObject as? String ?? "global") ?? .global
+        .init(rawValue: scope.selectedID) ?? .global
     }
     private func capture() {
         guard let loadedScope, loadedScope != .effective else { return }
@@ -410,12 +410,10 @@ final class PluginSettingsViewController: NSViewController {
                 }
                 (control as? NSTextField)?.placeholderString = "Not set; <empty string> stores empty text"
                 control.isEnabled = !clearing && currentScope != .effective
-                control.widthAnchor.constraint(equalToConstant: 300).isActive = true
-                let label = NSTextField(wrappingLabelWithString: setting.caption)
-                label.widthAnchor.constraint(equalToConstant: 180).isActive = true
-                rows.addArrangedSubview(NSStackView(views: [label, control]))
+                rows.addArrangedSubview(SettingsFormRow(setting.caption, control))
                 fields.append((setting, control))
             }
+            SettingsFormRow.layOut(in: view)
             apply.isEnabled = currentScope != .effective; reset.isEnabled = currentScope != .effective
         } catch { apply.isEnabled = false; NSAlert(error: error).runModal() }
     }

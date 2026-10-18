@@ -47,6 +47,35 @@ extension UIIntegrationTests {
             TestResources.themes
         }
 
+        @Test("Light app colors built while a dark appearance is current") static func lightAppOnDarkSystem() throws {
+            let dark = try #require(NSAppearance(named: .darkAqua))
+            let light = try #require(NSAppearance(named: .aqua))
+            func lightness(_ color: NSColor) -> CGFloat {
+                var value: CGFloat = 0
+                light.performAsCurrentDrawingAppearance {
+                    let rgb = color.usingColorSpace(.sRGB) ?? .black
+                    value = 0.299 * rgb.redComponent + 0.587 * rgb.greenComponent + 0.114 * rgb.blueComponent
+                }
+                return value
+            }
+            let grid = RevisionGridViewController()
+            let window = NSWindow(contentViewController: grid)
+            window.appearance = light
+            window.isReleasedWhenClosed = false
+            defer { window.close() }
+            var rows: [NSColor] = []
+            var dimmed: NSColor = .clear
+            var blended: NSColor = .clear
+            dark.performAsCurrentDrawingAppearance {
+                rows = (0..<2).compactMap { (grid.tableView(NSTableView(), rowViewForRow: $0) as? GitExtensionsSelectionRowView)?.repositoryBackgroundColor }
+                dimmed = DiffTextColors.color(.palette(2, dim: true), foreground: true)
+                blended = ApplicationColors.blended(.systemRed, fraction: 0.75, of: .textBackgroundColor)
+            }
+            #expect(rows.count == 2 && rows.allSatisfy { lightness($0) > 0.9 }, "grid rows and alternate rows stay light in a light window")
+            #expect(lightness(blended) > 0.7, "blended emphasis resolves against the light editor background")
+            #expect(lightness(dimmed) > 0.45, "dimmed diff colors resolve against the light editor background")
+        }
+
         @Test("Themes") static func themes() throws {
             let root = FileManager.default.temporaryDirectory.appendingPathComponent("Appearance-Themes-" + UUID().uuidString)
             let bundled = root.appendingPathComponent("bundled")

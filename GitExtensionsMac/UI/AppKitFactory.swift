@@ -4,7 +4,7 @@ import AppKit
 
 final class SplitToolbarPopUpButton: NSPopUpButton {
     var onPrimaryClick: (() -> Void)?
-    static let arrowWidth: CGFloat = 12
+    static let arrowWidth: CGFloat = 13
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
         if point.x < bounds.width - Self.arrowWidth, let onPrimaryClick {
@@ -14,6 +14,166 @@ final class SplitToolbarPopUpButton: NSPopUpButton {
             return
         }
         super.mouseDown(with: event)
+    }
+}
+
+final class FlatSegmentedControl: NSSegmentedControl {
+    override class var cellClass: AnyClass? {
+        get { FlatSegmentedCell.self }
+        set {}
+    }
+}
+
+final class FlatSegmentedCell: NSSegmentedCell {
+    override func draw(withFrame cellFrame: NSRect, in controlView: NSView) {
+        drawInterior(withFrame: cellFrame, in: controlView)
+    }
+
+    override func drawInterior(withFrame cellFrame: NSRect, in controlView: NSView) {
+        let widths = (0..<segmentCount).map { width(forSegment: $0) }
+        let automatic = (cellFrame.width - widths.reduce(0, +)) / CGFloat(max(1, widths.filter { $0 == 0 }.count))
+        var x = cellFrame.minX
+        for (segment, width) in widths.enumerated() {
+            let segmentWidth = width > 0 ? width : automatic
+            drawSegment(segment, inFrame: NSRect(x: x, y: cellFrame.minY, width: segmentWidth, height: cellFrame.height), with: controlView)
+            x += segmentWidth
+        }
+    }
+}
+
+@MainActor
+final class ToolStripHighlightView: NSView {
+    static let dropDownWidth: CGFloat = 13
+    static let imageDropDownWidth: CGFloat = 35
+    weak var stack: NSStackView? { didSet { observeItems() } }
+    private var frameObservers: [NSObjectProtocol] = []
+    var checkedButtons: [NSButton] = []
+    var splitPairs: [(NSControl, NSControl)] = []
+
+    static func dropDownImage(_ description: String) -> NSImage? {
+        NSImage(systemSymbolName: "arrowtriangle.down.fill", accessibilityDescription: description)?
+            .withSymbolConfiguration(.init(pointSize: 6, weight: .regular))
+    }
+
+    static func configureDropDown(_ button: NSButton, tooltip: String) {
+        button.title = ""
+        button.image = dropDownImage(tooltip)
+        button.imagePosition = .imageOnly
+        button.isBordered = false
+        button.contentTintColor = .labelColor
+        button.toolTip = tooltip
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.widthAnchor.constraint(equalToConstant: dropDownWidth).isActive = true
+        button.heightAnchor.constraint(equalToConstant: 22).isActive = true
+    }
+    private(set) weak var hoveredControl: NSControl?
+    private var tracking: NSTrackingArea?
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    static func items(in view: NSView?) -> [NSControl] {
+        guard let view, !view.isHidden else { return [] }
+        if let stack = view as? NSStackView { return stack.arrangedSubviews.flatMap { items(in: $0) } }
+        guard let control = view as? NSControl, !(control is NSTextField) else { return [] }
+        return control is NSButton || control is NSSegmentedControl ? [control] : []
+    }
+
+    static func flatten(_ stack: NSStackView) {
+        for item in items(in: stack) {
+            if let popUp = item as? NSPopUpButton {
+                popUp.isBordered = false
+                (popUp.cell as? NSPopUpButtonCell)?.arrowPosition = .noArrow
+            } else if let button = item as? NSButton {
+                button.isBordered = false
+            }
+        }
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let tracking { removeTrackingArea(tracking) }
+        let area = NSTrackingArea(rect: .zero, options: [.mouseMoved, .mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect], owner: self)
+        addTrackingArea(area)
+        tracking = area
+    }
+
+    override func mouseEntered(with event: NSEvent) { hover(at: convert(event.locationInWindow, from: nil)) }
+    override func mouseMoved(with event: NSEvent) { hover(at: convert(event.locationInWindow, from: nil)) }
+    override func mouseExited(with event: NSEvent) { setHovered(nil) }
+
+    private func observeItems() {
+        frameObservers.forEach(NotificationCenter.default.removeObserver)
+        frameObservers = Self.items(in: stack).map { item in
+            item.postsFrameChangedNotifications = true
+            return NotificationCenter.default.addObserver(forName: NSView.frameDidChangeNotification, object: item, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.needsDisplay = true }
+            }
+        }
+    }
+
+    func hover(at point: NSPoint?) {
+        setHovered(point.flatMap { point in Self.items(in: stack).first { frame(of: $0).contains(point) } })
+    }
+
+    private func setHovered(_ control: NSControl?) {
+        guard control !== hoveredControl else { return }
+        hoveredControl = control
+        needsDisplay = true
+    }
+
+    private func frame(of control: NSControl) -> NSRect {
+        convert(control.bounds, from: control)
+    }
+
+    private func hoverGroup(for control: NSControl) -> (frame: NSRect, divider: CGFloat?) {
+        if let pair = splitPairs.first(where: { $0.0 === control || $0.1 === control }), !pair.0.isHiddenOrHasHiddenAncestor, !pair.1.isHiddenOrHasHiddenAncestor {
+            return (frame(of: pair.0).union(frame(of: pair.1)), frame(of: pair.1).minX)
+        }
+        let rect = frame(of: control)
+        if control is SplitToolbarPopUpButton { return (rect, rect.maxX - Self.dropDownWidth) }
+        if let segmented = control as? FlatSegmentedControl, segmented.segmentCount == 2 { return (rect, rect.minX + segmented.width(forSegment: 0)) }
+        return (rect, nil)
+    }
+
+    private func drawDropDownArrows() {
+        for popUp in Self.items(in: stack).compactMap({ $0 as? NSPopUpButton }) where !popUp.isHiddenOrHasHiddenAncestor {
+            let rect = frame(of: popUp)
+            let center = NSPoint(x: rect.maxX - Self.dropDownWidth / 2, y: rect.midY)
+            let arrow = NSBezierPath()
+            arrow.move(to: NSPoint(x: center.x - 3, y: center.y + 1.5))
+            arrow.line(to: NSPoint(x: center.x + 3, y: center.y + 1.5))
+            arrow.line(to: NSPoint(x: center.x, y: center.y - 1.5))
+            arrow.close()
+            (popUp.isEnabled ? NSColor.labelColor : NSColor.tertiaryLabelColor).setFill()
+            arrow.fill()
+        }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        defer { drawDropDownArrows() }
+        let checked = checkedButtons.filter { $0.state == .on && !$0.isHiddenOrHasHiddenAncestor && $0.window != nil }
+        for button in checked {
+            let path = NSBezierPath(roundedRect: frame(of: button).insetBy(dx: 0.5, dy: 0.5), xRadius: 3, yRadius: 3)
+            NSColor.controlAccentColor.withAlphaComponent(0.16).setFill()
+            path.fill()
+            NSColor.controlAccentColor.withAlphaComponent(0.55).setStroke()
+            path.stroke()
+        }
+        if let hoveredControl, hoveredControl.isEnabled, !hoveredControl.isHiddenOrHasHiddenAncestor, !checked.contains(where: { $0 === hoveredControl }) {
+            let group = hoverGroup(for: hoveredControl)
+            let rect = group.frame.insetBy(dx: 0.5, dy: 0.5)
+            let path = NSBezierPath(roundedRect: rect, xRadius: 3, yRadius: 3)
+            NSColor.labelColor.withAlphaComponent(0.08).setFill()
+            path.fill()
+            NSColor.separatorColor.setStroke()
+            path.stroke()
+            if let divider = group.divider {
+                let line = NSBezierPath()
+                line.move(to: NSPoint(x: floor(divider) + 0.5, y: rect.minY))
+                line.line(to: NSPoint(x: floor(divider) + 0.5, y: rect.maxY))
+                line.stroke()
+            }
+        }
     }
 }
 

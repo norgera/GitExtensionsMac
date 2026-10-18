@@ -8,7 +8,7 @@ enum DistributedSettingsScope: String, CaseIterable {
         switch self {
         case .effective: "Effective"
         case .local: "Local for current repository"
-        case .distributed: "Distributed with repository"
+        case .distributed: "Distributed with current repository"
         case .global: "Global for all repositories"
         }
     }

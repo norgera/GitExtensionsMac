@@ -50,6 +50,7 @@ enum ApplicationShellDialogs {
         panel.styleMask = [.titled, .closable, .resizable]
         panel.setContentSize(NSSize(width: 1040, height: 720))
         panel.minSize = NSSize(width: 900, height: 620)
+        panel.contentMaxSize = SettingsViewController.maximumContentSize
         controller.panel = panel
         panel.delegate = controller
         let response: NSApplication.ModalResponse = await withCheckedContinuation { continuation in
@@ -976,7 +977,7 @@ final class SettingsViewController: NSViewController, NSOutlineViewDataSource, N
         settingsSplit.addArrangedSubview(contentScroll)
         settingsSplit.translatesAutoresizingMaskIntoConstraints = false
         sidebarHolder.widthAnchor.constraint(greaterThanOrEqualToConstant: 220).isActive = true
-        contentScroll.widthAnchor.constraint(greaterThanOrEqualToConstant: 600).isActive = true
+        contentScroll.widthAnchor.constraint(greaterThanOrEqualToConstant: max(600, SettingsSourceHeader.minimumWidth + 36 + NSScroller.scrollerWidth(for: .regular, scrollerStyle: .legacy) + 4)).isActive = true
 
         let ok = NSButton(title: "OK", target: self, action: #selector(saveAndClose))
         ok.keyEquivalent = "\r"
@@ -1054,7 +1055,7 @@ final class SettingsViewController: NSViewController, NSOutlineViewDataSource, N
         cell.addSubview(icon)
         if searchMatches.contains(node.id) {
             cell.wantsLayer = true
-            cell.layer?.backgroundColor = NSColor.selectedTextBackgroundColor.cgColor
+            cell.layer?.backgroundColor = ApplicationColors.resolved(.selectedTextBackgroundColor, for: cell)
             label.textColor = .selectedTextColor
         }
         cell.addSubview(label)
@@ -1139,6 +1140,7 @@ final class SettingsViewController: NSViewController, NSOutlineViewDataSource, N
     static func isInstantSavePage(_ id: String) -> Bool { id == "application" }
 
     private let instantSaveNotice = NSTextField(labelWithString: instantSaveNoticeText)
+    static let maximumContentSize = NSSize(width: 1280, height: 880)
 
     private func showCategory(_ node: SettingsNode) {
         view.window?.makeFirstResponder(nil)
@@ -1156,7 +1158,7 @@ final class SettingsViewController: NSViewController, NSOutlineViewDataSource, N
         case "application":
             showChecklist()
         case "general":
-            content.addArrangedSubview(note("Settings source: Global for all repositories"))
+            content.addArrangedSubview(SettingsSourceHeader(options: SettingsSourceHeader.globalOnly, selected: "global"))
             let exactRenames = toggle("Follow exact renames and copies only", value: fileHistoryDraft.followRenamesInFileHistoryExactOnly) { self.fileHistoryDraft.followRenamesInFileHistoryExactOnly = $0 }
             exactRenames.isEnabled = fileHistoryDraft.followRenamesInFileHistory
             let submoduleStatus = toggle("Show submodule status in browse menu", value: browseDisplayDraft.showSubmoduleStatus) { self.browseDisplayDraft.showSubmoduleStatus = $0 }
@@ -1358,24 +1360,28 @@ final class SettingsViewController: NSViewController, NSOutlineViewDataSource, N
             NativeShellProvider.shared.refresh()
             content.addArrangedSubview(settingsGroup("General", [
                 formRow("Default shell", NativeShellSettingsControl(provider: NativeShellProvider.shared, selected: draft.defaultShell) { [weak self] value in self?.draft.defaultShell = value }),
+                pathField("Console shell", value: draft.shellPath) { self.draft.shellPath = $0 },
                 toggle("Show file history in the main window", value: fileHistoryDraft.useBrowseForFileHistory) { self.fileHistoryDraft.useBrowseForFileHistory = $0 },
                 toggle("Show blame in diff viewer", value: blameDraft.useDiffViewerForBlame) { self.blameDraft.useDiffViewerForBlame = $0 },
                 toggle("Show 'Find in commit files using git-grep'", value: showGitGrepDraft) { self.showGitGrepDraft = $0 },
                 toggle("Show revision tooltips (restart required)", value: gridTooltipsDraft) { self.gridTooltipsDraft = $0 }
             ]))
             content.addArrangedSubview(settingsGroup("Tabs (restart required)", [
+                toggle("Show the Console tab", value: draft.showConsoleTab) { self.draft.showConsoleTab = $0 },
                 toggle("Show GPG information", value: showGpgInformationDraft) { self.showGpgInformationDraft = $0 },
                 toggle("Show output history as tab (otherwise as panel)", value: draft.showOutputHistoryAsTab) { self.draft.showOutputHistoryAsTab = $0 },
                 stepper("Output history depth (0 to disable):", value: draft.outputHistoryDepth, range: 0...10000) { self.draft.outputHistoryDepth = $0 }
             ]))
-            content.addArrangedSubview(toggle("Show tags in revision grid", value: tagDraft.showTagsInRevisionGrid) { self.tagDraft.showTagsInRevisionGrid = $0 })
-            for root in RepositoryTreeRoot.allCases {
-                content.addArrangedSubview(toggle("Show \(root.title) in repository tree", value: treeDraft.visibleRoots.contains(root)) { visible in
+            content.addArrangedSubview(settingsGroup("Revision grid", [
+                toggle("Show tags in revision grid", value: tagDraft.showTagsInRevisionGrid) { self.tagDraft.showTagsInRevisionGrid = $0 }
+            ]))
+            content.addArrangedSubview(settingsGroup("Repository tree", RepositoryTreeRoot.allCases.map { root in
+                toggle("Show \(root.title) in repository tree", value: treeDraft.visibleRoots.contains(root)) { visible in
                     if visible { self.treeDraft.visibleRoots.insert(root) } else { self.treeDraft.visibleRoots.remove(root) }
                     if root == .tags { self.tagDraft.showTagsInRepositoryTree = visible }
                     if root == .stashes { self.stashDraft.showStashesInRepositoryTree = visible }
-                })
-            }
+                }
+            }))
         case "blame":
             content.addArrangedSubview(settingsGroup("Blame settings", [
                 toggle("Ignore whitespace", value: blameDraft.ignoreWhitespace) { self.blameDraft.ignoreWhitespace = $0 },
@@ -1587,6 +1593,7 @@ final class SettingsViewController: NSViewController, NSOutlineViewDataSource, N
         }
         pageKeywords[node.id] = (Self.searchKeywords[node.id] ?? "") + " " + labels(content).joined(separator: " ")
         content.edgeInsets = NSEdgeInsets(top: 18, left: 18, bottom: 18, right: 18)
+        SettingsFormRow.layOut(in: content)
     }
 
 
@@ -1604,7 +1611,7 @@ final class SettingsViewController: NSViewController, NSOutlineViewDataSource, N
         "advanced": "Checkout always show checkout dialog use last chosen local changes action default General don't show help images always show advanced options auto normalise branch name symbol Commit push forced with lease amend signing key configured default disable sign",
         "confirmations": "Confirm actions commits amend undo last commit headless rebase selected branches fetch prune push new branch tracking reference delete unmerged checkout left panel stash apply checkout pull drop conflict resolution resolve commit second abort merge submodules update worktrees switch worktree",
         "detailed": "Settings source get remote branches directly from remote add merge log messages count Revision graph merge lanes common parent render diagonals straighten",
-        "browse": "Default shell Terminal iTerm2 Find in commit files git-grep Browse repository window refresh status commit info revision grid search selection tags stashes branches artificial working directory index graph toolbar",
+        "browse": "Console shell Show the Console tab Default shell Terminal iTerm2 Find in commit files git-grep Browse repository window refresh status commit info revision grid search selection tags stashes branches artificial working directory index graph toolbar",
         "blame": "Blame options ignore whitespace detect moved copied lines this file all files display author first date time line numbers original file path avatar",
         "commit": "Behaviour provide auto-completion autocompletion show errors when staging files compose commit messages requested during commit editor Commit dialog stage unstage untracked ignored files message amend signoff signing key margin line length refresh focus remember close success stash",
         "diff": "Omit uninteresting changes combined diff all parents available difftools vertical ruler position chars Diff viewer whitespace entire file context lines word moved highlighting syntax line numbers encoding BOM remember defaults reset submodule separate window toolbar font",
@@ -1660,17 +1667,18 @@ final class SettingsViewController: NSViewController, NSOutlineViewDataSource, N
             row.orientation = .horizontal
             row.alignment = .centerY
             row.spacing = 8
+            row.detachesHiddenViews = false
+            row.distribution = .fill
             button.setContentHuggingPriority(.defaultLow, for: .horizontal)
             button.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
             button.widthAnchor.constraint(greaterThanOrEqualToConstant: 430).isActive = true
             button.heightAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
-            if check.status != .valid {
-                let repairButton = CallbackButton(title: "Repair", target: nil, action: #selector(CallbackButton.invoke))
-                repairButton.target = repairButton
-                repairButton.callback = { [weak self] in self?.repair(check) }
-                repairButton.setAccessibilityIdentifier("SettingsRepair.\(check.kind.rawValue)")
-                row.addArrangedSubview(repairButton)
-            }
+            let repairButton = CallbackButton(title: "Repair", target: nil, action: #selector(CallbackButton.invoke))
+            repairButton.target = repairButton
+            repairButton.callback = { [weak self] in self?.repair(check) }
+            repairButton.setAccessibilityIdentifier("SettingsRepair.\(check.kind.rawValue)")
+            repairButton.isHidden = check.status == .valid
+            row.addArrangedSubview(repairButton)
             content.addArrangedSubview(row)
             row.widthAnchor.constraint(equalTo: content.widthAnchor, constant: -36).isActive = true
         }
@@ -1711,10 +1719,14 @@ final class SettingsViewController: NSViewController, NSOutlineViewDataSource, N
 
     private func showGitConfiguration(advanced: Bool) {
         let scopes = GitSettingsScope.allCases.filter { source != nil || $0 != .local }
-        content.addArrangedSubview(popup("Settings source:", values: scopes.map(\.rawValue), selected: configScope.rawValue) { value in
-            self.configScope = GitSettingsScope(rawValue: value) ?? .effective
+        let header = SettingsSourceHeader(options: scopes.map { ($0.rawValue, $0.title) }, selected: configScope.rawValue)
+        header.setAccessibilityIdentifier("Settings.gitScope")
+        header.onChange = { [weak self] id in
+            guard let self else { return }
+            self.configScope = GitSettingsScope(rawValue: id) ?? .effective
             self.showCategory(SettingsNode(advanced ? "git_advanced" : "git_config", advanced ? "Advanced" : "Config"))
-        })
+        }
+        content.addArrangedSubview(header)
         guard let loaded = configValues[configScope] else {
             content.addArrangedSubview(note("Loading Git configuration…"))
             guard !loadingConfig else { return }
@@ -2049,6 +2061,7 @@ final class SettingsViewController: NSViewController, NSOutlineViewDataSource, N
     private func showBuildServerSettings() {
         if let page = buildServerPage {
             content.addArrangedSubview(page.view)
+            page.view.widthAnchor.constraint(equalTo: content.widthAnchor, constant: -36).isActive = true
             return
         }
         content.addArrangedSubview(note("Loading build server settings…"))
@@ -2154,7 +2167,7 @@ final class SettingsViewController: NSViewController, NSOutlineViewDataSource, N
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 7
-        let box = NSBox()
+        let box = SettingsGroupBox()
         box.title = title
         box.boxType = .primary
         stack.translatesAutoresizingMaskIntoConstraints = false
@@ -2164,8 +2177,7 @@ final class SettingsViewController: NSViewController, NSOutlineViewDataSource, N
                 stack.leadingAnchor.constraint(equalTo: holder.leadingAnchor, constant: 12),
                 stack.trailingAnchor.constraint(equalTo: holder.trailingAnchor, constant: -12),
                 stack.topAnchor.constraint(equalTo: holder.topAnchor, constant: 10),
-                stack.bottomAnchor.constraint(equalTo: holder.bottomAnchor, constant: -12),
-                box.widthAnchor.constraint(greaterThanOrEqualToConstant: 610)
+                stack.bottomAnchor.constraint(equalTo: holder.bottomAnchor, constant: -12)
             ])
         }
         return box
@@ -2191,21 +2203,15 @@ final class SettingsViewController: NSViewController, NSOutlineViewDataSource, N
     }
 
     private func distributedScopeControl(changed: @escaping (DistributedSettingsScope) -> Void) -> NSView {
-        let control = CallbackPopUpButton()
-        control.setAccessibilityIdentifier("Settings.appScope")
-        for scope in source == nil ? [.global] : DistributedSettingsScope.allCases {
-            control.addItem(withTitle: scope.title)
-            control.lastItem?.representedObject = scope
-            if scope == distributedScope { control.select(control.lastItem) }
-        }
-        control.callback = { [weak self, weak control] in
-            guard let self, let scope = control?.selectedItem?.representedObject as? DistributedSettingsScope else { return }
+        let scopes = source == nil ? [DistributedSettingsScope.global] : DistributedSettingsScope.allCases
+        let header = SettingsSourceHeader(options: scopes.map { ($0.rawValue, $0.title) }, selected: distributedScope.rawValue)
+        header.setAccessibilityIdentifier("Settings.appScope")
+        header.onChange = { [weak self] id in
+            guard let self, let scope = DistributedSettingsScope(rawValue: id) else { return }
             self.view.window?.makeFirstResponder(nil)
             changed(scope)
         }
-        control.target = control
-        control.action = #selector(CallbackPopUpButton.invoke)
-        return formRow("Settings source:", control)
+        return header
     }
 
     private func stepper(_ title: String, value: Int, range: ClosedRange<Int>, changed: @escaping (Int) -> Void) -> NSView {
@@ -2433,9 +2439,6 @@ final class SettingsViewController: NSViewController, NSOutlineViewDataSource, N
     private func pathField(_ title: String, value: String, changed: @escaping (String) -> Void) -> NSView {
         let field = CallbackTextField(string: value)
         field.delegate = field
-        let fieldWidth = field.widthAnchor.constraint(equalToConstant: 370)
-        fieldWidth.priority = .defaultHigh
-        fieldWidth.isActive = true
         field.callback = { changed(field.stringValue) }
         field.target = field
         field.action = #selector(CallbackTextField.invoke)
@@ -2443,16 +2446,7 @@ final class SettingsViewController: NSViewController, NSOutlineViewDataSource, N
     }
 
     private func formRow(_ title: String, _ control: NSView) -> NSView {
-        let label = NSTextField(labelWithString: title)
-        label.alignment = .left
-        let labelWidth = label.widthAnchor.constraint(equalToConstant: 300)
-        labelWidth.priority = .defaultHigh
-        labelWidth.isActive = true
-        let row = NSStackView(views: [label, control])
-        row.orientation = .horizontal
-        row.alignment = .centerY
-        row.spacing = 8
-        return row
+        SettingsFormRow(title, control)
     }
 
     private func note(_ value: String) -> NSTextField {
@@ -2924,6 +2918,72 @@ enum GitSettingsLineEndings {
     ]
 }
 
+final class SettingsGroupBox: NSBox {}
+
+@MainActor
+final class SettingsFormRow: NSStackView {
+    static let maximumLabelWidth: CGFloat = 320
+    static let choiceWidth: CGFloat = 160
+    private static let fills = NSMapTable<NSView, NSLayoutConstraint>.weakToStrongObjects()
+    let label: NSTextField
+    let control: NSView
+    private var labelWidth: NSLayoutConstraint?
+    private var rowWidth: NSLayoutConstraint?
+
+    init(_ title: String, _ control: NSView) {
+        label = NSTextField(wrappingLabelWithString: title)
+        self.control = control
+        super.init(frame: .zero)
+        orientation = .horizontal
+        alignment = .centerY
+        distribution = .fill
+        spacing = 8
+        label.isSelectable = false
+        label.setContentHuggingPriority(.required, for: .horizontal)
+        addArrangedSubview(label)
+        addArrangedSubview(control)
+        if let field = control as? NSTextField, field.isEditable, field.formatter == nil {
+            control.setContentHuggingPriority(.defaultLow - 1, for: .horizontal)
+            control.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        } else {
+            if control is NSPopUpButton { control.widthAnchor.constraint(greaterThanOrEqualToConstant: Self.choiceWidth).isActive = true }
+            let spacer = NSView()
+            spacer.setContentHuggingPriority(.defaultLow - 2, for: .horizontal)
+            addArrangedSubview(spacer)
+        }
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    static func layOut(in root: NSView) {
+        func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
+        let views = descendants(root)
+        for view in views where view is SettingsGroupBox || view is SettingsSourceHeader {
+            fills.object(forKey: view)?.isActive = false
+            fills.removeObject(forKey: view)
+            guard let stack = view.superview as? NSStackView, stack.orientation == .vertical else { continue }
+            let fill = view.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -(stack.edgeInsets.left + stack.edgeInsets.right))
+            fill.priority = .defaultHigh + 1
+            fill.isActive = true
+            fills.setObject(fill, forKey: view)
+        }
+        let rows = views.compactMap { $0 as? SettingsFormRow }
+        let width = min(maximumLabelWidth, rows.map { ceil($0.label.attributedStringValue.size().width) + 4 }.max() ?? 0)
+        for row in rows {
+            row.labelWidth?.isActive = false
+            row.labelWidth = row.label.widthAnchor.constraint(equalToConstant: width)
+            row.labelWidth?.isActive = true
+            row.label.preferredMaxLayoutWidth = width
+            row.rowWidth?.isActive = false
+            row.rowWidth = nil
+            guard let stack = row.superview as? NSStackView, stack.orientation == .vertical else { continue }
+            row.rowWidth = row.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -(stack.edgeInsets.left + stack.edgeInsets.right))
+            row.rowWidth?.priority = .defaultHigh + 1
+            row.rowWidth?.isActive = true
+        }
+    }
+}
+
 @MainActor
 final class SettingsGridLayout {
     static let buttonColumnWidth: CGFloat = 123
@@ -2973,6 +3033,90 @@ final class SettingsGridLayout {
         for row in rows where row.superview === content {
             row.widthAnchor.constraint(equalTo: content.widthAnchor, constant: -inset).isActive = true
         }
+    }
+}
+
+@MainActor
+final class SettingsSourceHeader: NSStackView {
+    static let globalOnly = [("global", "Global for all repositories")]
+    let optionIDs: [String]
+    private(set) var radios: [NSButton] = []
+    private var arrows: [NSTextField] = []
+    private(set) var selectedID: String
+    var onChange: ((String) -> Void)?
+
+    init(options: [(id: String, title: String)], selected: String) {
+        optionIDs = options.map(\.id)
+        selectedID = optionIDs.contains(selected) ? selected : optionIDs.first ?? selected
+        super.init(frame: .zero)
+        orientation = .vertical
+        alignment = .width
+        spacing = 6
+        let label = NSTextField(labelWithString: "Settings source:")
+        label.font = .boldSystemFont(ofSize: NSFont.systemFontSize)
+        label.alignment = .left
+        var units: [NSView] = []
+        for (index, option) in options.enumerated() {
+            let radio = NSButton(radioButtonWithTitle: option.title, target: self, action: #selector(radioClicked(_:)))
+            radio.setAccessibilityIdentifier("SettingsSource.\(option.id)")
+            radios.append(radio)
+            guard index > 0 else { units.append(radio); continue }
+            let arrow = NSTextField(labelWithString: "<<")
+            arrow.textColor = .secondaryLabelColor
+            arrows.append(arrow)
+            let unit = NSStackView(views: [arrow, radio])
+            unit.orientation = .horizontal
+            unit.spacing = 8
+            units.append(unit)
+        }
+        let line = SettingsSourceRule()
+        line.heightAnchor.constraint(equalToConstant: 3).isActive = true
+        addArrangedSubview(label)
+        let row = NSStackView(views: units)
+        row.orientation = .horizontal
+        row.spacing = 12
+        addArrangedSubview(row)
+        addArrangedSubview(line)
+        setCustomSpacing(8, after: arrangedSubviews[1])
+        updateSelection()
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    static var minimumWidth: CGFloat {
+        ceil(SettingsSourceHeader(options: DistributedSettingsScope.allCases.map { ($0.rawValue, $0.title) }, selected: "effective").fittingSize.width)
+    }
+
+    func select(_ id: String) {
+        guard optionIDs.contains(id) else { return }
+        selectedID = id
+        updateSelection()
+    }
+
+    func choose(_ id: String) {
+        guard optionIDs.contains(id), id != selectedID else { return }
+        select(id)
+        onChange?(id)
+    }
+
+    @objc private func radioClicked(_ sender: NSButton) {
+        guard let index = radios.firstIndex(of: sender) else { return }
+        if optionIDs[index] == selectedID { updateSelection(); return }
+        choose(optionIDs[index])
+    }
+
+    private func updateSelection() {
+        for (id, radio) in zip(optionIDs, radios) { radio.state = id == selectedID ? .on : .off }
+        let showArrows = selectedID == "effective"
+        for arrow in arrows { arrow.alphaValue = showArrows ? 1 : 0 }
+    }
+}
+
+final class SettingsSourceRule: NSView {
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        layer?.backgroundColor = NSColor.tertiaryLabelColor.cgColor
     }
 }
 

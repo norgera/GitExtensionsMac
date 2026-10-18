@@ -9,6 +9,82 @@ extension UIIntegrationTests {
     @Suite("Browser")
     enum BrowserTests {
 
+        @MainActor
+        @Test("Toolbar controls are flat until hovered or checked") private static func testFlatToolbar() async throws {
+            let fixture = try FileStatusFixture.make()
+            defer { fixture.remove() }
+            try fixture.write("base.txt", "fixture\n")
+            try fixture.commitAll("base")
+            let browser = RepositoryBrowserViewController(repositoryModule: GitRepositoryModule(repositoryURL: fixture.repo, git: FileStatusFixtureGit()))
+            let window = NSWindow(contentRect: .init(x: 0, y: 0, width: 1300, height: 500), styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            window.contentViewController = browser
+            window.setContentSize(NSSize(width: 1300, height: 500))
+            window.makeKeyAndOrderFront(nil)
+            defer {
+                browser.viewWillDisappear()
+                window.close()
+            }
+            let deadline = ContinuousClock.now + .seconds(10)
+            while browser.repositoryIdentity == nil, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(20)) }
+            browser.view.layoutSubtreeIfNeeded()
+            func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
+            let highlight = try #require(descendants(browser.view).compactMap { $0 as? ToolStripHighlightView }.first)
+            let items = ToolStripHighlightView.items(in: highlight.stack)
+            let popUps = items.compactMap { $0 as? NSPopUpButton }
+            #expect(popUps.count >= 5 && popUps.allSatisfy { !$0.isBordered }, "toolbar dropdowns have no resting bezel")
+            #expect(items.compactMap { $0 as? NSButton }.allSatisfy { !$0.isBordered }, "toolbar buttons have no resting bezel")
+            #expect(items.contains { $0 is FlatSegmentedControl }, "stash split button draws without segment bezels")
+            #expect(highlight.checkedButtons.count == 4, "layout, reflog and first-parent toggles show a checked box when on")
+            #expect(highlight.splitPairs.count == 4 && highlight.splitPairs.allSatisfy { pair in
+                (pair.1 as? NSButton).map { $0.title.isEmpty && $0.image != nil && $0.frame.width == ToolStripHighlightView.dropDownWidth } ?? false
+            }, "split buttons pair with compact solid-arrow dropdowns")
+            #expect(popUps.allSatisfy { ($0.cell as? NSPopUpButtonCell)?.arrowPosition == .noArrow }, "dropdowns use the toolstrip arrow")
+            let probeImage = NSImage(size: NSSize(width: 16, height: 16))
+            for popUp in popUps where !popUp.isHiddenOrHasHiddenAncestor {
+                let cell = try #require(popUp.cell as? NSPopUpButtonCell)
+                let arrowStart = popUp.bounds.maxX - ToolStripHighlightView.dropDownWidth + 1
+                if popUp.title.isEmpty {
+                    let saved = popUp.image
+                    popUp.image = probeImage
+                    #expect(cell.imageRect(forBounds: popUp.bounds).maxX <= arrowStart, "\(popUp.toolTip ?? ""): icon stays clear of its drop-down arrow")
+                    popUp.image = saved
+                } else {
+                    let text = ceil((popUp.title as NSString).size(withAttributes: [.font: popUp.font!]).width)
+                    let image: CGFloat = popUp.imagePosition == .imageLeading ? 20 : 0
+                    let textEnd = cell.titleRect(forBounds: popUp.bounds).minX + image + text
+                    #expect(textEnd <= arrowStart, "\(popUp.title): text ends before the drop-down arrow")
+                    #expect(popUp.frame.width - textEnd <= ToolStripHighlightView.dropDownWidth + 12, "\(popUp.title): arrow sits close to the text \(popUp.frame.width - textEnd)")
+                }
+            }
+            let iconButtons = items.compactMap { $0 as? NSButton }.filter { !($0 is NSPopUpButton) && $0.title.isEmpty && $0.image != nil && $0.frame.width > ToolStripHighlightView.dropDownWidth }
+            #expect(Set(iconButtons.map { $0.frame.width }).count <= 1, "icon buttons share one width \(iconButtons.map { $0.frame.width })")
+            let branch = try #require(popUps.first { $0.title == "main" })
+            highlight.hover(at: highlight.convert(NSPoint(x: branch.bounds.midX, y: branch.bounds.midY), from: branch))
+            #expect(highlight.hoveredControl === branch, "hover highlights the control under the pointer")
+            highlight.hover(at: nil)
+            #expect(highlight.hoveredControl == nil, "leaving the toolbar clears the hover box")
+        }
+
+        @MainActor
+        @Test("Detail tab buttons fill the tab bar") private static func testDetailTabHeight() {
+            let pages = (0..<2).map { _ in
+                let page = NSViewController()
+                page.view = NSView()
+                return page
+            }
+            let tabs = DetailTabsViewController()
+            tabs.configure(items: [("Commit", "Commit", pages[0]), ("Diff", "Diff", pages[1])], selectedIndex: 0)
+            let window = NSWindow(contentViewController: tabs)
+            window.isReleasedWhenClosed = false
+            window.setContentSize(NSSize(width: 600, height: 200))
+            defer { window.close() }
+            tabs.view.layoutSubtreeIfNeeded()
+            func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
+            let buttons = descendants(tabs.view).compactMap { $0 as? NSButton }
+            #expect(buttons.count == 2 && buttons.allSatisfy { $0.frame.height == 24 }, "tab buttons are as tall as the 24 pt tab bar \(buttons.map(\.frame.height))")
+        }
+
         @Test("Command eligibility") private static func testCommandEligibility() {
             let real = commit("a")
             let other = commit("b")

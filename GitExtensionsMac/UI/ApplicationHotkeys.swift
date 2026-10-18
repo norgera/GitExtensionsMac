@@ -225,7 +225,7 @@ final class ApplicationHotkeys: ObservableObject {
         ]
         let focus = [("tree", "Focus LeftPanel"), ("grid", "Focus revision grid"),
                      ("details", "Focus commit information"), ("diff", "Focus diff"),
-                     ("files", "Focus file tree"), ("gpg", "Focus GPG information")]
+                     ("files", "Focus file tree"), ("gpg", "Focus GPG information"), ("console", "Focus Git console")]
         return menu.map { .init(id: $0.0, category: "Browse", title: $0.1, defaultChord: $0.2) }
             + unassigned.map { .init(id: $0.0, category: "Browse", title: $0.1, defaultChord: .init("")) }
             + navigation.map { .init(id: $0.0, category: "Revision grid", title: $0.1, defaultChord: $0.2) }
@@ -432,7 +432,7 @@ final class HotkeysSettingsEditor: NSView, NSTableViewDataSource, NSTableViewDel
     private var visibleCommands: [ApplicationHotkeyDefinition] { displayedCommands }
     private static let commandOrder: [String: [String]] = [
         "Browse": ["addNotes", "checkoutBranch", "closeToDashboard", "commit", "createBranch", "createTag", "editFile", "findFileInSelectedCommit",
-                   "focus.tree", "focus.grid", "focus.details", "focus.diff", "focus.files", "focus.gpg", "focus.build", "focus.output",
+                   "focus.tree", "focus.grid", "focus.details", "focus.diff", "focus.files", "focus.gpg", "focus.console", "focus.build", "focus.output",
                    "focusNextTab", "focusPrevTab", "focusFilter", "gitBash", "gitGui", "gitK", "goToChild", "goToParent", "goToSubmodule", "goToSuperproject",
                    "manageWorktrees", "mergeBranches", "openAsTempFile", "openAsTempFileWith", "openCommitsWithDifftool", "openRepository", "settings",
                    "openWithDifftool", "openWithDifftoolFirstToLocal", "openWithDifftoolSelectedToLocal", "pullFetch", "push", "quickFetch", "quickPull", "quickPullOrFetch", "quickPush",

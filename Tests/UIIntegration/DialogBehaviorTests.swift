@@ -248,8 +248,8 @@ extension UIIntegrationTests {
                         try #require(button.frame.maxX <= next.frame.minX, "type dropdown never overlaps its following control")
                     }
                     try #require(
-                        button.imagePosition == .imageOnly && button.image != nil && !(button.toolTip ?? "").isEmpty,
-                        "source image-only type dropdown retains icon and tooltip")
+                        button.imagePosition == .imageLeading && button.title.isEmpty && button.image != nil && !(button.toolTip ?? "").isEmpty,
+                        "image type dropdown keeps its icon leading its arrow slot, with no caption, and its tooltip")
                 }
             }
             let filters = try filtersWithBundledIcon()

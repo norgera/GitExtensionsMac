@@ -105,6 +105,7 @@ struct AppPreferences: Codable, Equatable, Sendable {
     var automaticContinuousScroll = false
     var automaticContinuousScrollDelay = 600
     var outputHistoryDepth = 20
+    var showConsoleTab = true
     var showOutputHistoryAsTab = true
     var outputHistoryPanelVisible = false
     var provideAutocompletion = true
@@ -116,7 +117,7 @@ struct AppPreferences: Codable, Equatable, Sendable {
     init() {}
     private enum CodingKeys: String, CodingKey {
         case reopenLastRepository, maximumRecentRepositories, theme, mergeCommonParentLanes, straightenGraphDiagonals, renderGraphWithDiagonals, diffContextLines, ignoreWhitespace, defaultSignOff, defaultAllowEmpty, autoStashDuringRebase, gitExecutablePath, editorPath, shellPath, externalDiffToolPath, externalMergeToolPath, signingKey, openSubmoduleDiffInSeparateWindow, automaticContinuousScroll, automaticContinuousScrollDelay, outputHistoryDepth, showOutputHistoryAsTab, outputHistoryPanelVisible
-        case provideAutocompletion, showErrorsWhenStagingFiles, dontShowHelpImages, truncatePathMethod, composeCommitMessages, sshPath, defaultShell
+        case showConsoleTab, provideAutocompletion, showErrorsWhenStagingFiles, dontShowHelpImages, truncatePathMethod, composeCommitMessages, sshPath, defaultShell
     }
 
     init(from decoder: Decoder) throws {
@@ -146,6 +147,7 @@ struct AppPreferences: Codable, Equatable, Sendable {
         automaticContinuousScroll = value(.automaticContinuousScroll, defaults.automaticContinuousScroll)
         automaticContinuousScrollDelay = value(.automaticContinuousScrollDelay, defaults.automaticContinuousScrollDelay)
         outputHistoryDepth = max(0, value(.outputHistoryDepth, defaults.outputHistoryDepth))
+        showConsoleTab = value(.showConsoleTab, defaults.showConsoleTab)
         showOutputHistoryAsTab = value(.showOutputHistoryAsTab, defaults.showOutputHistoryAsTab)
         outputHistoryPanelVisible = value(.outputHistoryPanelVisible, defaults.outputHistoryPanelVisible)
         provideAutocompletion = value(.provideAutocompletion, defaults.provideAutocompletion)

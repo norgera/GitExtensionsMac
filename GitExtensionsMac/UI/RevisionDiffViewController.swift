@@ -1552,7 +1552,7 @@ enum DiffTextColors {
                 base = NSColor(srgbRed: level, green: level, blue: level, alpha: 1)
             }
             guard dim else { return base }
-            return base.blended(withFraction: 0.5, of: ApplicationColors.color("EditorBackground", fallback: .textBackgroundColor)) ?? base
+            return ApplicationColors.blended(base, fraction: 0.5, of: ApplicationColors.color("EditorBackground", fallback: .textBackgroundColor))
         }
     }
 
@@ -1759,7 +1759,7 @@ final class DiffLineCellView: NSTableCellView {
             let changedWidth = max(2, ceil((changedText as NSString).size(withAttributes: [.font: font]).width))
             let background = ApplicationColors.color("EditorBackground", fallback: .textBackgroundColor)
             let emphasis = safeLength == 0 ? (presentation.line.kind == .addition ? NSColor.systemRed : NSColor.systemGreen)
-                : (baseColor?.blended(withFraction: 0.75, of: background) ?? background)
+                : (baseColor.map { ApplicationColors.blended($0, fraction: 0.75, of: background) } ?? background)
             emphasis.setFill()
             NSRect(
                 x: gutterWidth + prefixWidth + leadingWidth,
@@ -1820,7 +1820,7 @@ final class DiffLineCellView: NSTableCellView {
             let color = line.kind == .addition
                 ? ApplicationColors.color(reverse ? "AnsiTerminalGreenBackNormal" : "AnsiTerminalGreenForeNormal", fallback: .systemGreen)
                 : ApplicationColors.color(reverse ? "AnsiTerminalRedBackNormal" : "AnsiTerminalRedForeNormal", fallback: .systemRed)
-            let dimmed = color.blended(withFraction: reverse ? 0.75 : 0.5, of: ApplicationColors.color("EditorBackground", fallback: .textBackgroundColor)) ?? color
+            let dimmed = ApplicationColors.blended(color, fraction: reverse ? 0.75 : 0.5, of: ApplicationColors.color("EditorBackground", fallback: .textBackgroundColor))
             attributed.addAttribute(reverse ? .backgroundColor : .foregroundColor, value: dimmed, range: NSRange(location: location, length: length))
         }
         FileViewerOccurrences.highlight(highlightTerm, in: attributed)

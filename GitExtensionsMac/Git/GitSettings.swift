@@ -95,6 +95,14 @@ package enum GitSettingsChecklist {
 package enum GitSettingsScope: String, CaseIterable, Sendable {
     case effective, local, global, system
     var arguments: [String] { self == .effective ? [] : ["--\(rawValue)"] }
+    package var title: String {
+        switch self {
+        case .effective: "Effective"
+        case .local: "Local for current repository"
+        case .global: "Global for all repositories"
+        case .system: "System"
+        }
+    }
 }
 
 package enum GitSettingsTools {

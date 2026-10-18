@@ -43,15 +43,9 @@ final class RevisionFilterToolbar: NSObject, NSComboBoxDelegate, NSMenuDelegate 
     override init() {
         super.init()
         configure(advancedButton, image: "FunnelPencil", tooltip: "Advanced filter", action: #selector(advancedClicked))
-        advancedArrow.image = NSImage(systemSymbolName: "chevron.down", accessibilityDescription: "Advanced filter options")
-        advancedArrow.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 8, weight: .semibold)
-        advancedArrow.isBordered = false
-        advancedArrow.imagePosition = .imageOnly
-        advancedArrow.toolTip = "Advanced filter"
+        ToolStripHighlightView.configureDropDown(advancedArrow, tooltip: "Advanced filter")
         advancedArrow.setAccessibilityIdentifier("AdvancedFilterArrow")
         advancedArrow.target = self; advancedArrow.action = #selector(advancedArrowClicked)
-        advancedArrow.translatesAutoresizingMaskIntoConstraints = false
-        advancedArrow.widthAnchor.constraint(equalToConstant: 12).isActive = true
         configure(reflogButton, image: "Book", tooltip: "Show reflog references", action: #selector(reflogClicked))
         reflogButton.setButtonType(.pushOnPushOff)
         configure(firstParentButton, image: "ShowOnlyFirstParent", tooltip: "Show only first parent", action: #selector(firstParentClicked))
@@ -80,14 +74,14 @@ final class RevisionFilterToolbar: NSObject, NSComboBoxDelegate, NSMenuDelegate 
             branchType.lastItem?.target = self; branchType.lastItem?.action = #selector(toggleCheck(_:))
         }
         branchType.menu?.autoenablesItems = false
-        compact(branchType, width: 29, image: "EditFilter", identifier: "FilterToolbar.BranchType")
+        compact(branchType, width: ToolStripHighlightView.imageDropDownWidth, image: "EditFilter", identifier: "FilterToolbar.BranchType")
 
         filterType.addItem(withTitle: "Filter type")
         for (title, on) in [("Commit message", true), ("Committer", false), ("Author", false), ("Diff contains (SLOW)", false)] {
             filterType.addItem(withTitle: title); filterType.lastItem?.state = on ? .on : .off
             filterType.lastItem?.target = self; filterType.lastItem?.action = #selector(filterTypeChanged(_:))
         }
-        compact(filterType, width: 29, image: "EditFilter", identifier: "FilterToolbar.TextType")
+        compact(filterType, width: ToolStripHighlightView.imageDropDownWidth, image: "EditFilter", identifier: "FilterToolbar.TextType")
 
         for combo in [branchCombo, revisionCombo] {
             combo.controlSize = .small
@@ -117,7 +111,7 @@ final class RevisionFilterToolbar: NSObject, NSComboBoxDelegate, NSMenuDelegate 
         button.controlSize = .small; button.bezelStyle = .texturedRounded
         button.toolTip = button.item(at: 0)?.title
         button.setAccessibilityIdentifier(identifier)
-        button.imagePosition = .imageOnly
+        button.imagePosition = .imageLeading
         if let image { button.item(at: 0)?.image = AppKitFactory.resourceImage(image, accessibilityDescription: button.item(at: 0)?.title) }
         button.item(at: 0)?.title = ""
         button.image = button.item(at: 0)?.image

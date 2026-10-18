@@ -207,7 +207,7 @@ final class BuildServerSettingsPageController: NSViewController, NSTextFieldDele
     private var edits: [DistributedSettingsScope: [String: String?]] = [:]
     private var tokenEdits: [String: String] = [:]
     private let stack = NSStackView()
-    private let scopePopup = NSPopUpButton()
+    private var scopeHeader: SettingsSourceHeader?
     private let enabled = NSButton(checkboxWithTitle: "Enable build server integration", target: nil, action: nil)
     private let showPage = NSButton(checkboxWithTitle: "Show build result page", target: nil, action: nil)
     private let typePopup = NSPopUpButton()
@@ -239,13 +239,11 @@ final class BuildServerSettingsPageController: NSViewController, NSTextFieldDele
         view = stack
         let scopes = store.locations == nil ? [DistributedSettingsScope.global] : DistributedSettingsScope.allCases
         if store.locations == nil { scope = .global }
-        for item in scopes {
-            scopePopup.addItem(withTitle: item.title)
-            scopePopup.lastItem?.representedObject = item
-        }
-        scopePopup.selectItem(withTitle: scope.title)
-        scopePopup.target = self; scopePopup.action = #selector(scopeChanged)
-        stack.addArrangedSubview(NSStackView(views: [NSTextField(labelWithString: "Settings source:"), scopePopup]))
+        let header = SettingsSourceHeader(options: scopes.map { ($0.rawValue, $0.title) }, selected: scope.rawValue)
+        header.setAccessibilityIdentifier("Settings.appScope")
+        header.onChange = { [weak self] _ in self?.scopeChanged() }
+        scopeHeader = header
+        stack.addArrangedSubview(header)
         stack.addArrangedSubview(NSTextField(wrappingLabelWithString: "Git Extensions can integrate with build servers to supply per-commit Continuous Integration information."))
         for button in [enabled, showPage] { button.allowsMixedState = true; button.target = self; button.action = #selector(controlsChanged) }
         typePopup.addItems(withTitles: ["None"] + BuildServerType.allCases.map(\.rawValue))
@@ -414,10 +412,10 @@ final class BuildServerSettingsPageController: NSViewController, NSTextFieldDele
         if notification.object as? NSTextField === adapterFields["InstanceUrl"] { gitLabInstanceEdited = true }
         captureAdapter(); if selectedType == .azureDevOps { updateAzureView() }; updateExtraView() }
 
-    @objc private func scopeChanged() {
+    private func scopeChanged() {
         view.window?.makeFirstResponder(nil)
         capture()
-        scope = scopePopup.selectedItem?.representedObject as? DistributedSettingsScope ?? .effective
+        scope = scopeHeader.flatMap { DistributedSettingsScope(rawValue: $0.selectedID) } ?? .effective
         reload()
     }
     @objc private func controlsChanged() { capture() }

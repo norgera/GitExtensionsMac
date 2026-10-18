@@ -180,6 +180,17 @@ extension UIIntegrationTests {
                 #expect(list.groups.map(\.title) == ["Recent repositories", "Work"] && list.groups[0].tiles.count == 2, "dashboard: groups")
                 #expect(list.hasInvalidRepositories && list.groups[0].tiles[1].isValid == false, "dashboard: invalid repository")
                 #expect(list.groups[1].tiles[0].isFavourite, "dashboard: favourite tile")
+                func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
+                let linkButtons = descendants(dashboard.view).compactMap { $0 as? DashboardLinkButton }
+                let create = try #require(linkButtons.first { $0.title.hasSuffix("Create new repository") })
+                let before = create.attributedTitle.string
+                let event = try #require(NSEvent.enterExitEvent(with: .mouseEntered, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: window.windowNumber, context: nil, eventNumber: 0, trackingNumber: 0, userData: nil))
+                for _ in 0..<3 {
+                    create.mouseEntered(with: event)
+                    create.mouseExited(with: event)
+                }
+                #expect(create.attributedTitle.string == before, "dashboard: hover keeps the link caption in place")
+                #expect(linkButtons.filter { ["Develop", "Donate", "Translate", "Issues"].contains($0.title.trimmingCharacters(in: .whitespaces)) }.allSatisfy { $0.isHiddenOrHasHiddenAncestor }, "dashboard: Contribute section hidden")
                 #expect(window.firstResponder === list.searchField.currentEditor() || window.firstResponder === list.searchField, "dashboard: search focused")
                 var opened: URL?
                 dashboard.onOpenRecentRepository = { opened = $0 }

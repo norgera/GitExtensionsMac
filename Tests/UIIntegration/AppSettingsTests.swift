@@ -29,6 +29,63 @@ extension UIIntegrationTests {
             }
         }
 
+        @Test("Settings page layout") static func runSettingsPageLayout() throws {
+            let suite = "GitExtensionsMac.SettingsLayoutTests.\(UUID().uuidString)"
+            let defaults = UserDefaults(suiteName: suite)!
+            let remembered = SettingsViewController.lastSelectedPage
+            defer {
+                SettingsViewController.lastSelectedPage = remembered
+                defaults.removePersistentDomain(forName: suite)
+            }
+            let store = AppSettingsStore(defaults: defaults)
+            func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
+            let controller = SettingsViewController(store: store, source: nil, initialPage: "general", repositoryChanged: {})
+            let window = NSWindow(contentViewController: controller)
+            window.setContentSize(NSSize(width: 1040, height: 720))
+            window.makeKeyAndOrderFront(nil)
+            defer { window.close() }
+            let scroll = try #require(descendants(controller.view).compactMap { $0 as? NSScrollView }.first { $0.documentView is TopAlignedDocumentView })
+            window.contentMaxSize = SettingsViewController.maximumContentSize
+            window.setContentSize(NSSize(width: 4000, height: 3000))
+            #expect(window.contentRect(forFrameRect: window.frame).size.width <= SettingsViewController.maximumContentSize.width + 0.5, "Settings has a defined maximum width")
+            controller.view.layoutSubtreeIfNeeded()
+            #expect(controller.view.fittingSize.width <= SettingsViewController.maximumContentSize.width, "maximum size accommodates the minimum layout")
+            var checkedRows = 0
+            for (width, page) in [CGFloat(1040), 0].flatMap({ width in controller.categoryIDs.filter { $0 != "application" }.map { (width, $0) } }) {
+                window.setContentSize(NSSize(width: width, height: 720))
+                controller.goToCategory(page)
+                controller.view.layoutSubtreeIfNeeded()
+                let document = try #require(scroll.documentView)
+                let visible = descendants(document).filter { !$0.isHiddenOrHasHiddenAncestor }
+                let rows = visible.compactMap { $0 as? SettingsFormRow }
+                checkedRows += rows.count
+                let columns = Dictionary(grouping: rows) { document.convert($0.label.bounds, from: $0.label).minX.rounded() }
+                for (labelX, group) in columns {
+                    let controlX = Set(group.map { document.convert($0.control.bounds, from: $0.control).minX.rounded() })
+                    #expect(controlX.count == 1, "\(page): controls after labels at \(labelX) share one column \(controlX)")
+                }
+                let groups = visible.compactMap { $0 as? SettingsGroupBox }.filter { !($0.superview?.isDescendant(of: $0) ?? false) && !(($0.superview?.superview?.superview as? SettingsGroupBox) != nil) }
+                #expect(Set(groups.map { $0.frame.width.rounded() }).count <= 1, "\(page): top-level groups share one width")
+                let limit = scroll.contentView.bounds.width + 1
+                #expect(scroll.contentView.bounds.width >= SettingsSourceHeader.minimumWidth + 36, "\(page) at \(window.frame.width): Settings source row fits on one line")
+                let clipped = visible.compactMap { $0 as? NSControl }.filter { document.convert($0.bounds, from: $0).maxX > limit }
+                #expect(clipped.isEmpty, "\(page) at \(window.frame.width): controls extend past the visible width \(clipped.map { ($0 as? NSButton)?.title ?? String(describing: type(of: $0)) })")
+            }
+            #expect(checkedRows > 20, "form rows were measured")
+            let header = SettingsSourceHeader(options: DistributedSettingsScope.allCases.map { ($0.rawValue, $0.title) }, selected: "effective")
+            #expect(header.radios.map(\.title) == ["Effective", "Local for current repository", "Distributed with current repository", "Global for all repositories"], "upstream source captions and order")
+            let arrows = descendants(header).compactMap { $0 as? NSTextField }.filter { $0.stringValue == "<<" }
+            #expect(arrows.count == 3 && arrows.allSatisfy { $0.alphaValue == 1 }, "inheritance arrows shown for Effective")
+            var chosen: [String] = []
+            header.onChange = { chosen.append($0) }
+            header.radios[3].performClick(nil)
+            #expect(header.selectedID == "global" && chosen == ["global"] && header.radios.map(\.state) == [.off, .off, .off, .on], "radio selection")
+            #expect(arrows.allSatisfy { $0.alphaValue == 0 }, "arrows hidden outside Effective")
+            header.frame.size = header.fittingSize
+            header.layoutSubtreeIfNeeded()
+            #expect(Set(header.radios.map { header.convert($0.bounds, from: $0).minY.rounded() }).count == 1, "source options stay on one line")
+        }
+
         @Test("Settings tree") static func runSettingsTree() async throws {
             let suite = "GitExtensionsMac.SettingsTreeTests.\(UUID().uuidString)"
             let defaults = UserDefaults(suiteName: suite)!
@@ -107,6 +164,9 @@ extension UIIntegrationTests {
             let identifiers = descendants(found.view).compactMap { ($0 as? NSButton)?.accessibilityIdentifier() }
             #expect(found.checklist.contains { $0.kind == .editor }, "editor check still evaluated")
             #expect(identifiers.contains("SettingsCheck.identity") && !identifiers.contains("SettingsCheck.editor"), "editor check has no row")
+            found.view.layoutSubtreeIfNeeded()
+            let checkWidths = Set(descendants(found.view).compactMap { $0 as? NSButton }.filter { $0.accessibilityIdentifier().hasPrefix("SettingsCheck.") }.map(\.frame.width))
+            #expect(checkWidths.count == 1, "checklist boxes share one width")
             found.goToCategory("general")
         }
 
@@ -231,8 +291,8 @@ extension UIIntegrationTests {
             #expect(try DistributedSettings.read(a.distributedURL)["unrelated"] == "keep", "unrelated XML settings preserved")
 
             func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
-            func scopeControl(_ controller: SettingsViewController) -> NSPopUpButton? {
-                descendants(controller.view).compactMap { $0 as? NSPopUpButton }.first { $0.accessibilityIdentifier() == "Settings.appScope" }
+            func scopeControl(_ controller: SettingsViewController) -> SettingsSourceHeader? {
+                descendants(controller.view).compactMap { $0 as? SettingsSourceHeader }.first { $0.accessibilityIdentifier() == "Settings.appScope" }
             }
             func field<T: NSControl>(_ controller: SettingsViewController, _ label: String, as type: T.Type) -> T {
                 let title = descendants(controller.view).compactMap { $0 as? NSTextField }.first { $0.stringValue == label }!
@@ -242,9 +302,12 @@ extension UIIntegrationTests {
                 popup.selectItem(withTitle: title)
                 _ = popup.sendAction(popup.action!, to: popup.target)
             }
+            func select(_ header: SettingsSourceHeader, title: String) {
+                header.choose(DistributedSettingsScope.allCases.first { $0.title == title }!.rawValue)
+            }
             try buildA.write([buildKey: "false"], scope: .local)
             let buildPage = BuildServerSettingsPageController(store: buildA, remoteURLs: [], workingDirectoryName: nil)
-            let buildScope = descendants(buildPage.view).compactMap { $0 as? NSPopUpButton }.first!
+            let buildScope = descendants(buildPage.view).compactMap { $0 as? SettingsSourceHeader }.first!
             select(buildScope, title: DistributedSettingsScope.local.title)
             let enabled = descendants(buildPage.view).compactMap { $0 as? NSButton }.first { $0.title == "Enable build server integration" }!
             #expect(enabled.state == .off, "build local state")
@@ -263,7 +326,7 @@ extension UIIntegrationTests {
             panel.makeKeyAndOrderFront(nil)
             defer { panel.close() }
             try await wait("repository scope loaded") { scopeControl(controller) != nil }
-            #expect(scopeControl(controller)?.titleOfSelectedItem == DistributedSettingsScope.local.title, "repository entry selects local")
+            #expect(scopeControl(controller)?.selectedID == DistributedSettingsScope.local.rawValue, "repository entry selects local")
             #expect(field(controller, "Merge log messages count:", as: NSTextField.self).stringValue == "50", "local value in hosted UI")
             let graph = descendants(controller.view).compactMap { $0 as? NSButton }.first { $0.title == "Render graph with diagonals" }!
             #expect(!graph.isEnabled, "graph preferences are global-only")
@@ -299,26 +362,26 @@ extension UIIntegrationTests {
             #expect(scopeControl(controller) == nil, "fonts remain upstream global-only")
             controller.goToCategory("revision_links")
             #expect(
-                scopeControl(controller)?.titleOfSelectedItem == DistributedSettingsScope.effective.title,
+                scopeControl(controller)?.selectedID == DistributedSettingsScope.effective.rawValue,
                 "Revision links starts at its own effective scope, not Detailed's global scope")
             select(scopeControl(controller)!, title: DistributedSettingsScope.effective.title)
-            #expect(scopeControl(controller)!.isEnabled, "effective page leaves the scope selector enabled")
+            #expect(scopeControl(controller)!.radios.allSatisfy { $0.isEnabled }, "effective page leaves the scope selector enabled")
             let addLink = descendants(controller.view).compactMap { $0 as? NSButton }.first { $0.title == "Add" }!
             #expect(!addLink.isEnabled, "effective Revision links cannot silently add to another scope")
             select(scopeControl(controller)!, title: DistributedSettingsScope.local.title)
             #expect(
                 descendants(controller.view).compactMap { $0 as? NSButton }.first { $0.title == "Add" }!.isEnabled, "explicit Revision links scope is writable")
             controller.goToCategory("detailed")
-            #expect(scopeControl(controller)?.titleOfSelectedItem == DistributedSettingsScope.global.title, "each page retains its own chosen scope")
+            #expect(scopeControl(controller)?.selectedID == DistributedSettingsScope.global.rawValue, "each page retains its own chosen scope")
             controller.goToCategory("git_config")
-            func gitScope() -> NSPopUpButton {
-                descendants(controller.view).compactMap { $0 as? NSPopUpButton }.first!
+            func gitScope() -> SettingsSourceHeader {
+                descendants(controller.view).compactMap { $0 as? SettingsSourceHeader }.first { $0.accessibilityIdentifier() == "Settings.gitScope" }!
             }
-            select(gitScope(), title: GitSettingsScope.global.rawValue)
+            gitScope().choose(GitSettingsScope.global.rawValue)
             controller.goToCategory("git_advanced")
-            #expect(gitScope().titleOfSelectedItem == GitSettingsScope.effective.rawValue, "Git Advanced has an independent initial scope")
+            #expect(gitScope().selectedID == GitSettingsScope.effective.rawValue, "Git Advanced has an independent initial scope")
             controller.goToCategory("git_config")
-            #expect(gitScope().titleOfSelectedItem == GitSettingsScope.global.rawValue, "Git Config remembers its own scope")
+            #expect(gitScope().selectedID == GitSettingsScope.global.rawValue, "Git Config remembers its own scope")
             let other = SettingsViewController(store: store, source: secondModule, initialPage: "detailed", initialScope: .local, repositoryChanged: {})
             let otherPanel = NSPanel(contentViewController: other)
             other.panel = otherPanel
@@ -335,7 +398,7 @@ extension UIIntegrationTests {
             descendants(other.view).compactMap { $0 as? NSButton }.first { $0.title == "Cancel" }!.performClick(nil)
             #expect(try DistributedSettings.read(b.localURL)[count] == "60", "Cancel never saves scoped draft")
             let noRepository = SettingsViewController(store: store, source: nil, initialPage: "detailed", repositoryChanged: {})
-            #expect(scopeControl(noRepository)?.itemTitles == [DistributedSettingsScope.global.title], "no repository exposes global only")
+            #expect(scopeControl(noRepository)?.optionIDs == [DistributedSettingsScope.global.rawValue], "no repository exposes global only")
         }
 
         @Test("Preferences round trip") private static func testPreferencesRoundTrip() {

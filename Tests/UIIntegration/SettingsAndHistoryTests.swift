@@ -485,6 +485,9 @@ extension SettingsAndHistoryTests {
             popup.selectItem(withTitle: title)
             _ = popup.sendAction(popup.action!, to: popup.target)
         }
+        func source(_ controller: SettingsViewController, _ identifier: String) -> SettingsSourceHeader? {
+            descendants(controller.view).compactMap { $0 as? SettingsSourceHeader }.first { $0.accessibilityIdentifier() == identifier }
+        }
         func selectTool(_ combo: NSComboBox, _ title: String) {
             combo.selectItem(withObjectValue: title)
             combo.delegate?.comboBoxSelectionDidChange?(Notification(name: NSComboBox.selectionDidChangeNotification, object: combo))
@@ -504,7 +507,7 @@ extension SettingsAndHistoryTests {
         let (controller, panel) = make()
         defer { panel.close() }
         try await wait("effective settings") { field(controller, "Difftool", NSComboBox.self) != nil }
-        select(field(controller, "Settings source:", NSPopUpButton.self)!, "local")
+        source(controller, "Settings.gitScope")!.choose("local")
         try await wait("local settings") { field(controller, "Difftool", NSComboBox.self) != nil }
         let merge = field(controller, "Mergetool", NSComboBox.self)!
         let diff = field(controller, "Difftool", NSComboBox.self)!
@@ -591,16 +594,16 @@ extension SettingsAndHistoryTests {
         let (cancelled, cancelPanel) = make()
         defer { cancelPanel.close() }
         try await wait("reopen settings") { field(cancelled, "Difftool", NSComboBox.self) != nil }
-        select(field(cancelled, "Settings source:", NSPopUpButton.self)!, "local")
+        source(cancelled, "Settings.gitScope")!.choose("local")
         try await wait("reopen local") { field(cancelled, "Difftool command", NSTextField.self) != nil }
         #expect(field(cancelled, "Difftool command", NSTextField.self)?.stringValue == saved["difftool.vscode.cmd"]?.last, "reopen saved command")
         selectTool(field(cancelled, "Difftool", NSComboBox.self)!, "kdiff3")
         descendants(cancelled.view).compactMap { $0 as? NSButton }.first { $0.title == "Cancel" }!.performClick(nil)
         #expect(try await module.loadGitSettings(.local)["diff.guitool"]?.last == "vscode", "Cancel preserves saved config")
         controller.goToCategory("revision_links")
-        try await wait("revision scopes") { descendants(controller.view).contains { ($0 as? NSControl)?.accessibilityIdentifier() == "Settings.appScope" } }
-        let scope = descendants(controller.view).compactMap { $0 as? NSPopUpButton }.first { $0.accessibilityIdentifier() == "Settings.appScope" }!
-        select(scope, DistributedSettingsScope.global.title)
+        try await wait("revision scopes") { source(controller, "Settings.appScope") != nil }
+        let scope = source(controller, "Settings.appScope")!
+        scope.choose(DistributedSettingsScope.global.rawValue)
         func insert(_ provider: RevisionLinkTemplates) {
             let popup = descendants(controller.view).compactMap { $0 as? NSPopUpButton }.first {
                 $0.menu?.items.contains(where: { $0.title == provider.actionTitle }) == true
@@ -616,18 +619,18 @@ extension SettingsAndHistoryTests {
         descendants(controller.view).compactMap { $0 as? NSButton }.first { $0.title == "Apply" }!.performClick(nil)
         try await wait("templates persisted") { store.revisionLinksXML != nil }
         #expect(try RevisionLinkDefinition.decode(store.revisionLinksXML).count == 3, "UI action persists exact provider list")
-        let inheritedScope = descendants(controller.view).compactMap { $0 as? NSPopUpButton }.first { $0.accessibilityIdentifier() == "Settings.appScope" }!
-        select(inheritedScope, DistributedSettingsScope.local.title)
+        let inheritedScope = source(controller, "Settings.appScope")!
+        inheritedScope.choose(DistributedSettingsScope.local.rawValue)
         let inherited = descendants(controller.view).compactMap { $0 as? RevisionLinksSettingsEditor }.first!
         #expect(inherited.definitions.count == 3 && inherited.addButton.isEnabled, "writable Local includes inherited Global categories like upstream manager")
-        let effectiveScope = descendants(controller.view).compactMap { $0 as? NSPopUpButton }.first { $0.accessibilityIdentifier() == "Settings.appScope" }!
-        select(effectiveScope, DistributedSettingsScope.effective.title)
+        let effectiveScope = source(controller, "Settings.appScope")!
+        effectiveScope.choose(DistributedSettingsScope.effective.rawValue)
         let effective = descendants(controller.view).compactMap { $0 as? RevisionLinksSettingsEditor }.first!
         #expect(
             effective.definitions.count == 3 && effective.categories.isEnabled && !effective.addButton.isEnabled && !effective.templates.isEnabled,
             "effective categories readable with mutation controls disabled")
-        let currentScope = descendants(controller.view).compactMap { $0 as? NSPopUpButton }.first { $0.accessibilityIdentifier() == "Settings.appScope" }!
-        select(currentScope, DistributedSettingsScope.global.title)
+        let currentScope = source(controller, "Settings.appScope")!
+        currentScope.choose(DistributedSettingsScope.global.rawValue)
         insert(.gitHub)
         try await wait("duplicate template leaves no new selection") {
             descendants(controller.view).compactMap { $0 as? RevisionLinksSettingsEditor }.first?.selectedIndex == -1
@@ -651,7 +654,7 @@ extension SettingsAndHistoryTests {
         cancellation.panel = cancellationPanel
         defer { cancellationPanel.close() }
         try await wait("template Cancel scope loaded") {
-            descendants(cancellation.view).compactMap { $0 as? NSPopUpButton }.contains { $0.accessibilityIdentifier() == "Settings.appScope" }
+            source(cancellation, "Settings.appScope") != nil
         }
         let priorXML = store.revisionLinksXML
         if let field = field(cancellation, "Name:", NSTextField.self) {

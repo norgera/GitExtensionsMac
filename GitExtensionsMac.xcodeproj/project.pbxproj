@@ -417,6 +417,11 @@ F80000000000000000000001 /* GitWorktrees.swift in Sources */ = {isa = PBXBuildFi
 		FACE00000000000000000006 /* Fixtures in Resources */ = {isa = PBXBuildFile; fileRef = FACE00000000000000000005 /* Fixtures */; };
 		FACE00000000000000000009 /* Test images in Resources */ = {isa = PBXBuildFile; fileRef = FACE00000000000000000008; };
 		FACE0000000000000000000A /* Themes in test Resources */ = {isa = PBXBuildFile; fileRef = FE000000000000000000000A; };
+		C0501E000000000000000001 /* EmbeddedConsoleViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0501E000000000000000002; };
+		C0501E000000000000000003 /* EmbeddedConsoleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0501E000000000000000004; };
+		C0501E000000000000000005 /* SwiftTerm in Frameworks */ = {isa = PBXBuildFile; productRef = C0501E000000000000000006; };
+		C0501E000000000000000009 = {isa = PBXBuildFile; fileRef = C0501E000000000000000008; };
+		C0501E00000000000000000C = {isa = PBXBuildFile; fileRef = C0501E00000000000000000B; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -889,6 +894,10 @@ F80000000000000000000001 /* GitWorktrees.swift in Sources */ = {isa = PBXBuildFi
 		293D6CD0A7D3743BB7F72268 /* RevisionIdentityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RevisionIdentityTests.swift; sourceTree = "<group>"; };
 		FACE00000000000000000005 /* Fixtures */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Fixtures; sourceTree = "<group>"; };
 		FACE00000000000000000008 /* Test images */ = {isa = PBXFileReference; lastKnownFileType = folder; path = GitExtensionsMac/Resources; sourceTree = SOURCE_ROOT; };
+		C0501E000000000000000002 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmbeddedConsoleViewController.swift; sourceTree = "<group>"; };
+		C0501E000000000000000004 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmbeddedConsoleTests.swift; sourceTree = "<group>"; };
+		C0501E000000000000000008 = {isa = PBXFileReference; lastKnownFileType = image.png; path = "Console.png"; sourceTree = "<group>"; };
+		C0501E00000000000000000B = {isa = PBXFileReference; lastKnownFileType = text; path = "SwiftTerm-LICENSE.txt"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -918,6 +927,7 @@ F80000000000000000000001 /* GitWorktrees.swift in Sources */ = {isa = PBXBuildFi
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				C0501E000000000000000005 /* SwiftTerm in Frameworks */,
 				713F21B350CD76FECC154CB7 /* Cocoa.framework in Frameworks */,
 				7A47A416B86FCAD74CE06027 /* GitExtensionsCore.framework in Frameworks */,
 				4AF50D8848B4C72FF78CF753 /* GitCommands.framework in Frameworks */,
@@ -1014,6 +1024,7 @@ F80000000000000000000001 /* GitWorktrees.swift in Sources */ = {isa = PBXBuildFi
 		FACE00000000000000000003 /* UIIntegration */ = {
 			isa = PBXGroup;
 			children = (
+				C0501E000000000000000004 /* EmbeddedConsoleTests.swift */,
 				BB4000000000000000000005 /* AppSettingsTests.swift */,
 				FDCE7A2E600A9D6FB1B1AEEF /* AppShellTests.swift */,
 				CE9000000000000000000009 /* AppearanceTests.swift */,
@@ -1135,6 +1146,7 @@ F80000000000000000000001 /* GitWorktrees.swift in Sources */ = {isa = PBXBuildFi
 				BB7300000000000000000003 /* CheckoutBranchWorkflowCoordinator.swift */,
 				BB7300000000000000000004 /* CommitSummaryView.swift */,
 				CF33F0EB3F8DB1738220F2F0 /* CommitDetailViewController.swift */,
+				C0501E000000000000000002 /* EmbeddedConsoleViewController.swift */,
 				ADB4DF41D3F4ED3B37F9F318 /* DetailTabsViewController.swift */,
 				FDF5A8065DBE7B02C8B04614 /* RecoverLostObjectsDialog.swift */,
 				FDB1A0000000000000000004 /* BlameViewController.swift */,
@@ -1180,6 +1192,8 @@ F80000000000000000000001 /* GitWorktrees.swift in Sources */ = {isa = PBXBuildFi
 				F00000000000000000000008 /* ArrowDown.png */,
 				F00000000000000000000009 /* ArrowUp.png */,
 				CD8B788A81F17F9DE4276625 /* Book.png */,
+				C0501E000000000000000008 /* Console.png */,
+				C0501E00000000000000000B /* SwiftTerm-LICENSE.txt */,
 				F00000000000000000000012 /* CommitSummary.png */,
 				F00000000000000000000002 /* CommitSignatureError.png */,
 				F00000000000000000000001 /* CommitSignatureOk.png */,
@@ -1588,6 +1602,7 @@ F80000000000000000000001 /* GitWorktrees.swift in Sources */ = {isa = PBXBuildFi
 				6DB95ABB00CBCA7D7D9F65D4 /* PBXTargetDependency */,
 				C210BC4E7FA0B86651B1CDC0 /* PBXTargetDependency */,
 			);
+			packageProductDependencies = (C0501E000000000000000006 /* SwiftTerm */);
 			name = GitUI;
 			productName = GitUI;
 			productReference = 9DF7C1F6769B328B1A8946C7 /* GitUI.framework */;
@@ -1613,6 +1628,7 @@ F80000000000000000000001 /* GitWorktrees.swift in Sources */ = {isa = PBXBuildFi
 			mainGroup = FAEB761346735B4A3F5DCFCF;
 			minimizedProjectReferenceProxies = 0;
 			productRefGroup = E77410E7BA5B9D00F36C6107 /* Products */;
+			packageReferences = (C0501E000000000000000007 /* SwiftTerm */);
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
@@ -1661,6 +1677,8 @@ F80000000000000000000001 /* GitWorktrees.swift in Sources */ = {isa = PBXBuildFi
 				E00000000000000000000008 /* ArrowDown.png in Resources */,
 				E00000000000000000000009 /* ArrowUp.png in Resources */,
 				E85312432799B946311FD0C9 /* Book.png in Resources */,
+				C0501E000000000000000009 /* Console.png in Resources */,
+				C0501E00000000000000000C /* SwiftTerm-LICENSE.txt in Resources */,
 				E00000000000000000000012 /* CommitSummary.png in Resources */,
 				E00000000000000000000002 /* CommitSignatureError.png in Resources */,
 				E00000000000000000000001 /* CommitSignatureOk.png in Resources */,
@@ -1925,6 +1943,7 @@ F80000000000000000000001 /* GitWorktrees.swift in Sources */ = {isa = PBXBuildFi
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				C0501E000000000000000003 /* EmbeddedConsoleTests.swift in Sources */,
 				3566A5F570AFE9ED67451060 /* AppSettingsTests.swift in Sources */,
 				8D51565A80D00B0ED9362737 /* ContextMenuStateTests.swift in Sources */,
 				3DA82272B28AF035D19A9AF8 /* GitPullTests.swift in Sources */,
@@ -1995,6 +2014,7 @@ F80000000000000000000001 /* GitWorktrees.swift in Sources */ = {isa = PBXBuildFi
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				C0501E000000000000000001 /* EmbeddedConsoleViewController.swift in Sources */,
 				EAB7DBBE270E4B5D7FA8E034 /* AppKitFactory.swift in Sources */,
 				0F9C12342386BAB1984A9234 /* AppSettings.swift in Sources */,
 				CE1000000000000000000002 /* CommitMessageEditing.swift in Sources */,
@@ -2146,6 +2166,21 @@ F80000000000000000000001 /* GitWorktrees.swift in Sources */ = {isa = PBXBuildFi
 			targetProxy = EF42ABE981D4C334306D94E8 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		C0501E000000000000000007 /* SwiftTerm */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/migueldeicaza/SwiftTerm.git";
+			requirement = {kind = exactVersion; version = 1.18.0; };
+		};
+/* End XCRemoteSwiftPackageReference section */
+/* Begin XCSwiftPackageProductDependency section */
+		C0501E000000000000000006 /* SwiftTerm */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = C0501E000000000000000007 /* SwiftTerm */;
+			productName = SwiftTerm;
+		};
+/* End XCSwiftPackageProductDependency section */
 
 /* Begin XCBuildConfiguration section */
 		015B439DA48C43E6ACAA374B /* Release */ = {

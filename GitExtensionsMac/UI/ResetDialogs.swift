@@ -257,7 +257,7 @@ private final class ResetCurrentBranchViewController: NSViewController, NSWindow
 
     private func style(_ button: NSButton, color: NSColor) {
         button.wantsLayer = true
-        button.layer?.backgroundColor = color.withAlphaComponent(0.16).cgColor
+        button.layer?.backgroundColor = ApplicationColors.resolved(color.withAlphaComponent(0.16), for: button)
         button.layer?.cornerRadius = 4
     }
 }

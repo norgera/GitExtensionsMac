@@ -34,6 +34,7 @@ final class DetailTabsViewController: NSViewController {
             button.translatesAutoresizingMaskIntoConstraints = false
             button.widthAnchor.constraint(equalToConstant: Self.tabWidth(for: item.0, showsIcon: true)).isActive = true
             tabStack.addArrangedSubview(button)
+            button.heightAnchor.constraint(equalTo: tabStack.heightAnchor).isActive = true
             return button
         }
         updateTabSelection()
@@ -65,7 +66,7 @@ final class DetailTabsViewController: NSViewController {
         root.addSubview(tabBar)
         root.addSubview(contentView)
 
-        let tabBarHeight = tabBar.heightAnchor.constraint(equalToConstant: 21)
+        let tabBarHeight = tabBar.heightAnchor.constraint(equalToConstant: 24)
         tabBarHeight.priority = .defaultHigh
         NSLayoutConstraint.activate([
             tabBar.topAnchor.constraint(equalTo: root.topAnchor),
@@ -135,7 +136,7 @@ private final class DetailTabButton: NSButton {
 
     init(title: String, imageName: String, target: AnyObject?, action: Selector?) {
         tabImage = AppKitFactory.resourceImage(imageName, accessibilityDescription: title)
-            ?? (imageName == "GitCommandLog" ? NSImage(systemSymbolName: "terminal", accessibilityDescription: title) : nil)
+            ?? (["GitCommandLog", "Console"].contains(imageName) ? NSImage(systemSymbolName: "terminal", accessibilityDescription: title) : nil)
         super.init(frame: .zero)
         isBordered = false
         focusRingType = .none

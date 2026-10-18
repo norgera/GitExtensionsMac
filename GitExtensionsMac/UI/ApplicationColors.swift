@@ -518,6 +518,18 @@ enum ApplicationColors {
         guard let value = store.loadTheme(selected).colors[name] else { return fallback }
         return fixedColor(value)
     }
+    static func blended(_ color: NSColor, fraction: CGFloat, of other: NSColor) -> NSColor {
+        NSColor(name: nil) { appearance in
+            var result = color
+            appearance.performAsCurrentDrawingAppearance { result = color.blended(withFraction: fraction, of: other) ?? color }
+            return result
+        }
+    }
+    static func resolved(_ color: NSColor, for view: NSView) -> CGColor {
+        var result = color.cgColor
+        view.effectiveAppearance.performAsCurrentDrawingAppearance { result = color.cgColor }
+        return result
+    }
     private static func fixedColor(_ value: Int) -> NSColor {
         if value < 0 { return .clear }
         return NSColor(calibratedRed: CGFloat((value >> 16) & 255) / 255, green: CGFloat((value >> 8) & 255) / 255, blue: CGFloat(value & 255) / 255, alpha: 1)

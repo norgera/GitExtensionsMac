@@ -88,10 +88,11 @@ final class GitHubAccountSettingsController: NSViewController {
             stack.addArrangedSubview(close)
         }
         view.addSubview(stack); stack.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([stack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
-            stack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
-            stack.topAnchor.constraint(equalTo: view.topAnchor, constant: 16), token.widthAnchor.constraint(equalTo: stack.widthAnchor)])
-        if embeddedCredentials { stack.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -16).isActive = true }
+        let inset: CGFloat = embeddedCredentials ? 0 : 16
+        NSLayoutConstraint.activate([stack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: inset),
+            stack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -inset),
+            stack.topAnchor.constraint(equalTo: view.topAnchor, constant: inset), token.widthAnchor.constraint(equalTo: stack.widthAnchor), status.widthAnchor.constraint(equalTo: stack.widthAnchor)])
+        if embeddedCredentials { stack.bottomAnchor.constraint(equalTo: view.bottomAnchor).isActive = true }
     }
     @objc private func save() {
         guard !token.stringValue.isEmpty else { status.stringValue = "Enter a token to replace the existing credential."; return }

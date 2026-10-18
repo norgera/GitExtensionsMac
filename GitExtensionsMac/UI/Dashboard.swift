@@ -113,6 +113,7 @@ final class DashboardViewController: NSViewController {
         left.addArrangedSubview(logoPanel)
         left.addArrangedSubview(startPanel)
         left.addArrangedSubview(contributePanel)
+        contributePanel.isHidden = true
         startPanel.setContentHuggingPriority(.defaultLow, for: .vertical)
         contributePanel.setContentHuggingPriority(.required, for: .vertical)
 
@@ -258,9 +259,11 @@ final class DashboardLinkButton: NSButton {
     var callback: (() -> Void)?
     var colors: (normal: NSColor, hover: NSColor) = (.labelColor, .systemOrange) { didSet { updateTitle(hovered: false) } }
     private var trackingArea: NSTrackingArea?
+    private var caption = ""
 
     convenience init(title: String, image: NSImage?) {
         self.init(frame: .zero)
+        caption = title
         self.title = title
         self.image = image
         imagePosition = image == nil ? .noImage : .imageLeading
@@ -275,7 +278,7 @@ final class DashboardLinkButton: NSButton {
     @objc private func invoke() { callback?() }
 
     private func updateTitle(hovered: Bool) {
-        attributedTitle = NSAttributedString(string: " " + title, attributes: [
+        attributedTitle = NSAttributedString(string: " " + caption, attributes: [
             .foregroundColor: hovered ? colors.hover : colors.normal,
             .font: font ?? NSFont.systemFont(ofSize: 12)
         ])

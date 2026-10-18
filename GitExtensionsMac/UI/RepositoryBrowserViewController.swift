@@ -60,6 +60,8 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
     private var gpgTabShown = true
     private var gpgLoadedFor: RevisionID?
     private let detailTabs = DetailTabsViewController()
+    let consoleController = EmbeddedConsoleViewController()
+    private var consoleTabEnabled = AppSettingsStore.shared.preferences.showConsoleTab
     let outputHistoryController = OutputHistoryViewController()
     private let leftPanelSplitController = RetainingSplitViewController(resizeBehavior: .fixedTrailingPane)
     private lazy var outlineSplitItem = NSSplitViewItem(viewController: outlineController)
@@ -103,13 +105,14 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
     private let pullPopUp = SplitToolbarPopUpButton()
     let shellPopUp = SplitToolbarPopUpButton()
     var shellProvider = NativeShellProvider.shared
-    private let stashSplitButton = NSSegmentedControl()
+    private let stashSplitButton = FlatSegmentedControl()
+    private let toolStripHighlight = ToolStripHighlightView()
     let stashMenu = NSMenu(title: "Stash")
     private let pushButton = NSButton()
     private var pushRefreshWidth: NSLayoutConstraint?
-    private let levelUpButton = AppKitFactory.resourceButton("SubmodulesManage", tooltip: "Submodules", width: 32, target: nil, action: nil)
-    private let worktreeButton = AppKitFactory.resourceButton("WorkTree", tooltip: "Worktrees", width: 32, target: nil, action: nil)
-    private let worktreeDropdownButton = NSButton(title: "⌄", target: nil, action: nil)
+    private let levelUpButton = AppKitFactory.resourceButton("SubmodulesManage", tooltip: "Submodules", target: nil, action: nil)
+    private let worktreeButton = AppKitFactory.resourceButton("WorkTree", tooltip: "Worktrees", target: nil, action: nil)
+    private let worktreeDropdownButton = NSButton()
     private let commitButton = NSButton()
     private var workingDirectoryWidthConstraint: NSLayoutConstraint?
     private var branchWidthConstraint: NSLayoutConstraint?
@@ -190,10 +193,10 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
     private var remoteBranchDeleteWindowController: NSWindowController?
     var checkoutBranchWorkflowCoordinator: CheckoutBranchWorkflowCoordinator?
     private var operationStateTask: Task<Void, Never>?
-    private let bisectBanner = NSView()
+    private let bisectBanner = DashboardColorView()
     private let bisectBannerLabel = NSTextField(labelWithString: "")
     private var bisectBannerHeightConstraint: NSLayoutConstraint?
-    private let rebaseBanner = NSView()
+    private let rebaseBanner = DashboardColorView()
     private let rebaseBannerLabel = NSTextField(labelWithString: "")
     private let rebaseResolveButton = NSButton(title: "Resolve…", target: nil, action: nil)
     private let gitActionAbortButton = NSButton(title: "Abort", target: nil, action: nil)
@@ -396,8 +399,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
     }
 
     private func makeRebaseBanner() -> NSView {
-        rebaseBanner.wantsLayer = true
-        rebaseBanner.layer?.backgroundColor = NSColor.systemBlue.withAlphaComponent(0.22).cgColor
+        rebaseBanner.color = NSColor.systemBlue.withAlphaComponent(0.22)
         let icon = NSImageView(image: NSImage(systemSymbolName: "info.circle.fill", accessibilityDescription: "Rebase in progress") ?? NSImage())
         rebaseBannerLabel.font = AppSettingsStore.shared.applicationFont(size: 12)
         gitActionAbortButton.target = self; gitActionAbortButton.action = #selector(abortGitActionFromBanner)
@@ -421,8 +423,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
     }
 
     private func makeBisectBanner() -> NSView {
-        bisectBanner.wantsLayer = true
-        bisectBanner.layer?.backgroundColor = NSColor.systemBlue.withAlphaComponent(0.22).cgColor
+        bisectBanner.color = NSColor.systemBlue.withAlphaComponent(0.22)
         let icon = NSImageView(image: NSImage(
             systemSymbolName: "info.circle.fill",
             accessibilityDescription: "Bisect in progress"
@@ -451,6 +452,12 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
     private func applyPreferences() {
         let settings = AppSettingsStore.shared.preferences
         refreshShellProviders()
+        consoleController.applyAppearance()
+        if consoleTabEnabled != settings.showConsoleTab {
+            consoleTabEnabled = settings.showConsoleTab
+            if !consoleTabEnabled { consoleController.stop() }
+            configureDetailTabs()
+        }
         CommandLog.shared.setOutputHistoryDepth(settings.outputHistoryDepth)
         let outputChanged = outputTabEnabled != settings.showOutputHistoryAsTab || outputHistoryEnabled != (settings.outputHistoryDepth > 0)
         if outputChanged {
@@ -517,6 +524,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
 
     override func viewWillDisappear() {
         super.viewWillDisappear()
+        consoleController.stop()
         saveLayout()
         BrowserCommandAvailability.shared.hasRepository = false
         uiCommands.stopPlugins()
@@ -543,6 +551,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             ("File tree", "FileTree", fileTreeController)
         ]
         if gpgTabShown { items.append(("GPG", "Key", gpgController)) }
+        if consoleTabEnabled { items.append(("Console", "Console", consoleController)) }
         if showsBuildReportTab { items.append(("Build Report", "", buildReportController)) }
         if outputHistoryEnabled && outputTabEnabled { items.append(("Output", "GitCommandLog", outputHistoryController)) }
         detailTabControllers = items.map(\.2)
@@ -618,6 +627,9 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             case "focus.gpg":
                 guard gpgTabShown else { return }
                 controller = gpgController
+            case "focus.console":
+                guard consoleTabEnabled else { return }
+                controller = consoleController
             case "focus.build":
                 guard showsBuildReportTab else { return }
                 controller = buildReportController
@@ -627,6 +639,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             if !layout.showSplitViewLayout { setShowSplitViewLayout(true) }
             selectDetailTab(controller)
         }
+        if selectedDetailController === consoleController { consoleController.focus(); return }
         func focusable(_ node: NSView) -> NSView? {
             guard !node.isHidden else { return nil }
             if node is NSTableView || node is NSTextView, node.acceptsFirstResponder { return node }
@@ -711,6 +724,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
     private func refreshLayoutToggleButtonStates() {
         toggleLeftPanelButton.state = mainSplitController.isCollapsed(leftSplitItem) ? .off : .on
         toggleSplitViewButton.state = layout.showSplitViewLayout ? .on : .off
+        toolStripHighlight.needsDisplay = true
         let item = Self.commitPositionItems[layout.commitInfoPosition.rawValue]
         commitPositionButton.image = AppKitFactory.resourceImage(item.image, accessibilityDescription: item.title)
         commitPositionButton.toolTip = item.title
@@ -850,36 +864,29 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             button.target = self
             button.action = action
             button.setButtonType(.pushOnPushOff)
-            button.bezelStyle = .recessed
-            button.isBordered = true
+            button.isBordered = false
             stack.addArrangedSubview(button)
         }
         commitPositionButton.target = self
         commitPositionButton.action = #selector(cycleCommitInfoPosition)
         stack.addArrangedSubview(commitPositionButton)
-        let commitPositionDropdown = NSButton(title: "⌄", target: self, action: #selector(showCommitInfoPositionMenu(_:)))
-        commitPositionDropdown.isBordered = false
-        commitPositionDropdown.toolTip = "Commit info position"
-        commitPositionDropdown.translatesAutoresizingMaskIntoConstraints = false
-        commitPositionDropdown.widthAnchor.constraint(equalToConstant: 12).isActive = true
+        let commitPositionDropdown = NSButton(title: "", target: self, action: #selector(showCommitInfoPositionMenu(_:)))
+        ToolStripHighlightView.configureDropDown(commitPositionDropdown, tooltip: "Commit info position")
         stack.addArrangedSubview(commitPositionDropdown)
         stack.addArrangedSubview(AppKitFactory.separator())
 
         levelUpButton.target = self
         levelUpButton.action = #selector(levelUpToolbar)
         stack.addArrangedSubview(levelUpButton)
-        let submoduleDropdown = NSButton(title: "⌄", target: self, action: #selector(showSubmodulesMenu(_:)))
-        submoduleDropdown.isBordered = false
-        submoduleDropdown.toolTip = "Navigate submodules and superprojects"
+        let submoduleDropdown = NSButton(title: "", target: self, action: #selector(showSubmodulesMenu(_:)))
+        ToolStripHighlightView.configureDropDown(submoduleDropdown, tooltip: "Navigate submodules and superprojects")
         stack.addArrangedSubview(submoduleDropdown)
         worktreeButton.target = self
         worktreeButton.action = #selector(manageWorktreesToolbar(_:))
         stack.addArrangedSubview(worktreeButton)
         worktreeDropdownButton.target = self
         worktreeDropdownButton.action = #selector(showWorktreesMenu(_:))
-        worktreeDropdownButton.isBordered = false
-        worktreeDropdownButton.toolTip = "Switch worktree"
-        worktreeDropdownButton.widthAnchor.constraint(equalToConstant: 12).isActive = true
+        ToolStripHighlightView.configureDropDown(worktreeDropdownButton, tooltip: "Switch worktree")
         stack.addArrangedSubview(worktreeDropdownButton)
 
         workingDirectoryWidthConstraint = configureCompactPopUp(workingDirectoryPopUp, items: ["gitextensions"], width: 83, action: #selector(selectWorkingDirectory))
@@ -903,8 +910,8 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         configureImagePopUp(
             pullPopUp,
             imageName: "Pull",
-            items: ["Pull"],
-            width: 32,
+            items: [""],
+            width: ToolStripHighlightView.imageDropDownWidth,
             action: #selector(selectPullAction)
         )
         rebuildPullMenu()
@@ -933,9 +940,9 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         stack.addArrangedSubview(stashSplitButton)
         stack.addArrangedSubview(AppKitFactory.separator())
         stack.addArrangedSubview(AppKitFactory.resourceButton("BrowseFileExplorer", tooltip: "File Explorer (Finder)", target: self, action: #selector(fileExplorerToolbar(_:))))
-        configureCompactPopUp(shellPopUp, items: [""], width: 36, action: #selector(shellProviderSelected(_:)))
+        configureCompactPopUp(shellPopUp, items: [""], width: ToolStripHighlightView.imageDropDownWidth, action: #selector(shellProviderSelected(_:)))
         shellPopUp.pullsDown = true
-        shellPopUp.imagePosition = .imageOnly
+        shellPopUp.imagePosition = .imageLeading
         shellPopUp.setAccessibilityIdentifier("Browse.ShellProviders")
         shellPopUp.onPrimaryClick = { [weak self] in self?.uiCommands.openTerminal() }
         stack.addArrangedSubview(shellPopUp)
@@ -969,12 +976,25 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         spacer.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         stack.addArrangedSubview(spacer)
         registerToolbarItems(scripts: scripts)
+        ToolStripHighlightView.flatten(stack)
+        toolStripHighlight.stack = stack
+        toolStripHighlight.checkedButtons = [toggleLeftPanelButton, toggleSplitViewButton, filterToolbar.reflogButton, filterToolbar.firstParentButton]
+        toolStripHighlight.splitPairs = [(commitPositionButton, commitPositionDropdown), (levelUpButton, submoduleDropdown),
+                                         (worktreeButton, worktreeDropdownButton), (filterToolbar.advancedButton, filterToolbar.advancedArrow)]
+        toolStripHighlight.translatesAutoresizingMaskIntoConstraints = false
 
+        background.addSubview(toolStripHighlight)
         background.addSubview(stack)
         NSLayoutConstraint.activate([
             stack.leadingAnchor.constraint(equalTo: background.leadingAnchor, constant: 3),
             stack.trailingAnchor.constraint(lessThanOrEqualTo: background.trailingAnchor, constant: -3),
             stack.centerYAnchor.constraint(equalTo: background.centerYAnchor)
+        ])
+        NSLayoutConstraint.activate([
+            toolStripHighlight.leadingAnchor.constraint(equalTo: background.leadingAnchor),
+            toolStripHighlight.trailingAnchor.constraint(equalTo: background.trailingAnchor),
+            toolStripHighlight.topAnchor.constraint(equalTo: background.topAnchor),
+            toolStripHighlight.bottomAnchor.constraint(equalTo: background.bottomAnchor)
         ])
         let fill = stack.trailingAnchor.constraint(equalTo: background.trailingAnchor, constant: -3)
         fill.priority = NSLayoutConstraint.Priority(700)
@@ -1085,9 +1105,9 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         stashSplitButton.target = self
         stashSplitButton.action = #selector(selectStashSegment(_:))
         stashSplitButton.setImage(AppKitFactory.resourceImage("stash", accessibilityDescription: "Manage stashes"), forSegment: 0)
-        stashSplitButton.setImage(NSImage(systemSymbolName: "chevron.down", accessibilityDescription: "Stash actions"), forSegment: 1)
+        stashSplitButton.setImage(ToolStripHighlightView.dropDownImage("Stash actions"), forSegment: 1)
         stashSplitButton.setWidth(23, forSegment: 0)
-        stashSplitButton.setWidth(13, forSegment: 1)
+        stashSplitButton.setWidth(ToolStripHighlightView.dropDownWidth, forSegment: 1)
         stashSplitButton.setToolTip("Manage stashes", forSegment: 0)
         stashSplitButton.setToolTip("Stash actions", forSegment: 1)
         stashSplitButton.translatesAutoresizingMaskIntoConstraints = false
@@ -1118,18 +1138,9 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         minimum: CGFloat,
         includesLeadingImage: Bool
     ) {
-        let measuringPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
-        measuringPopUp.controlSize = button.controlSize
-        measuringPopUp.font = button.font
-        measuringPopUp.bezelStyle = button.bezelStyle
-        measuringPopUp.addItem(withTitle: title)
-        if includesLeadingImage {
-            measuringPopUp.image = button.image
-            measuringPopUp.imagePosition = .imageLeading
-        }
-        measuringPopUp.sizeToFit()
-        let imageGutter: CGFloat = includesLeadingImage ? 18 : 0
-        constraint?.constant = max(minimum, ceil(measuringPopUp.frame.width) + imageGutter)
+        let textWidth = ceil((title as NSString).size(withAttributes: [.font: button.font ?? NSFont.systemFont(ofSize: 11)]).width)
+        let imageGutter: CGFloat = includesLeadingImage ? 20 : 0
+        constraint?.constant = max(minimum, textWidth + imageGutter + 10 + ToolStripHighlightView.dropDownWidth)
     }
 
     private func updateToolbarRepositoryState() {
@@ -1186,7 +1197,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         let image = AppKitFactory.resourceImage(imageName, accessibilityDescription: button.titleOfSelectedItem)
         button.image = image
         button.itemArray.forEach { $0.image = image }
-        button.imagePosition = .imageOnly
+        button.imagePosition = .imageLeading
         button.translatesAutoresizingMaskIntoConstraints = false
         if !button.constraints.contains(where: { $0.firstAttribute == .width }) {
             NSLayoutConstraint.activate([
@@ -1202,7 +1213,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         let hasMultipleRemotes = (repositoryNavigation?.remotes.filter { !$0.isDisabled }.count ?? 0) > 1
         let menu = NSMenu(title: "Pull")
 
-        let primary = NSMenuItem(title: "Pull", action: nil, keyEquivalent: "")
+        let primary = NSMenuItem(title: "", action: nil, keyEquivalent: "")
         menu.addItem(primary)
 
         let actions: [(String, PullActionPreference, String, BrowserCommand)] = [
@@ -1261,8 +1272,9 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         let image = AppKitFactory.resourceImage(presentation.imageName, accessibilityDescription: presentation.tooltip)
         pullPopUp.image = image
         pullPopUp.item(at: 0)?.image = image
-        pullPopUp.imagePosition = .imageOnly
+        pullPopUp.imagePosition = .imageLeading
         pullPopUp.toolTip = presentation.tooltip
+        pullPopUp.setAccessibilityLabel(presentation.tooltip)
     }
 
     private func pullActionPresentation(_ action: PullActionPreference) -> (imageName: String, tooltip: String) {
@@ -1356,6 +1368,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         }
         detailTabs.onSelectionChanged = { [weak self] _ in
             guard let self else { return }
+            if selectedDetailController === consoleController { consoleController.activate() }
             if selectedDetailController === gpgController { gpgLoadedFor = nil }
             if let commit = revisions.first(where: { $0.id == self.selectedCommitID }) { fillCommitInfo(commit) }
             loadActiveDetailTab()
@@ -1687,6 +1700,8 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
     }
 
     private func applyRepositoryState(_ state: RepositoryLoadState) {
+        consoleController.setRepository(URL(fileURLWithPath: state.identity.currentRepository.path, isDirectory: true))
+        if selectedDetailController === consoleController, consoleController.terminalView == nil { consoleController.activate() }
         repositoryIdentity = state.identity
         repositoryReferences = state.references
         repositoryNavigation = state.navigation
@@ -1698,6 +1713,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             browserCloseObserver = NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: nil, queue: .main) { [weak self] notification in
                 MainActor.assumeIsolated {
                     guard let self, let window = notification.object as? NSWindow, window === (self.isViewLoaded ? self.view.window : nil) else { return }
+                    self.consoleController.stop()
                     self.statusMonitor.stop()
                     self.repositoryStateLoadTask?.cancel()
                     self.revisionReadTask?.cancel()
@@ -2223,7 +2239,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             cell.menuItem = titleItem
         }
         branchPopUp.setAccessibilityTitle(currentName)
-        updatePopUpWidth(branchPopUp, constraint: branchWidthConstraint, title: currentName, minimum: 60, includesLeadingImage: true)
+        updatePopUpWidth(branchPopUp, constraint: branchWidthConstraint, title: currentName, minimum: 40, includesLeadingImage: true)
     }
 
     @objc private func selectBranch(_ sender: Any?) {
@@ -2528,7 +2544,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             Then hold Command (or Control) in order to open the selected repository in a new instance.
             Right click starts the "Open repository" dialog.
             """
-        updatePopUpWidth(workingDirectoryPopUp, constraint: workingDirectoryWidthConstraint, title: caption, minimum: 83, includesLeadingImage: false)
+        updatePopUpWidth(workingDirectoryPopUp, constraint: workingDirectoryWidthConstraint, title: caption, minimum: 40, includesLeadingImage: false)
     }
 
     @objc private func configureWorkingDirectoryMenu() {
@@ -3757,8 +3773,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         gitActionMoreButton.isHidden = !presentation.buttons.contains(.more)
         gitActionIcon.image = NSImage(systemSymbolName: hasConflicts ? "exclamationmark.triangle.fill" : "info.circle.fill",
                                       accessibilityDescription: presentation.message)
-        rebaseBanner.layer?.backgroundColor = (hasConflicts ? NSColor.systemOrange : NSColor.systemBlue)
-            .withAlphaComponent(0.22).cgColor
+        rebaseBanner.color = (hasConflicts ? NSColor.systemOrange : NSColor.systemBlue).withAlphaComponent(0.22)
     }
 
     @objc private func continueGitActionFromBanner() {

@@ -703,8 +703,14 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
         }
         let base = ApplicationColors.color("PanelBackground", fallback: .controlBackgroundColor)
         if preferences.alternateRows, row % 2 == 0 {
-            let dark = view.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-            return base.blended(withFraction: dark ? 0.018 : 0.025, of: dark ? .white : .black) ?? base
+            return NSColor(name: nil) { appearance in
+                let dark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                var result = base
+                appearance.performAsCurrentDrawingAppearance {
+                    result = base.blended(withFraction: dark ? 0.018 : 0.025, of: dark ? .white : .black) ?? base
+                }
+                return result
+            }
         }
         return base
     }

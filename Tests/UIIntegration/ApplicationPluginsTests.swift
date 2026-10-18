@@ -62,8 +62,7 @@ extension UIIntegrationTests {
                     number.stepper.minValue == 0 && number.stepper.maxValue == Double(Int32.max) && !number.stepper.valueWraps,
                     "pinned integer numeric binding range and no wrap")
             }
-            controller.scope.selectItem(withTitle: "global")
-            NSApp.sendAction(controller.scope.action!, to: controller.scope.target, from: controller.scope)
+            controller.scope.choose("global")
             for (index, pair) in controller.fields.enumerated() {
                 let number = pair.1 as! PluginIntegerControl
                 #expect(number.stringValue.isEmpty && number.field.isEnabled && number.stepper.isEnabled, "unset explicit integer remains blank")
@@ -90,8 +89,7 @@ extension UIIntegrationTests {
             #expect(saved.isEmpty, "reset persists inherited/unset semantics")
             let cancelled = PluginSettingsViewController(settings: settings, host: host)
             let panel = NSPanel(contentViewController: cancelled)
-            cancelled.scope.selectItem(withTitle: "global")
-            NSApp.sendAction(cancelled.scope.action!, to: cancelled.scope.target, from: cancelled.scope)
+            cancelled.scope.choose("global")
             cancelled.fields[0].1.stringValue = "99"
             func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
             let cancel = descendants(cancelled.view).compactMap { $0 as? NSButton }.first { $0.title == "Cancel" }!
@@ -147,8 +145,7 @@ extension UIIntegrationTests {
                 controller.children.compactMap { $0 as? PluginSettingsViewController }.first { $0.view.superview != nil }!
             }
             func scope(_ editor: PluginSettingsViewController, _ title: String) {
-                editor.scope.selectItem(withTitle: title)
-                NSApp.sendAction(editor.scope.action!, to: editor.scope.target, from: editor.scope)
+                editor.scope.choose(title)
             }
             func button(_ controller: SettingsViewController, _ title: String) -> NSButton {
                 RepositoryWorkflowTests.settingsViews(controller).compactMap { $0 as? NSButton }.first { $0.title == title }!
@@ -158,7 +155,7 @@ extension UIIntegrationTests {
             defer { panel.close() }
             #expect(Array(controller.categoryIDs.suffix(4)) == ["plugins"] + pages.map(\.id), "simultaneous direct plugin subpages in shared tree")
             let first = editor(controller)
-            #expect(first.scope.titleOfSelectedItem == "effective" && first.fields.allSatisfy { !$0.1.isEnabled }, "effective read-only initial state")
+            #expect(first.scope.selectedID == "effective" && first.fields.allSatisfy { !$0.1.isEnabled }, "effective read-only initial state")
             #expect(
                 RepositoryWorkflowTests.settingsViews(controller).compactMap { $0 as? NSButton }.filter { $0.title == "Apply" }.count == 1,
                 "plugin pages share root Apply/OK/Cancel")
@@ -177,7 +174,7 @@ extension UIIntegrationTests {
             let credential = credentialPage.children.compactMap { $0 as? GitHubAccountSettingsController }.first!
             let outerStack = credentialPage.view as! NSStackView
             #expect(
-                outerStack.arrangedSubviews.firstIndex(of: credentialPage.scope)! < outerStack.arrangedSubviews.firstIndex(of: credential.view)!,
+                outerStack.arrangedSubviews.firstIndex { credentialPage.scope.isDescendant(of: $0) }! < outerStack.arrangedSubviews.firstIndex(of: credential.view)!,
                 "source header precedes credential controls inside the same plugin page")
             scope(credentialPage, "distributed")
             let secondField = editor(controller).fields.first {
@@ -238,7 +235,7 @@ extension UIIntegrationTests {
             let page = global.first { $0.plugin is BackgroundFetchPlugin }!
             let standalone = PluginSettingsViewController(settings: page.plugin.settings, host: page.host, embedded: true)
             _ = standalone.view
-            #expect(standalone.scope.itemTitles == ["global"], "no-repository plugin pages offer global scope only")
+            #expect(standalone.scope.optionIDs == ["global"], "no-repository plugin pages offer global scope only")
         }
 
         @Test("Scenarios") static func run() async throws {
