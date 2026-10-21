@@ -258,6 +258,13 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
     private let settings = AppSettingsStore.shared
     private let unstagedTable = NSOutlineView()
     private let stagedTable = NSOutlineView()
+    private lazy var widthFitters: [ObjectIdentifier: OutlineContentWidthFitter] = Dictionary(uniqueKeysWithValues: [unstagedTable, stagedTable].map { table in
+        let fitter = OutlineContentWidthFitter(outline: table, chrome: ChangedFileCellView.chrome) { item in
+            (item as? ChangedFileNode).map { ($0.title, AppSettingsStore.shared.applicationFont(size: 11)) }
+        }
+        fitter.fitsContent = { AppSettingsStore.shared.preferences.truncatePathMethod.keepsFullWidth }
+        return (ObjectIdentifier(table), fitter)
+    })
     private let unstagedEmptyLabel = NSTextField(labelWithString: "There are no unstaged changes")
     private let stagedEmptyLabel = NSTextField(labelWithString: "There are no staged changes")
     private let unstagedFilter = NSSearchField()
@@ -1827,6 +1834,7 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
         for table in [unstagedTable, stagedTable] {
             table.reloadData()
             rootNodes(for: table).forEach { table.expandItem($0, expandChildren: true) }
+            widthFitters[ObjectIdentifier(table)]?.setNeedsUpdate()
         }
         fileCollapseButtons.forEach { button in
             let table = button.tag == 0 ? unstagedTable : stagedTable

@@ -598,6 +598,78 @@ private extension CGFloat {
     }
 }
 
+@MainActor
+final class OutlineContentWidthFitter {
+    private weak var outline: NSOutlineView?
+    private let chrome: CGFloat
+    private let content: (Any) -> (String, NSFont)?
+    var fitsContent: () -> Bool = { true }
+    private var observers: [NSObjectProtocol] = []
+    private weak var observedClip: NSClipView?
+
+    init(outline: NSOutlineView, chrome: CGFloat, content: @escaping (Any) -> (String, NSFont)?) {
+        self.outline = outline
+        self.chrome = chrome
+        self.content = content
+        outline.columnAutoresizingStyle = .noColumnAutoresizing
+        outline.tableColumns.first?.resizingMask = []
+        for name in [NSOutlineView.itemDidExpandNotification, NSOutlineView.itemDidCollapseNotification] {
+            observers.append(NotificationCenter.default.addObserver(forName: name, object: outline, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.setNeedsUpdate() }
+            })
+        }
+    }
+
+    private var updateScheduled = false
+
+    func setNeedsUpdate() {
+        guard !updateScheduled else { return }
+        updateScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            updateScheduled = false
+            update()
+        }
+    }
+
+    deinit { observers.forEach(NotificationCenter.default.removeObserver) }
+
+    func requiredWidth() -> CGFloat {
+        guard let outline, fitsContent() else { return 0 }
+        var widest: CGFloat = 0
+        for row in 0..<outline.numberOfRows {
+            guard let item = outline.item(atRow: row), let (text, font) = content(item) else { continue }
+            let start = outline.frameOfCell(atColumn: 0, row: row).minX
+            widest = max(widest, start + chrome + ceil((text as NSString).size(withAttributes: [.font: font]).width))
+        }
+        return widest
+    }
+
+    func update() {
+        guard let outline, let column = outline.tableColumns.first else { return }
+        observeClip()
+        let visible = outline.enclosingScrollView?.contentView.bounds.width ?? outline.bounds.width
+        let inset = outline.rect(ofColumn: 0).minX
+        let content = requiredWidth() - inset
+        let fill = visible - 2 * inset - outline.intercellSpacing.width
+        let width = max(fill, content, column.minWidth)
+        if abs(column.width - width) > 0.5 { column.width = width }
+        guard content <= fill else { return }
+        outline.tile()
+        let overflow = outline.frame.width - visible
+        if overflow > 0.5 { column.width = max(column.minWidth, column.width - overflow) }
+    }
+
+    private func observeClip() {
+        guard let clip = outline?.enclosingScrollView?.contentView, clip !== observedClip else { return }
+        observedClip = clip
+        clip.postsFrameChangedNotifications = true
+        observers.append(NotificationCenter.default.addObserver(forName: NSView.frameDidChangeNotification, object: clip, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.setNeedsUpdate() }
+        })
+    }
+}
+
 final class GitExtensionsSelectionRowView: NSTableRowView {
     var repositoryBackgroundColor: NSColor?
     override func drawBackground(in dirtyRect: NSRect) {

@@ -323,7 +323,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         for (name, controller) in diffSplitterControllers {
             controller.restoredFileListWidth = { [weak self] size in
                 self.flatMap { BrowserLayoutPreferences.restoredDistance($0.layout.splitters["\(name).DiffSplitContainer"], size: Double(size), fixed: .fixedLeadingPane) }
-                    .flatMap { $0 > 0 && $0 < Double(size) ? CGFloat($0) : nil }
+                    .flatMap { $0 > 0 ? CGFloat($0) : nil }
             }
             controller.blameController.defaultAuthorDistance = BlameViewController.authorPanelMinSize + 1
             controller.blameController.restoredAuthorDistance = { [weak self] size in

@@ -91,7 +91,7 @@ private final class StashViewController: RetainingSplitViewController, NSWindowD
     private let diffController = DiffContentViewController()
     private let selector = NSPopUpButton()
     private let messageView = NSTextView()
-    private let includeUntracked = NSButton(checkboxWithTitle: "Include untracked files", target: nil, action: nil)
+    private let includeUntracked = WrappingCheckbox(checkboxWithTitle: "Include untracked files", target: nil, action: nil)
     private let keepIndex = NSButton(checkboxWithTitle: "Keep index", target: nil, action: nil)
     private let stashAllButton = NSButton(title: "Stash all changes", target: nil, action: nil)
     private let stashSelectedButton = NSButton(title: "Stash selected changes", target: nil, action: nil)
@@ -209,7 +209,8 @@ private final class StashViewController: RetainingSplitViewController, NSWindowD
         super.viewDidLayout()
         guard !didSetInitialDivider, splitView.bounds.width >= 600 else { return }
         didSetInitialDivider = true
-        setRetainedPosition(AppSettingsStore.shared.stashPreferences.dividerPosition)
+        let optionsWidth = 2 * max(keepIndex.fittingSize.width, includeUntracked.singleLineWidth) + 4 + 16
+        setRetainedPosition(max(AppSettingsStore.shared.stashPreferences.dividerPosition, ceil(optionsWidth)))
     }
 
     private func configureLeadingView() {
@@ -248,10 +249,27 @@ private final class StashViewController: RetainingSplitViewController, NSWindowD
 
         keepIndex.toolTip = "All changes already added to the index are left intact"
         includeUntracked.toolTip = "All untracked files are also stashed and then cleaned"
-        let options = NSStackView(views: [keepIndex, includeUntracked])
-        options.orientation = .horizontal
-        options.distribution = .fillEqually
-        options.spacing = 4
+        let options = NSView()
+        for checkbox in [keepIndex, includeUntracked] {
+            checkbox.translatesAutoresizingMaskIntoConstraints = false
+            options.addSubview(checkbox)
+        }
+        includeUntracked.cell?.wraps = true
+        includeUntracked.lineBreakMode = .byWordWrapping
+        includeUntracked.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        let optionsHeight = options.heightAnchor.constraint(equalToConstant: 0)
+        optionsHeight.priority = .defaultLow
+        NSLayoutConstraint.activate([
+            keepIndex.leadingAnchor.constraint(equalTo: options.leadingAnchor),
+            keepIndex.trailingAnchor.constraint(lessThanOrEqualTo: options.centerXAnchor, constant: -2),
+            keepIndex.centerYAnchor.constraint(equalTo: options.centerYAnchor),
+            includeUntracked.leadingAnchor.constraint(greaterThanOrEqualTo: options.centerXAnchor, constant: 2),
+            includeUntracked.trailingAnchor.constraint(equalTo: options.trailingAnchor),
+            includeUntracked.centerYAnchor.constraint(equalTo: options.centerYAnchor),
+            options.heightAnchor.constraint(greaterThanOrEqualTo: keepIndex.heightAnchor),
+            options.heightAnchor.constraint(greaterThanOrEqualTo: includeUntracked.heightAnchor),
+            optionsHeight
+        ])
 
         stashAllButton.toolTip = "Save local changes to a new stash, then revert local changes"
         stashSelectedButton.toolTip = "Stash changes for the selected files, then revert them to the original state"
@@ -300,7 +318,6 @@ private final class StashViewController: RetainingSplitViewController, NSWindowD
             stack.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -8),
             selectorRow.widthAnchor.constraint(equalTo: stack.widthAnchor),
             filesView.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            filesView.heightAnchor.constraint(greaterThanOrEqualToConstant: 100),
             messageLabel.widthAnchor.constraint(equalTo: stack.widthAnchor),
             messageScroll.widthAnchor.constraint(equalTo: stack.widthAnchor),
             options.widthAnchor.constraint(equalTo: stack.widthAnchor),
@@ -310,6 +327,9 @@ private final class StashViewController: RetainingSplitViewController, NSWindowD
             applyButton.widthAnchor.constraint(equalTo: stack.widthAnchor),
             statusRow.widthAnchor.constraint(equalTo: stack.widthAnchor)
         ])
+        let filesMinimum = filesView.heightAnchor.constraint(greaterThanOrEqualToConstant: 100)
+        filesMinimum.priority = NSLayoutConstraint.Priority(NSLayoutConstraint.Priority.defaultHigh.rawValue - 10)
+        filesMinimum.isActive = true
         leadingController.view = root
     }
 
@@ -704,5 +724,27 @@ private final class StashViewController: RetainingSplitViewController, NSWindowD
             selectedCommitID: lastOperationSelectedCommitID,
             repositoryChanged: repositoryChanged
         ))
+    }
+}
+
+private final class WrappingCheckbox: NSButton {
+    private var measuredWidth: CGFloat = 0
+
+    var singleLineWidth: CGFloat {
+        ceil(cell?.cellSize(forBounds: NSRect(x: 0, y: 0, width: CGFloat.greatestFiniteMagnitude, height: .greatestFiniteMagnitude)).width ?? 0)
+    }
+
+    override var intrinsicContentSize: NSSize {
+        guard let cell, bounds.width > 0 else { return super.intrinsicContentSize }
+        let single = cell.cellSize(forBounds: NSRect(x: 0, y: 0, width: CGFloat.greatestFiniteMagnitude, height: .greatestFiniteMagnitude))
+        let fitted = cell.cellSize(forBounds: NSRect(x: 0, y: 0, width: bounds.width, height: .greatestFiniteMagnitude))
+        return NSSize(width: ceil(single.width), height: ceil(max(single.height, fitted.height)))
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        guard abs(measuredWidth - newSize.width) > 0.5 else { return }
+        measuredWidth = newSize.width
+        invalidateIntrinsicContentSize()
     }
 }

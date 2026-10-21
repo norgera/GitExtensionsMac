@@ -69,6 +69,8 @@ final class EmbeddedConsoleViewController: NSViewController {
                 environment: Self.shellEnvironment(preferences: preferences, inherited: environment ?? inheritedEnvironment),
                 currentDirectory: directory.path)
             if !terminal.process.running { showError("Unable to start the configured shell.") }
+        } else {
+            terminalView?.applyThemeColors()
         }
         focus()
     }
@@ -78,11 +80,10 @@ final class EmbeddedConsoleViewController: NSViewController {
     }
 
     func applyAppearance() {
-        terminalView?.font = AppSettingsStore.shared.monospaceFont
-        terminalView?.nativeForegroundColor = ApplicationColors.color(
-            "WindowText", fallback: .textColor)
-        terminalView?.nativeBackgroundColor = ApplicationColors.color(
-            "Window", fallback: .textBackgroundColor)
+        guard let terminalView else { return }
+        let font = AppSettingsStore.shared.monospaceFont
+        if terminalView.font != font { terminalView.font = font }
+        terminalView.applyThemeColors()
     }
 
     func stop() {
@@ -127,6 +128,58 @@ final class EmbeddedConsoleViewController: NSViewController {
 
 final class ConsoleTerminalView: LocalProcessTerminalView {
     private(set) lazy var sizeCoalescer = ConsoleSizeCoalescer(terminal: self)
+    private(set) var appliedPalette: [SwiftTerm.Color] = []
+    private var appliedDefaults: [CGFloat] = []
+
+    static let ansiNames = ["Black", "Red", "Green", "Yellow", "Blue", "Magenta", "Cyan", "White"]
+
+    static var bundledThemes = ApplicationThemeReader.bundledDirectory
+
+    static func palette(dark: Bool, store: AppSettingsStore? = nil) -> [SwiftTerm.Color] {
+        let preferences = (store ?? .shared).colorPreferences
+        let builtin = dark ? "dark.css" : "invariant.css"
+        func read(_ name: String) -> [String: Int]? {
+            try? ApplicationThemeReader.load(name, colorblind: preferences.colorblind, bundled: bundledThemes)
+        }
+        guard let fallback = read(builtin) else { return [] }
+        let colors = preferences.themeFile.isEmpty ? fallback : read(preferences.themeFile) ?? fallback
+        return (0..<16).compactMap { index in
+            let key = "AnsiTerminal\(ansiNames[index % 8])Fore\(index >= 8 ? "Bold" : "Normal")"
+            guard let value = colors[key] ?? fallback[key], value >= 0 else { return nil }
+            return SwiftTerm.Color(red8: UInt16((value >> 16) & 255), green8: UInt16((value >> 8) & 255), blue8: UInt16(value & 255))
+        }
+    }
+
+    func applyThemeColors() {
+        let appearance = effectiveAppearance
+        let dark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        appearance.performAsCurrentDrawingAppearance {
+            nativeForegroundColor = Self.resolved(ApplicationColors.color("WindowText", fallback: .textColor))
+            nativeBackgroundColor = Self.resolved(ApplicationColors.color("Window", fallback: .textBackgroundColor))
+            caretColor = Self.resolved(.labelColor)
+            selectedTextBackgroundColor = Self.resolved(.selectedTextBackgroundColor)
+        }
+        let palette = Self.palette(dark: dark)
+        let defaults = [nativeForegroundColor, nativeBackgroundColor].flatMap { color -> [CGFloat] in
+            let rgb = color.usingColorSpace(.sRGB) ?? color
+            return [rgb.redComponent, rgb.greenComponent, rgb.blueComponent, rgb.alphaComponent]
+        }
+        if palette.count == 16, palette != appliedPalette || defaults != appliedDefaults {
+            appliedPalette = palette
+            appliedDefaults = defaults
+            installColors(palette)
+        }
+        needsDisplay = true
+    }
+
+    private static func resolved(_ color: NSColor) -> NSColor {
+        color.usingColorSpace(.sRGB) ?? color
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyThemeColors()
+    }
 
     func stopSession() {
         sizeCoalescer.cancel()
@@ -166,7 +219,14 @@ final class ConsoleSizeCoalescer: TerminalViewDelegate {
                 return
             }
             pending = nil
+            guard terminal.process.running else { return }
+            var applied = winsize()
+            let unchanged = ioctl(terminal.process.childfd, TIOCGWINSZ, &applied) == 0
+                && Int(applied.ws_col) == newCols && Int(applied.ws_row) == newRows
             terminal.sizeChanged(source: source, newCols: newCols, newRows: newRows)
+            guard unchanged else { return }
+            let group = tcgetpgrp(terminal.process.childfd)
+            if group > 0 { kill(-group, SIGWINCH) }
         }
         pending = work
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.delay, execute: work)

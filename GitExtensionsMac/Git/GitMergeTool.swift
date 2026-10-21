@@ -92,6 +92,31 @@ package enum MergeToolInvocation {
     }
 }
 
+package enum ConflictPartFileName {
+    package static func `extension`(of path: String) -> Substring {
+        let name = path.split(separator: "/", omittingEmptySubsequences: false).last ?? Substring(path)
+        guard let dot = name.lastIndex(of: "."), name.index(after: dot) != name.endIndex else { return "" }
+        return name[dot...]
+    }
+
+    package static func name(for fileName: String, side: String, processID: Int32) -> String {
+        let fileExtension = `extension`(of: fileName)
+        return "\(fileName.dropLast(fileExtension.count))_\(side)_\(processID)\(fileExtension)"
+    }
+
+    package static func available(_ basePath: String, exists: (String) -> Bool) -> String {
+        let fileExtension = `extension`(of: basePath)
+        let stem = basePath.dropLast(fileExtension.count)
+        var test = basePath
+        var index = 1
+        while exists(test), index < 50 {
+            test = "\(stem)_\(index)\(fileExtension)"
+            index += 1
+        }
+        return test
+    }
+}
+
 package enum ConflictBinaryDetection {
     package static let binaryExtensions = LostObjectsCommands.binaryExtensions
 

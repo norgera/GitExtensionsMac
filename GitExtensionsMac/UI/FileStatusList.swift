@@ -160,6 +160,15 @@ final class ChangedFilesViewController: NSViewController, NSOutlineViewDelegate,
     static func repositoryChanged() { remembered = nil }
 
     private let outlineView = FileStatusOutlineView()
+    private lazy var widthFitter: OutlineContentWidthFitter = {
+        let fitter = OutlineContentWidthFitter(outline: outlineView, chrome: ChangedFileCellView.chrome) { [weak self] item in
+            guard let node = item as? ChangedFileNode else { return nil }
+            let suffix = node.file.flatMap { self?.submoduleStatuses[$0.id] }?.countSuffix ?? ""
+            return (node.title + suffix, AppSettingsStore.shared.applicationFont(size: 11))
+        }
+        fitter.fitsContent = { AppSettingsStore.shared.preferences.truncatePathMethod.keepsFullWidth }
+        return fitter
+    }()
     private let scrollView = NSScrollView()
     private let filterBox = NSComboBox()
     private let grepBox = NSComboBox()
@@ -921,6 +930,7 @@ final class ChangedFilesViewController: NSViewController, NSOutlineViewDelegate,
         filterBox.isHidden = showNoFiles && grepText.isEmpty
         suppressSelectionEvents = true
         outlineView.reloadData()
+        widthFitter.setNeedsUpdate()
         for node in rootNodes {
             switch expandedStates[node] {
             case true?: outlineView.expandItem(node, expandChildren: true)

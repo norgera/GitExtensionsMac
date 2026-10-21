@@ -130,6 +130,113 @@ extension UIIntegrationTests {
             try await wait("shell reaped on close") { kill(restartedPID, 0) == -1 && errno == ESRCH }
         }
 
+        @Test("Appearance changes recolor the running console without restarting it")
+        static func appearanceChanges() async throws {
+            let savedThemes = ConsoleTerminalView.bundledThemes
+            ConsoleTerminalView.bundledThemes = TestResources.themes
+            defer { ConsoleTerminalView.bundledThemes = savedThemes }
+            #expect(ConsoleTerminalView.palette(dark: false).count == 16 && ConsoleTerminalView.palette(dark: false) != ConsoleTerminalView.palette(dark: true), "distinct light and dark ANSI palettes from the theme")
+            let fixture = try FileStatusFixture.make()
+            defer { fixture.remove() }
+            try "PROMPT='console> '\n".write(to: fixture.root.appendingPathComponent(".zshrc"), atomically: true, encoding: .utf8)
+            let console = EmbeddedConsoleViewController()
+            console.setRepository(fixture.repo)
+            let light = try #require(NSAppearance(named: .aqua))
+            let dark = try #require(NSAppearance(named: .darkAqua))
+            let window = NSWindow(contentRect: .init(x: 0, y: 0, width: 700, height: 300), styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            window.appearance = light
+            window.contentViewController = console
+            window.makeKeyAndOrderFront(nil)
+            defer {
+                console.stop()
+                window.close()
+            }
+            var preferences = AppPreferences()
+            preferences.shellPath = "/bin/zsh"
+            var shellEnvironment = environment(fixture)
+            shellEnvironment.removeValue(forKey: "ENV")
+            console.activate(preferences: preferences, environment: shellEnvironment)
+            let terminal = try #require(console.terminalView)
+            let pid = terminal.process.shellPid
+            try await wait("prompt") { text(console).contains("console> ") }
+            try send("printf '\\033[31mred\\033[0m history-line\\n'\r", to: console)
+            try await wait("output") { text(console).contains("red history-line") }
+            try await Task.sleep(for: .milliseconds(300))
+            func lightness(_ color: NSColor) -> CGFloat {
+                let rgb = color.usingColorSpace(.sRGB) ?? .black
+                return 0.299 * rgb.redComponent + 0.587 * rgb.greenComponent + 0.114 * rgb.blueComponent
+            }
+            #expect(lightness(terminal.nativeBackgroundColor) > 0.8 && lightness(terminal.nativeForegroundColor) < 0.3, "light appearance uses light terminal colors")
+            #expect(terminal.appliedPalette == ConsoleTerminalView.palette(dark: false), "light ANSI palette")
+            let before = text(console)
+            let cursor = terminal.getTerminal().getCursorLocation()
+            window.appearance = dark
+            try await Task.sleep(for: .milliseconds(300))
+            #expect(lightness(terminal.nativeBackgroundColor) < 0.3 && lightness(terminal.nativeForegroundColor) > 0.7, "dark appearance recolors the running terminal")
+            #expect(terminal.appliedPalette == ConsoleTerminalView.palette(dark: true), "dark ANSI palette")
+            #expect(console.terminalView === terminal && terminal.process.running && terminal.process.shellPid == pid, "same shell session survives the appearance change")
+            #expect(text(console) == before, "scrollback is preserved and no prompt is redrawn")
+            #expect(terminal.getTerminal().getCursorLocation() == cursor, "cursor position is preserved")
+            #expect(window.firstResponder === terminal, "focus stays in the terminal")
+            window.appearance = light
+            try await Task.sleep(for: .milliseconds(300))
+            #expect(lightness(terminal.nativeBackgroundColor) > 0.8 && text(console) == before, "switching back restores light colors with the same content")
+
+            terminal.removeFromSuperview()
+            window.appearance = dark
+            try await Task.sleep(for: .milliseconds(100))
+            console.view.addSubview(terminal)
+            console.activate(preferences: preferences, environment: shellEnvironment)
+            try await Task.sleep(for: .milliseconds(300))
+            #expect(lightness(terminal.nativeBackgroundColor) < 0.3 && terminal.process.shellPid == pid, "a console shown again after a hidden appearance change picks up the new colors")
+            try send("stty size; printf '__SIZE__\\n'\r", to: console)
+            try await wait("size after appearance changes") { text(console).contains("__SIZE__") }
+            let size = terminal.getWindowSize()
+            #expect(text(console).contains("\(size.ws_row) \(size.ws_col)"), "terminal size is unchanged by appearance changes")
+        }
+
+        @Test("Returning to the original width after a narrow drag redraws a long prompt")
+        static func longPromptRoundTrip() async throws {
+            let fixture = try FileStatusFixture.make()
+            defer { fixture.remove() }
+            let prompt = "~/github/react-spectrum/packages/@react-spectrum/very-long-prompt-path %"
+            try "PROMPT='\(prompt.replacingOccurrences(of: "%", with: "%%")) '\n".write(to: fixture.root.appendingPathComponent(".zshrc"), atomically: true, encoding: .utf8)
+            let console = EmbeddedConsoleViewController()
+            console.setRepository(fixture.repo)
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 800, height: 300), styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            window.contentViewController = console
+            window.makeKeyAndOrderFront(nil)
+            defer {
+                console.stop()
+                window.close()
+            }
+            var preferences = AppPreferences()
+            preferences.shellPath = "/bin/zsh"
+            var shellEnvironment = environment(fixture)
+            shellEnvironment.removeValue(forKey: "ENV")
+            console.activate(preferences: preferences, environment: shellEnvironment)
+            try await wait("prompt") { text(console).contains(prompt) }
+            try await Task.sleep(for: .milliseconds(300))
+            for width in Array(stride(from: 800, through: 200, by: -30)) + Array(stride(from: 230, through: 800, by: 30)) {
+                window.setContentSize(.init(width: CGFloat(width), height: 300))
+                console.view.layoutSubtreeIfNeeded()
+                try await Task.sleep(for: .milliseconds(8))
+            }
+            try await Task.sleep(for: .seconds(1))
+            for width in [CGFloat(450), 800] {
+                window.setContentSize(.init(width: width, height: 300))
+                console.view.layoutSubtreeIfNeeded()
+                try await Task.sleep(for: .milliseconds(600))
+            }
+            try send("printf '__AFTER__\\n'\r", to: console)
+            try await wait("command runs after the resize") { text(console).contains("__AFTER__\n") }
+            let lines = text(console).split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+            #expect(lines.first == "\(prompt) printf '__AFTER__\\n'", "the command follows the complete prompt, not a truncated copy: \(lines)")
+            #expect(lines.filter { $0.hasPrefix("~/github") }.count == 2, "no stale partial prompt lines remain: \(lines)")
+        }
+
         @Test("Dragging a resize redraws the prompt once")
         static func dragResize() async throws {
             let fixture = try FileStatusFixture.make()

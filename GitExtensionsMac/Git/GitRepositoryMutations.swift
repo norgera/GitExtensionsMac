@@ -1618,19 +1618,15 @@ extension GitRepositoryModule: RepositoryBrowserMutationDataSource, RepositorySt
     package func checkoutConflictFiles(path: String) async throws -> RepositoryConflictTemporaryFiles {
         let repository = try mutationRepository()
         let conflict = try await loadConflicts().first { $0.path == path }
+        let processID = ProcessInfo.processInfo.processIdentifier
         func checkout(_ side: RepositoryConflictSide, suffix: String) async throws -> URL? {
-            let target = repository.rootURL.appendingPathComponent(path + "." + suffix)
+            let target = repository.rootURL.appendingPathComponent(ConflictPartFileName.name(for: path, side: suffix, processID: processID))
             guard conflict?.version(for: side) != nil else {
                 return FileManager.default.fileExists(atPath: target.path) ? target : nil
             }
             let result = try await conflictRead(["checkout-index", "--temp", "--stage=\(side.rawValue)", "--", path], in: repository)
             let temporary = result.standardOutputString.split(separator: "\t", maxSplits: 1).first.map(String.init) ?? ""
-            var available = target
-            var index = 1
-            while FileManager.default.fileExists(atPath: available.path), index < 50 {
-                available = URL(fileURLWithPath: target.path + String(index))
-                index += 1
-            }
+            let available = URL(fileURLWithPath: ConflictPartFileName.available(target.path) { FileManager.default.fileExists(atPath: $0) })
             if !temporary.isEmpty {
                 try? FileManager.default.moveItem(at: repository.rootURL.appendingPathComponent(temporary), to: available)
             }

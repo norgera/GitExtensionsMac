@@ -608,6 +608,16 @@ final class RepositoryOutlineViewController: NSViewController, NSOutlineViewData
     var onScript: ((ScriptDefinition) -> Void)?
 
     private let outlineView = RepositoryOutlineView()
+    private lazy var widthFitter = OutlineContentWidthFitter(outline: outlineView, chrome: 24) { item in
+        guard let node = item as? RepositoryTreeNode else { return nil }
+        let bold: Bool = switch node.kind {
+        case .branch(let branch): branch.isCurrent
+        case .worktree(let worktree): worktree.isCurrent
+        case .submodule(let submodule): submodule.isCurrent
+        default: false
+        }
+        return (node.title, AppSettingsStore.shared.applicationFont(size: 11, weight: bold ? .bold : .regular))
+    }
     private let searchField = NSSearchField()
     private var allRoots: [RepositoryTreeNode] = []
     private var visibleRoots: [RepositoryTreeNode] = []
@@ -804,6 +814,7 @@ final class RepositoryOutlineViewController: NSViewController, NSOutlineViewData
             ? allRoots
             : allRoots.compactMap { filteredCopy(of: $0, matching: criterion) }
         outlineView.reloadData()
+        widthFitter.setNeedsUpdate()
         if isFiltering {
             visibleRoots.forEach { outlineView.expandItem($0, expandChildren: true) }
             restoreSelection(selectedIDs ?? selectedBeforeFiltering)
@@ -1023,7 +1034,7 @@ final class RepositoryOutlineViewController: NSViewController, NSOutlineViewData
         let image = NSImageView()
         image.translatesAutoresizingMaskIntoConstraints = false
         let text = NSTextField(labelWithString: "")
-        text.lineBreakMode = .byTruncatingMiddle
+        text.lineBreakMode = .byClipping
         text.translatesAutoresizingMaskIntoConstraints = false
         cell.imageView = image
         cell.textField = text

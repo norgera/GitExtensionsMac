@@ -2413,6 +2413,9 @@ final class RevisionMessageCellView: NSTableCellView {
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         guard let commit else { return }
+        NSGraphicsContext.saveGraphicsState()
+        defer { NSGraphicsContext.restoreGraphicsState() }
+        bounds.clip()
         badges = layoutBadges(for: commit)
         for (index, badge) in badges.enumerated() {
             draw(badge: badge, highlighted: hoveredBadge == index)
@@ -2444,6 +2447,7 @@ final class RevisionMessageCellView: NSTableCellView {
             message.append(NSAttributedString(string: bodySuffix, attributes: [.font: font, .foregroundColor: bodyColor, .paragraphStyle: paragraph]))
         }
         let rect = NSRect(x: subjectX, y: bounds.midY - height / 2, width: bounds.maxX - subjectX - 2, height: height)
+        guard rect.width >= 1 else { return }
         message.draw(with: rect, options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine])
     }
 
@@ -2469,9 +2473,14 @@ final class RevisionMessageCellView: NSTableCellView {
 
         let textColor: NSColor = backgroundStyle == .emphasized ? .alternateSelectedControlTextColor : .labelColor
         let height = ceil(font.boundingRectForFont.height)
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineBreakMode = .byTruncatingTail
+        let textRect = NSRect(x: frame.minX + 5, y: frame.midY - height / 2, width: frame.width - 10, height: height)
+        guard textRect.width >= 1 else { return }
         (commit.subject as NSString).draw(
-            at: NSPoint(x: frame.minX + 5, y: frame.midY - height / 2),
-            withAttributes: [.font: font, .foregroundColor: textColor]
+            with: textRect,
+            options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine],
+            attributes: [.font: font, .foregroundColor: textColor, .paragraphStyle: paragraph]
         )
 
         guard AppSettingsStore.shared.browseDisplayPreferences.showArtificialRevisionCounts else { return }

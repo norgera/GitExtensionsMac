@@ -419,6 +419,7 @@ F80000000000000000000001 /* GitWorktrees.swift in Sources */ = {isa = PBXBuildFi
 		FACE0000000000000000000A /* Themes in test Resources */ = {isa = PBXBuildFile; fileRef = FE000000000000000000000A; };
 		C0501E000000000000000001 /* EmbeddedConsoleViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0501E000000000000000002; };
 		C0501E000000000000000003 /* EmbeddedConsoleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0501E000000000000000004; };
+		C0501E0000000000000000F1 = {isa = PBXBuildFile; fileRef = C0501E0000000000000000F2; };
 		C0501E000000000000000005 /* SwiftTerm in Frameworks */ = {isa = PBXBuildFile; productRef = C0501E000000000000000006; };
 		C0501E000000000000000009 = {isa = PBXBuildFile; fileRef = C0501E000000000000000008; };
 		C0501E00000000000000000C = {isa = PBXBuildFile; fileRef = C0501E00000000000000000B; };
@@ -896,6 +897,7 @@ F80000000000000000000001 /* GitWorktrees.swift in Sources */ = {isa = PBXBuildFi
 		FACE00000000000000000008 /* Test images */ = {isa = PBXFileReference; lastKnownFileType = folder; path = GitExtensionsMac/Resources; sourceTree = SOURCE_ROOT; };
 		C0501E000000000000000002 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmbeddedConsoleViewController.swift; sourceTree = "<group>"; };
 		C0501E000000000000000004 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmbeddedConsoleTests.swift; sourceTree = "<group>"; };
+		C0501E0000000000000000F2 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OutlineContentWidthTests.swift; sourceTree = "<group>"; };
 		C0501E000000000000000008 = {isa = PBXFileReference; lastKnownFileType = image.png; path = "Console.png"; sourceTree = "<group>"; };
 		C0501E00000000000000000B = {isa = PBXFileReference; lastKnownFileType = text; path = "SwiftTerm-LICENSE.txt"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -1025,6 +1027,7 @@ F80000000000000000000001 /* GitWorktrees.swift in Sources */ = {isa = PBXBuildFi
 			isa = PBXGroup;
 			children = (
 				C0501E000000000000000004 /* EmbeddedConsoleTests.swift */,
+				C0501E0000000000000000F2,
 				BB4000000000000000000005 /* AppSettingsTests.swift */,
 				FDCE7A2E600A9D6FB1B1AEEF /* AppShellTests.swift */,
 				CE9000000000000000000009 /* AppearanceTests.swift */,
@@ -1944,6 +1947,7 @@ F80000000000000000000001 /* GitWorktrees.swift in Sources */ = {isa = PBXBuildFi
 			buildActionMask = 2147483647;
 			files = (
 				C0501E000000000000000003 /* EmbeddedConsoleTests.swift in Sources */,
+				C0501E0000000000000000F1,
 				3566A5F570AFE9ED67451060 /* AppSettingsTests.swift in Sources */,
 				8D51565A80D00B0ED9362737 /* ContextMenuStateTests.swift in Sources */,
 				3DA82272B28AF035D19A9AF8 /* GitPullTests.swift in Sources */,

@@ -80,6 +80,7 @@ extension UIIntegrationTests {
             try await browse(module: module, revision: revision)
             try await standalone(module: module, revision: revision)
             try await cancellation(revision: revision, result: result)
+            try await wideLines(revision: revision, result: result)
         }
 
         private static func presentation(module: GitRepositoryModule, revision: Commit, result: BlameResult, base: ObjectID) async throws {
@@ -203,6 +204,27 @@ extension UIIntegrationTests {
             let now = Date(timeIntervalSince1970: 1_700_000_000)
             let boundary = Calendar.current.date(byAdding: .year, value: -3, to: now)!
             #expect(BlameViewController.ageBuckets([boundary.addingTimeInterval(-1), now, .distantPast], now: now) == [0, 6, 0], "age boundaries")
+        }
+
+        private static func wideLines(revision: Commit, result: BlameResult) async throws {
+            let long = "let value = \"" + String(repeating: "x", count: 400) + "\""
+            let wide = BlameResult(lines: [BlameLine(commit: result.lines[0].commit, finalLineNumber: 1, originLineNumber: 1, text: long)])
+            let controller = BlameViewController()
+            controller.source = DelayedBlameSource(revision: revision, result: wide)
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 500, height: 300), styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            window.contentViewController = controller
+            window.setContentSize(NSSize(width: 500, height: 300))
+            defer { window.close() }
+            controller.load(revision: revision.objectID!, file: "fast", encoding: .utf8)
+            try await wait { !controller.isLoading && controller.blame?.lines.count == 1 }
+            controller.view.layoutSubtreeIfNeeded()
+            func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
+            let table = try #require(descendants(controller.view).compactMap { $0 as? NSTableView }.first { $0.accessibilityIdentifier() == "Blame.Lines" })
+            let content = try #require(table.tableColumn(withIdentifier: .init("content")))
+            let textWidth = ceil((long as NSString).size(withAttributes: [.font: AppSettingsStore.shared.codeFont]).width)
+            #expect(content.width >= textWidth, "blame code column keeps the full width of its longest line")
+            #expect(table.frame.width > (table.enclosingScrollView?.contentView.bounds.width ?? 0), "long blame lines scroll horizontally instead of being cut off")
         }
 
         private static func cancellation(revision: Commit, result: BlameResult) async throws {

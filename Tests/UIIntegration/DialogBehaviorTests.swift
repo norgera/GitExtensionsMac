@@ -590,6 +590,11 @@ extension UIIntegrationTests {
             defer { owner.close() }
             let preferences = AppSettingsStore.shared.stashPreferences
             defer { AppSettingsStore.shared.saveStashPreferences(preferences) }
+            var narrow = preferences
+            narrow.dividerPosition = 170
+            narrow.windowWidth = 900
+            narrow.windowHeight = 600
+            AppSettingsStore.shared.saveStashPreferences(narrow)
             let stash = Task {
                 await StashDialog.present(
                     source: module, context: state.stashContext, manageStashes: false, initialStash: nil, owner: owner, openWithDifftool: nil,
@@ -606,6 +611,31 @@ extension UIIntegrationTests {
             let groups = (0..<outline!.numberOfRows).compactMap { outline!.item(atRow: $0) as? ChangedFileNode }.filter { $0.file == nil }
             try #require(groups.map(\.title) == ["(1) Working directory", "(0) Commit index"], "empty index group remains after workspace, in source order")
             try #require(groups.last?.children.isEmpty == true, "empty index has no selectable phantom file")
+            window!.contentView!.layoutSubtreeIfNeeded()
+            let opened = descendants(window!.contentView!).compactMap { $0 as? NSButton }
+            let openedKeep = try #require(opened.first { $0.title == "Keep index" })
+            let openedUntracked = try #require(opened.first { $0.title == "Include untracked files" })
+            let single = openedUntracked.cell!.cellSize(forBounds: NSRect(x: 0, y: 0, width: 10_000, height: 10_000))
+            try #require(
+                openedUntracked.bounds.width >= single.width - 0.5 && abs(openedUntracked.bounds.height - openedKeep.bounds.height) < 0.5,
+                "the left pane opens at least as wide as the option row, so both check boxes fit on one line: \(openedUntracked.bounds.size) vs \(single)")
+            window!.setFrame(NSRect(origin: window!.frame.origin, size: window!.minSize), display: true)
+            try await Task.sleep(for: .milliseconds(150))
+            window!.contentView!.layoutSubtreeIfNeeded()
+            let checkboxes = descendants(window!.contentView!).compactMap { $0 as? NSButton }
+            let keepIndex = try #require(checkboxes.first { $0.title == "Keep index" })
+            let untracked = try #require(checkboxes.first { $0.title == "Include untracked files" })
+            let row = try #require(untracked.superview)
+            let needed = untracked.cell!.cellSize(forBounds: NSRect(x: 0, y: 0, width: untracked.bounds.width, height: .greatestFiniteMagnitude))
+            try #require(
+                keepIndex.frame.minX == 0 && keepIndex.frame.maxX <= row.bounds.midX && untracked.frame.minX >= row.bounds.midX
+                    && abs(untracked.frame.maxX - row.bounds.maxX) < 0.5,
+                "Keep index and Include untracked files occupy the left/right halves, the latter anchored right")
+            try #require(
+                needed.width <= untracked.bounds.width + 0.5 && needed.height <= untracked.bounds.height + 0.5
+                    && (untracked.bounds.width >= NSButton(checkboxWithTitle: untracked.title, target: nil, action: nil).fittingSize.width
+                        || untracked.bounds.height > keepIndex.bounds.height),
+                "Include untracked files wraps within its half at minimum size instead of truncating: needs \(needed), has \(untracked.bounds.size)")
             window!.performClose(nil)
             let result = await stash.value
             let after = try fixture.git(["status", "--porcelain=v2"])

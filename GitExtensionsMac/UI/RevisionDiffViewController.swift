@@ -214,7 +214,7 @@ final class RevisionDiffViewController: RetainingSplitViewController {
 
     override func viewDidLayout() {
         super.viewDidLayout()
-        guard !didSetInitialDivider, splitView.bounds.width >= 650 else { return }
+        guard !didSetInitialDivider, splitView.bounds.width > 0, view.window != nil else { return }
         didSetInitialDivider = true
         setRetainedPosition(restoredFileListWidth?(primaryLength) ?? 300)
     }
@@ -576,6 +576,7 @@ struct ChangedFileSection: Sendable {
 }
 
 final class ChangedFileCellView: NSTableCellView {
+    static let chrome: CGFloat = 25
     private let statusImage = NSImageView()
 
     override init(frame frameRect: NSRect) {
@@ -606,7 +607,7 @@ final class ChangedFileCellView: NSTableCellView {
     func apply(node: ChangedFileNode, submodule: FileStatusSubmodule? = nil, usesFileTypeIcon: Bool = false) {
         textField?.stringValue = node.title + (submodule?.countSuffix ?? "")
         textField?.font = AppSettingsStore.shared.applicationFont(size: 11)
-        textField?.lineBreakMode = node.file == nil ? .byTruncatingMiddle : AppSettingsStore.shared.preferences.truncatePathMethod.lineBreakMode
+        textField?.lineBreakMode = AppSettingsStore.shared.preferences.truncatePathMethod.lineBreakMode
         toolTip = submodule?.summary.map { SubmoduleDiffPresentation.text($0, limitOutput: true) }
         if let file = node.file {
             let icon = submodule.flatMap { Self.submoduleImage($0, file: file) } ?? node.imageName

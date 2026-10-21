@@ -164,6 +164,8 @@ enum TruncatePathMethod: String, Codable, CaseIterable, Sendable {
     case trimStart = "TrimStart"
     case fileNameOnly = "FileNameOnly"
 
+    var keepsFullWidth: Bool { self == .none || self == .fileNameOnly }
+
     var lineBreakMode: NSLineBreakMode {
         switch self {
         case .none, .fileNameOnly: .byClipping

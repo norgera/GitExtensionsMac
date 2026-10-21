@@ -115,6 +115,46 @@ extension UIIntegrationTests {
                 "InitMergetool load warnings")
         }
 
+        @Test("Conflict part file names") private static func conflictPartFileNames() throws {
+            #expect(ConflictPartFileName.name(for: "file.cs", side: "LOCAL", processID: 1234) == "file_LOCAL_1234.cs")
+            #expect(ConflictPartFileName.name(for: "dir/sub.dir/file.min.js", side: "BASE", processID: 1) == "dir/sub.dir/file.min_BASE_1.js")
+            #expect(ConflictPartFileName.name(for: "dir.d/README", side: "REMOTE", processID: 42) == "dir.d/README_REMOTE_42")
+            #expect(ConflictPartFileName.name(for: ".gitignore", side: "LOCAL", processID: 7) == "_LOCAL_7.gitignore")
+            let existing: Set<String> = ["file_LOCAL_1234.cs", "file_LOCAL_1234_1.cs"]
+            #expect(ConflictPartFileName.available("file_LOCAL_1234.cs", exists: existing.contains) == "file_LOCAL_1234_2.cs")
+            #expect(ConflictPartFileName.available("other_LOCAL_1234.cs", exists: existing.contains) == "other_LOCAL_1234.cs")
+            #expect(ConflictPartFileName.available("README_LOCAL_1234") { _ in true } == "README_LOCAL_1234_49")
+        }
+
+        @Test("Conflict sides checked out beside the file") private static func conflictSidesBesideFile() async throws {
+            let fixture = try Fixture()
+            defer { fixture.remove() }
+            let repo = try fixture.conflictRepository(extra: "dir/file.cs")
+            let module = try await fixture.module(repo)
+            let pid = ProcessInfo.processInfo.processIdentifier
+            let root = realPath(repo.path)
+            let first = try await module.checkoutConflictFiles(path: "dir/file.cs")
+            #expect(
+                [first.base, first.local, first.remote].map { $0.map { realPath($0.path) } }
+                    == ["BASE", "LOCAL", "REMOTE"].map { "\(root)/dir/file_\($0)_\(pid).cs" },
+                "sides keep the extension: \(first)")
+            #expect(
+                try fixture.read(repo, "dir/file_BASE_\(pid).cs") == "base extra\n"
+                    && fixture.read(repo, "dir/file_LOCAL_\(pid).cs") == "main extra\n"
+                    && fixture.read(repo, "dir/file_REMOTE_\(pid).cs") == "topic extra\n",
+                "stages 1-3 written")
+            let second = try await module.checkoutConflictFiles(path: "dir/file.cs")
+            #expect(
+                try second.base.map { realPath($0.path) } == "\(root)/dir/file_BASE_\(pid)_1.cs"
+                    && fixture.read(repo, "dir/file_BASE_\(pid)_1.cs") == "base extra\n",
+                "existing side files are not overwritten; the index precedes the extension")
+            let added = try await module.checkoutConflictFiles(path: "added.txt")
+            #expect(
+                added.base == nil && added.local.map { realPath($0.path) } == "\(root)/added_LOCAL_\(pid).txt",
+                "add/add conflict has no base side")
+            #expect(try fixture.unmerged(repo).contains("dir/file.cs"), "checkout leaves the conflict unresolved")
+        }
+
         @Test("Binary detection vectors") private static func binaryDetectionVectors() throws {
             func attr(_ pairs: [(String, String)]) -> String { pairs.map { "f\0\($0.0)\0\($0.1)\0" }.joined() }
             #expect(ConflictBinaryDetection.isBinary(path: "image.PNG", checkAttrOutput: nil), "extension list, case-insensitive")
@@ -519,7 +559,7 @@ extension UIIntegrationTests {
                 try Data(contentsOf: repo.appendingPathComponent("bin.png")) == Data([0, 0xFF, 3]) && !fixture.unmerged(repo).contains("bin.png"),
                 "remote bytes chosen and staged")
             #expect(!FileManager.default.fileExists(atPath: tool.log.path), "the merge tool was not started")
-            #expect(try !fixture.listing(repo).contains { $0.hasPrefix("bin.png.") }, "temporary stage files removed")
+            #expect(try !fixture.listing(repo).contains { $0.hasPrefix("bin_") }, "temporary stage files removed")
 
             let accept = try Fixture()
             defer { accept.remove() }
@@ -564,9 +604,11 @@ extension UIIntegrationTests {
                 #expect(try fixture.unmerged(repo).contains("both.txt") == !item.staged, "\(label): staged only when upstream would")
                 let arguments = try tool.arguments()
                 let root = realPath(repo.path)
+                let pid = ProcessInfo.processInfo.processIdentifier
                 #expect(
-                    arguments.count == 8 && arguments[0] == "--base" && arguments[1].hasSuffix("/both.txt.BASE") && arguments[3].hasSuffix("/both.txt.LOCAL")
-                        && arguments[5].hasSuffix("/both.txt.REMOTE") && arguments[6] == "-o" && arguments[7] == "both.txt",
+                    arguments.count == 8 && arguments[0] == "--base" && arguments[1].hasSuffix("/both_BASE_\(pid).txt")
+                        && arguments[3].hasSuffix("/both_LOCAL_\(pid).txt") && arguments[5].hasSuffix("/both_REMOTE_\(pid).txt")
+                        && arguments[6] == "-o" && arguments[7] == "both.txt",
                     "\(label): 3-way arguments \(arguments)")
                 #expect(
                     realPath(URL(fileURLWithPath: arguments[1]).deletingLastPathComponent().path) == root, "\(label): stage files live beside the merged file")
@@ -574,7 +616,7 @@ extension UIIntegrationTests {
                     try tool.seen("base") == "base both\n" && tool.seen("local") == "main both\n" && tool.seen("remote") == "topic both\n",
                     "\(label): stage files contain stages 1-3")
                 #expect(try tool.seen("cwd") == root, "\(label): tool runs in the working directory")
-                #expect(try !fixture.listing(repo).contains { $0.hasPrefix("both.txt.") }, "\(label): temporary files deleted")
+                #expect(try !fixture.listing(repo).contains { $0.hasPrefix("both_") }, "\(label): temporary files deleted")
                 if item.mode.hasPrefix("write") && item.staged {
                     #expect(try fixture.git(["show", ":both.txt"], in: repo) == "merged by tool", "\(label): merged content staged")
                 }
@@ -609,15 +651,16 @@ extension UIIntegrationTests {
                     continue
                 }
                 let arguments = try tool.arguments()
+                let pid = ProcessInfo.processInfo.processIdentifier
                 #expect(arguments.count == expectedArguments, "\(answer): argument count \(arguments)")
                 if answer == .yes {
                     #expect(
-                        arguments[0].hasSuffix("/added.txt.LOCAL") && arguments[1].hasSuffix("/added.txt.REMOTE") && arguments[2] == "-o"
+                        arguments[0].hasSuffix("/added_LOCAL_\(pid).txt") && arguments[1].hasSuffix("/added_REMOTE_\(pid).txt") && arguments[2] == "-o"
                             && arguments[3] == "added.txt", "2-way drops BASE")
                 } else {
-                    #expect(arguments[0] == "" && arguments[1].hasSuffix("/added.txt.LOCAL"), "3-way without a base passes an empty argument, no base file")
+                    #expect(arguments[0] == "" && arguments[1].hasSuffix("/added_LOCAL_\(pid).txt"), "3-way without a base passes an empty argument, no base file")
                 }
-                #expect(try !fixture.listing(repo).contains("added.txt.BASE"), "no base file manufactured")
+                #expect(try !fixture.listing(repo).contains { $0.hasPrefix("added_") }, "no base file manufactured, temporary files deleted")
                 #expect(try !fixture.unmerged(repo).contains("added.txt"), "\(answer): successful tool staged the result")
             }
         }
@@ -635,7 +678,9 @@ extension UIIntegrationTests {
             await ConflictResolutionWorkflow(source: module, presenter: presenter, rebase: false, mergeTool: configuration).openMergeTool(
                 try await conflicts(module, [name]))
             let arguments = try tool.arguments()
-            #expect(arguments[7] == name && arguments[3].hasSuffix("/\(name).LOCAL"), "special characters survive as single arguments: \(arguments)")
+            #expect(
+                arguments[7] == name && arguments[3].hasSuffix("/sub dir/it's $HOME & (x)_LOCAL_\(ProcessInfo.processInfo.processIdentifier).txt"),
+                "special characters survive as single arguments: \(arguments)")
             #expect(try fixture.read(repo, name) == "merged by tool" && !fixture.unmerged(repo).contains(name), "merged and staged")
         }
 

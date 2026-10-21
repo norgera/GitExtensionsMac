@@ -22,6 +22,8 @@ final class BlameViewController: NSViewController, NSTableViewDataSource, NSTabl
 
     let table = BlameTableView()
     private let scroll = NSScrollView()
+    private var contentWidthObserver: NSObjectProtocol?
+    private var widestContentLine: CGFloat = 0
     private let authorTable = BlameTableView()
     private let authorScroll = NSScrollView()
     private let viewerToolbar = DiffViewerToolbar(preferences: AppSettingsStore.shared.preferencesForNewFileViewer())
@@ -82,6 +84,7 @@ final class BlameViewController: NSViewController, NSTableViewDataSource, NSTabl
         loadTask?.cancel()
         if let preferencesObserver { NotificationCenter.default.removeObserver(preferencesObserver) }
         for observer in scrollObservers { NotificationCenter.default.removeObserver(observer) }
+        if let contentWidthObserver { NotificationCenter.default.removeObserver(contentWidthObserver) }
     }
 
     override func loadView() {
@@ -91,7 +94,7 @@ final class BlameViewController: NSViewController, NSTableViewDataSource, NSTabl
         table.usesAlternatingRowBackgroundColors = false
         table.allowsMultipleSelection = true
         table.allowsColumnResizing = true
-        table.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
+        table.columnAutoresizingStyle = .noColumnAutoresizing
         table.rowHeight = AppSettingsStore.shared.diffLineHeight
         table.backgroundColor = ApplicationColors.color("EditorBackground", fallback: .textBackgroundColor)
         table.dataSource = self
@@ -129,6 +132,10 @@ final class BlameViewController: NSViewController, NSTableViewDataSource, NSTabl
         messageLabel.translatesAutoresizingMaskIntoConstraints = false
         messageLabel.isHidden = true
         messageLabel.isSelectable = true
+        scroll.contentView.postsFrameChangedNotifications = true
+        contentWidthObserver = NotificationCenter.default.addObserver(forName: NSView.frameDidChangeNotification, object: scroll.contentView, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.updateContentColumnWidth() }
+        }
         authorScroll.documentView = authorTable
         authorScroll.hasVerticalScroller = false
         authorScroll.hasHorizontalScroller = true
@@ -261,11 +268,21 @@ final class BlameViewController: NSViewController, NSTableViewDataSource, NSTabl
         reloadLines()
     }
 
+    private func updateContentColumnWidth() {
+        guard let column = table.tableColumn(withIdentifier: .init("content")) else { return }
+        let others = table.tableColumns.filter { $0 !== column }.reduce(0) { $0 + $1.width }
+        let width = max(scroll.contentView.bounds.width - others - table.rect(ofColumn: 0).minX * 2, widestContentLine + 8, column.minWidth)
+        if abs(column.width - width) > 0.5 { column.width = width }
+    }
+
     private func reloadLines() {
         synchronizing = true
         let selection = table.selectedRowIndexes
         table.reloadData()
         authorTable.reloadData()
+        let font = AppSettingsStore.shared.codeFont
+        widestContentLine = blame?.lines.reduce(0) { max($0, ceil(($1.text as NSString).size(withAttributes: [.font: font]).width)) } ?? 0
+        updateContentColumnWidth()
         let restored = selection.intersection(IndexSet(integersIn: 0..<table.numberOfRows))
         table.selectRowIndexes(restored, byExtendingSelection: false)
         authorTable.selectRowIndexes(restored, byExtendingSelection: false)
