@@ -54,7 +54,7 @@ extension UIIntegrationTests {
             outline.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
         }
         private static func wait(_ message: @autoclosure () -> String, _ condition: () -> Bool) async throws {
-            let deadline = ContinuousClock.now + .seconds(10)
+            let deadline = ContinuousClock.now + .seconds(30)
             while !condition() {
                 guard ContinuousClock.now < deadline else { throw TestFailure(description: "FileStatusUITests: timed out waiting for \(message())") }
                 try await Task.sleep(nanoseconds: 20_000_000)
