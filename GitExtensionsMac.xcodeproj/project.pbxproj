@@ -498,6 +498,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		C0501E0000000000000000A1 /* Version.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = Version.xcconfig; path = Config/Version.xcconfig; sourceTree = "<group>"; };
 		0294C9B5CC6C3650E63E15C5 /* GitExtensionsAppScene.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GitExtensionsAppScene.swift; sourceTree = "<group>"; };
 		0780DC4704A848E49B43ADA2 /* TagCreate.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = TagCreate.png; sourceTree = "<group>"; };
 		083909527C7E4CCA9C875D2C /* ResetCurrentBranchToHere.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = ResetCurrentBranchToHere.png; sourceTree = "<group>"; };
@@ -1496,6 +1497,7 @@
 				433C389055D3FF9773F8E710 /* GitExtensionsMac */,
 				2BB55F81DD98FC52232EB075 /* Tests */,
 				C66650E67D23426D87CB0466 /* Resources */,
+				C0501E0000000000000000A1 /* Version.xcconfig */,
 			);
 			sourceTree = "<group>";
 		};
@@ -2209,7 +2211,6 @@
 			buildSettings = {
 				CODE_SIGNING_ALLOWED = NO;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 1;
 				DEAD_CODE_STRIPPING = YES;
 				DEFINES_MODULE = YES;
 				DYLIB_COMPATIBILITY_VERSION = 1;
@@ -2280,6 +2281,7 @@
 		};
 		54BECE7F44A99185501CF529 /* Debug */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = C0501E0000000000000000A1 /* Version.xcconfig */;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				CLANG_ANALYZER_NONNULL = YES;
@@ -2348,7 +2350,6 @@
 			buildSettings = {
 				CODE_SIGNING_ALLOWED = NO;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 1;
 				DEAD_CODE_STRIPPING = YES;
 				DEFINES_MODULE = YES;
 				DYLIB_COMPATIBILITY_VERSION = 1;
@@ -2383,7 +2384,6 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 1;
 				DEAD_CODE_STRIPPING = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = GitExtensionsMac;
@@ -2394,7 +2394,6 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 0.1.0;
 				OTHER_SWIFT_FLAGS = "$(inherited) -package-name GitExtensionsMac";
 				PRODUCT_BUNDLE_IDENTIFIER = io.github.norgera.gitextensionsmac;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -2409,7 +2408,6 @@
 			buildSettings = {
 				CODE_SIGNING_ALLOWED = NO;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 1;
 				DEAD_CODE_STRIPPING = YES;
 				DEFINES_MODULE = YES;
 				DYLIB_COMPATIBILITY_VERSION = 1;
@@ -2443,7 +2441,6 @@
 			buildSettings = {
 				CODE_SIGNING_ALLOWED = NO;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 1;
 				DEAD_CODE_STRIPPING = YES;
 				DEFINES_MODULE = YES;
 				DYLIB_COMPATIBILITY_VERSION = 1;
@@ -2477,7 +2474,6 @@
 			buildSettings = {
 				CODE_SIGNING_ALLOWED = NO;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 1;
 				DEAD_CODE_STRIPPING = YES;
 				DEFINES_MODULE = YES;
 				DYLIB_COMPATIBILITY_VERSION = 1;
@@ -2508,6 +2504,7 @@
 		};
 		AF8274429A1432BB64C9DC26 /* Release */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = C0501E0000000000000000A1 /* Version.xcconfig */;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				CLANG_ANALYZER_NONNULL = YES;
@@ -2570,7 +2567,6 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 1;
 				DEAD_CODE_STRIPPING = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = GitExtensionsMac;
@@ -2581,7 +2577,6 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
-				MARKETING_VERSION = 0.1.0;
 				OTHER_SWIFT_FLAGS = "$(inherited) -package-name GitExtensionsMac";
 				PRODUCT_BUNDLE_IDENTIFIER = io.github.norgera.gitextensionsmac;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -2596,7 +2591,6 @@
 			buildSettings = {
 				CODE_SIGNING_ALLOWED = NO;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 1;
 				DEAD_CODE_STRIPPING = YES;
 				DEFINES_MODULE = YES;
 				DYLIB_COMPATIBILITY_VERSION = 1;

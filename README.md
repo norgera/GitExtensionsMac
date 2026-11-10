@@ -21,9 +21,15 @@ Beta. Expect bugs, incomplete features, and UI differences from Git Extensions w
 
 ## Installing
 
-Download the latest build from [Releases](https://github.com/norgera/GitExtensionsMac/releases), unzip it, and move `GitExtensionsMac.app` to `/Applications`.
+```sh
+curl -fsSL https://raw.githubusercontent.com/norgera/GitExtensionsMac/main/Scripts/install.sh | bash
+```
 
-Beta builds are not signed with an Apple Developer ID or notarized, so macOS blocks the app on first launch and may say it is damaged. To allow it, remove the quarantine attribute:
+This downloads the latest release, copies the app to `/Applications`, and removes the quarantine attribute. Beta builds are not signed with an Apple Developer ID or notarized, so without this step macOS blocks the app on first launch and may say it is damaged.
+
+### Manual install
+
+Download the latest `.dmg` from [Releases](https://github.com/norgera/GitExtensionsMac/releases), drag `GitExtensionsMac.app` to `/Applications`, then run:
 
 ```sh
 xattr -dr com.apple.quarantine /Applications/GitExtensionsMac.app
@@ -33,13 +39,7 @@ Alternatively, try to open the app once, then choose **Open Anyway** in **System
 
 ## Building
 
-```sh
-git clone https://github.com/norgera/GitExtensionsMac.git
-cd GitExtensionsMac
-open GitExtensionsMac.xcodeproj
-```
-
-Select the `GitExtensionsMac` scheme and run.
+Clone the repository, open `GitExtensionsMac.xcodeproj` in Xcode, and run the `GitExtensionsMac` scheme.
 
 ## Testing
 
