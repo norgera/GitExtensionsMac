@@ -146,6 +146,7 @@ final class EditableFileTextView: NSView, NSTextViewDelegate {
         scrollView.hasHorizontalScroller = true
         scrollView.borderType = .bezelBorder
         scrollView.translatesAutoresizingMaskIntoConstraints = false
+        ContentZoomController.shared.register(scrollView)
         addSubview(scrollView)
         NSLayoutConstraint.activate([
             scrollView.topAnchor.constraint(equalTo: topAnchor),

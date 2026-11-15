@@ -18,13 +18,13 @@ final class RecentRepositoriesSettingsDialog: NSViewController, NSTableViewDataS
     private let historySizeStepper = NSStepper()
     private let comboWidth = NSTextField()
     private let comboWidthStepper = NSStepper()
-    private let hideTop = NSButton(checkboxWithTitle: "Hide top repositories from recent repositories list", target: nil, action: nil)
-    private let sortTop = NSButton(checkboxWithTitle: "Sort top repositories alphabetically", target: nil, action: nil)
-    private let sortRecent = NSButton(checkboxWithTitle: "Sort recent repositories alphabetically", target: nil, action: nil)
+    private let hideTop = PixelSnapTolerantButton(checkboxWithTitle: "Hide top repositories from recent repositories list", target: nil, action: nil)
+    private let sortTop = PixelSnapTolerantButton(checkboxWithTitle: "Sort top repositories alphabetically", target: nil, action: nil)
+    private let sortRecent = PixelSnapTolerantButton(checkboxWithTitle: "Sort recent repositories alphabetically", target: nil, action: nil)
     private let strategies: [(ShorteningRecentRepoPathStrategy, NSButton)] = [
-        (.none, NSButton(radioButtonWithTitle: "Do not shorten", target: nil, action: nil)),
-        (.middleDots, NSButton(radioButtonWithTitle: "Replace middle part with dots", target: nil, action: nil)),
-        (.mostSignDir, NSButton(radioButtonWithTitle: "The most significant directory", target: nil, action: nil))
+        (.none, PixelSnapTolerantButton(radioButtonWithTitle: "Do not shorten", target: nil, action: nil)),
+        (.middleDots, PixelSnapTolerantButton(radioButtonWithTitle: "Replace middle part with dots", target: nil, action: nil)),
+        (.mostSignDir, PixelSnapTolerantButton(radioButtonWithTitle: "The most significant directory", target: nil, action: nil))
     ]
     private var previousComboWidth = 0
 

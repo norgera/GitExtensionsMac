@@ -54,7 +54,7 @@ private final class RevertViewController: NSViewController, NSTableViewDataSourc
     private let parentScroll = NSScrollView()
     private let parentSection = NSStackView()
     private var parentHeightConstraint: NSLayoutConstraint?
-    private let automaticallyCommit = NSButton(
+    private let automaticallyCommit = PixelSnapTolerantButton(
         checkboxWithTitle: "Automatically create a commit",
         target: nil,
         action: nil

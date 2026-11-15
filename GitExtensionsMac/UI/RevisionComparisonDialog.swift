@@ -81,7 +81,7 @@ final class RevisionPairViewController: NSViewController {
     let headID: ObjectID?
 
     let mergeBase: Commit?
-    let baseCheckbox = NSButton(checkboxWithTitle: "Compare to merge base", target: nil, action: nil)
+    let baseCheckbox = PixelSnapTolerantButton(checkboxWithTitle: "Compare to merge base", target: nil, action: nil)
     private let firstText = NSTextField(labelWithString: "")
     private let secondText = NSTextField(labelWithString: "")
     private let directoryButton = NSButton(title: "Open diff using directory diff tool", target: nil, action: nil)
@@ -338,8 +338,8 @@ final class ComparisonBranchPicker: NSViewController, NSComboBoxDelegate {
     private let branches: [Branch]
     let selected: RevisionID
     let field = NSComboBox()
-    private let local = NSButton(radioButtonWithTitle: "Local branch", target: nil, action: nil)
-    private let remote = NSButton(radioButtonWithTitle: "Remote branch", target: nil, action: nil)
+    private let local = PixelSnapTolerantButton(radioButtonWithTitle: "Local branch", target: nil, action: nil)
+    private let remote = PixelSnapTolerantButton(radioButtonWithTitle: "Remote branch", target: nil, action: nil)
     private let count = NSTextField(labelWithString: "")
     private let source: any RepositoryRevisionComparingDataSource
     private let headID: ObjectID?

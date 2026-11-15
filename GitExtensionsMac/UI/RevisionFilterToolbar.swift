@@ -28,7 +28,7 @@ final class RevisionFilterToolbar: NSObject, NSComboBoxDelegate, NSMenuDelegate 
     let advancedButton = NSButton()
     let advancedArrow = NSButton()
     let reflogButton = NSButton()
-    let branchesMode = NSPopUpButton(frame: .zero, pullsDown: true)
+    let branchesMode = ToolStripPopUpButton(frame: .zero, pullsDown: true)
     let branchCombo = NSComboBox()
     let branchType = NSPopUpButton(frame: .zero, pullsDown: true)
     let revisionCombo = NSComboBox()
@@ -174,7 +174,7 @@ final class RevisionFilterToolbar: NSObject, NSComboBoxDelegate, NSMenuDelegate 
         return menu
     }
     private func showAdvancedMenu(_ filter: RevisionGridFilter) {
-        advancedMenu(filter).popUp(positioning: nil, at: NSPoint(x: 0, y: advancedButton.bounds.maxY + 2), in: advancedButton)
+        advancedMenu(filter).popUpZoomed(positioning: nil, at: NSPoint(x: 0, y: advancedButton.bounds.maxY + 2), in: advancedButton)
     }
     @objc func resetPathFilter() { grid?.setAndApplyPathFilter("") }
     @objc func resetAllFilters() { grid?.resetAllFiltersAndRefresh() }
@@ -313,33 +313,33 @@ final class RevisionFilterDialogController: NSViewController {
     private var filter: RevisionGridFilter
     private let defaultLimit: Int
     private let completion: (RevisionGridFilter?) -> Void
-    private let sinceCheck = NSButton(checkboxWithTitle: "Since", target: nil, action: nil)
+    private let sinceCheck = PixelSnapTolerantButton(checkboxWithTitle: "Since", target: nil, action: nil)
     private let since = NSDatePicker()
-    private let untilCheck = NSButton(checkboxWithTitle: "Until", target: nil, action: nil)
+    private let untilCheck = PixelSnapTolerantButton(checkboxWithTitle: "Until", target: nil, action: nil)
     private let until = NSDatePicker()
-    private let authorCheck = NSButton(checkboxWithTitle: "Author", target: nil, action: nil)
+    private let authorCheck = PixelSnapTolerantButton(checkboxWithTitle: "Author", target: nil, action: nil)
     private let author = NSTextField(string: "")
-    private let committerCheck = NSButton(checkboxWithTitle: "Committer", target: nil, action: nil)
+    private let committerCheck = PixelSnapTolerantButton(checkboxWithTitle: "Committer", target: nil, action: nil)
     private let committer = NSTextField(string: "")
-    private let messageCheck = NSButton(checkboxWithTitle: "Message", target: nil, action: nil)
+    private let messageCheck = PixelSnapTolerantButton(checkboxWithTitle: "Message", target: nil, action: nil)
     private let message = NSTextField(string: "")
-    private let diffCheck = NSButton(checkboxWithTitle: "Diff contains", target: nil, action: nil)
+    private let diffCheck = PixelSnapTolerantButton(checkboxWithTitle: "Diff contains", target: nil, action: nil)
     private let diff = NSTextField(string: "")
-    private let ignoreCase = NSButton(checkboxWithTitle: "Ignore case", target: nil, action: nil)
-    private let limitCheck = NSButton(checkboxWithTitle: "Limit", target: nil, action: nil)
+    private let ignoreCase = PixelSnapTolerantButton(checkboxWithTitle: "Ignore case", target: nil, action: nil)
+    private let limitCheck = PixelSnapTolerantButton(checkboxWithTitle: "Limit", target: nil, action: nil)
     private let limit = NSTextField(string: "")
     private let limitStepper = NSStepper()
-    private let pathCheck = NSButton(checkboxWithTitle: "Path filter", target: nil, action: nil)
+    private let pathCheck = PixelSnapTolerantButton(checkboxWithTitle: "Path filter", target: nil, action: nil)
     private let path = NSTextField(string: "")
-    private let branchCheck = NSButton(checkboxWithTitle: "Branches", target: nil, action: nil)
+    private let branchCheck = PixelSnapTolerantButton(checkboxWithTitle: "Branches", target: nil, action: nil)
     private let branch = NSTextField(string: "")
-    private let currentBranchOnly = NSButton(checkboxWithTitle: "Show current branch only", target: nil, action: nil)
-    private let reflog = NSButton(checkboxWithTitle: "Show reflog", target: nil, action: nil)
-    private let firstParent = NSButton(checkboxWithTitle: "Show only first parent", target: nil, action: nil)
-    private let hideMerges = NSButton(checkboxWithTitle: "Hide merge commits", target: nil, action: nil)
-    private let simplifyByDecoration = NSButton(checkboxWithTitle: "Simplify by decoration", target: nil, action: nil)
-    private let fullHistory = NSButton(checkboxWithTitle: "Full history", target: nil, action: nil)
-    private let simplifyMerges = NSButton(checkboxWithTitle: "Simplify merges", target: nil, action: nil)
+    private let currentBranchOnly = PixelSnapTolerantButton(checkboxWithTitle: "Show current branch only", target: nil, action: nil)
+    private let reflog = PixelSnapTolerantButton(checkboxWithTitle: "Show reflog", target: nil, action: nil)
+    private let firstParent = PixelSnapTolerantButton(checkboxWithTitle: "Show only first parent", target: nil, action: nil)
+    private let hideMerges = PixelSnapTolerantButton(checkboxWithTitle: "Hide merge commits", target: nil, action: nil)
+    private let simplifyByDecoration = PixelSnapTolerantButton(checkboxWithTitle: "Simplify by decoration", target: nil, action: nil)
+    private let fullHistory = PixelSnapTolerantButton(checkboxWithTitle: "Full history", target: nil, action: nil)
+    private let simplifyMerges = PixelSnapTolerantButton(checkboxWithTitle: "Simplify merges", target: nil, action: nil)
 
     init(filter: RevisionGridFilter, defaultLimit: Int, completion: @escaping (RevisionGridFilter?) -> Void) {
         self.filter = filter; self.defaultLimit = defaultLimit; self.completion = completion
@@ -557,6 +557,22 @@ final class GoToCommitDialog: NSViewController, NSTextFieldDelegate, NSComboBoxD
     }
 }
 
+/// A toolbar drop-down that sizes itself to its title. Its arrow is painted
+/// by `ToolStripHighlightView` over the trailing edge, so the natural width
+/// reserves room for it and the title never runs under the arrow.
+final class ToolStripPopUpButton: NSPopUpButton {
+    override var intrinsicContentSize: NSSize {
+        var size = super.intrinsicContentSize
+        guard size.width != NSView.noIntrinsicMetric, let cell = cell as? NSPopUpButtonCell else { return size }
+        // Title inset + leading icon + title + a small gap, then the arrow.
+        let inset = cell.titleRect(forBounds: NSRect(x: 0, y: 0, width: 1000, height: max(size.height, 22))).minX
+        let image: CGFloat = imagePosition == .imageLeading ? 20 : 0
+        let text = ceil((title as NSString).size(withAttributes: [.font: font ?? NSFont.systemFont(ofSize: 11)]).width)
+        size.width = max(size.width, ceil(inset + image + text + 4)) + ToolStripHighlightView.dropDownWidth
+        return size
+    }
+}
+
 final class ToolStripOverflow: NSObject, NSStackViewDelegate, NSPopoverDelegate {
     let button = NSButton(title: "»", target: nil, action: nil)
     private weak var stack: NSStackView?
@@ -584,8 +600,11 @@ final class ToolStripOverflow: NSObject, NSStackViewDelegate, NSPopoverDelegate 
         stack.delegate = self
         stack.detachesHiddenViews = true
         stack.setClippingResistancePriority(.defaultLow, for: .horizontal)
+        // Earlier groups stay visible longest; keep every priority above
+        // `notVisible` however many groups there are.
+        let step = min(50, 850 / Float(max(groups.count, 1)))
         for (index, group) in groups.enumerated() {
-            let priority = NSStackView.VisibilityPriority(rawValue: Float(900 - index * 50))
+            let priority = NSStackView.VisibilityPriority(rawValue: 900 - Float(index) * step)
             group.forEach { stack.setVisibilityPriority(priority, for: $0) }
         }
     }
@@ -643,9 +662,18 @@ final class ToolStripOverflow: NSObject, NSStackViewDelegate, NSPopoverDelegate 
             content.bottomAnchor.constraint(equalTo: container.bottomAnchor)
         ])
         let controller = NSViewController()
-        controller.view = container
-        let size = container.fittingSize
+        var size = container.fittingSize
         container.frame = NSRect(origin: .zero, size: size)
+        // The popover is its own window; show it at the same zoom as the
+        // toolbar it belongs to.
+        let scale = ContentZoomController.displayScale(of: button)
+        if abs(scale - 1) > 0.001 {
+            let zoomed = ContentZoomController.magnifiedContent(container, scale: scale)
+            controller.view = zoomed
+            size = zoomed.frame.size
+        } else {
+            controller.view = container
+        }
         controller.preferredContentSize = size
         let popover = NSPopover()
         popover.contentSize = size

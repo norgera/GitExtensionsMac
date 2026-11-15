@@ -876,7 +876,7 @@ enum MutationDialogs {
     }
 
     private static func checkbox(_ title: String, state: Bool) -> NSButton {
-        let button = NSButton(checkboxWithTitle: title, target: nil, action: nil)
+        let button = PixelSnapTolerantButton(checkboxWithTitle: title, target: nil, action: nil)
         button.state = state ? .on : .off
         button.controlSize = .small
         return button

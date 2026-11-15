@@ -108,7 +108,7 @@ private final class RemoteManagementViewController: NSViewController, NSWindowDe
     private let trackingTable = NSTableView()
     private let nameField = NSTextField()
     private let urlField = NSComboBox()
-    private let separatePushURL = NSButton(checkboxWithTitle: "Separate Push Url", target: nil, action: nil)
+    private let separatePushURL = PixelSnapTolerantButton(checkboxWithTitle: "Separate Push Url", target: nil, action: nil)
     private let pushURLField = NSComboBox()
     private let prefixField = NSTextField()
     private let colorWell = RemoteColorWell()
@@ -910,7 +910,8 @@ private final class RemoteManagementViewController: NSViewController, NSWindowDe
 
     func windowWillClose(_ notification: Notification) {
         task?.cancel()
-        if let size = view.window?.contentView?.bounds.size {
+        if let rawSize = view.window?.contentView?.bounds.size {
+            let size = ContentZoomController.shared.unzoomed(rawSize, in: view.window)
             var preferences = AppSettingsStore.shared.remoteManagementPreferences
             preferences.windowWidth = size.width
             preferences.windowHeight = size.height

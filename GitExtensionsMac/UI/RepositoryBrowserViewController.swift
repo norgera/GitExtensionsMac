@@ -113,6 +113,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
     private let worktreeDropdownButton = NSButton()
     private let commitButton = NSButton()
     private var workingDirectoryWidthConstraint: NSLayoutConstraint?
+    private var workingDirectoryPreferredWidthConstraint: NSLayoutConstraint?
     private var branchWidthConstraint: NSLayoutConstraint?
     private(set) var repositoryIdentity: RepositoryIdentityState?
     private(set) var repositoryReferences: RepositoryReferenceState?
@@ -912,6 +913,28 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             performTopLevelCommand(.openRepository)
         }
         workingDirectoryPopUp.toolTip = "Change working directory"
+        // A long path shrinks with a middle ellipsis instead of pushing the
+        // rest of the toolbar out of the window.
+        (workingDirectoryPopUp.cell as? NSPopUpButtonCell)?.lineBreakMode = .byTruncatingMiddle
+        // The caption width becomes an upper bound and the button compresses
+        // below the stack's clipping resistance, so the toolbar shortens the
+        // path before it clips or folds anything else.
+        if let width = workingDirectoryWidthConstraint {
+            width.isActive = false
+            let maximum = workingDirectoryPopUp.widthAnchor.constraint(lessThanOrEqualToConstant: width.constant)
+            maximum.isActive = true
+            workingDirectoryWidthConstraint = maximum
+            let preferred = workingDirectoryPopUp.widthAnchor.constraint(equalToConstant: width.constant)
+            preferred.priority = .defaultLow - 5
+            preferred.isActive = true
+            workingDirectoryPreferredWidthConstraint = preferred
+        }
+        // Not required: a short caption's cap can be narrower than this.
+        let minimumWidth = workingDirectoryPopUp.widthAnchor.constraint(greaterThanOrEqualToConstant: 80)
+        minimumWidth.priority = .required - 1
+        minimumWidth.isActive = true
+        workingDirectoryPopUp.setContentHuggingPriority(.defaultLow - 50, for: .horizontal)
+        workingDirectoryPopUp.setContentCompressionResistancePriority(.defaultLow - 50, for: .horizontal)
         stack.addArrangedSubview(workingDirectoryPopUp)
 
         branchWidthConstraint = configureCompactPopUp(branchPopUp, items: ["main"], width: 60, action: #selector(selectBranch(_:)), imageName: "Branch")
@@ -920,7 +943,8 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         branchPopUp.onCheckout = { [weak self] in self?.uiCommands.startCheckoutBranch(initialTarget: nil) }
         branchPopUp.toolTip = "Change current branch"
         stack.addArrangedSubview(branchPopUp)
-        stack.addArrangedSubview(AppKitFactory.separator())
+        let pullSeparator = AppKitFactory.separator()
+        stack.addArrangedSubview(pullSeparator)
 
         configureImagePopUp(
             pullPopUp,
@@ -953,15 +977,18 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
 
         configureStashSplitButton()
         stack.addArrangedSubview(stashSplitButton)
-        stack.addArrangedSubview(AppKitFactory.separator())
-        stack.addArrangedSubview(AppKitFactory.resourceButton("BrowseFileExplorer", tooltip: "File Explorer (Finder)", target: self, action: #selector(fileExplorerToolbar(_:))))
+        let fileExplorerSeparator = AppKitFactory.separator()
+        stack.addArrangedSubview(fileExplorerSeparator)
+        let fileExplorerButton = AppKitFactory.resourceButton("BrowseFileExplorer", tooltip: "File Explorer (Finder)", target: self, action: #selector(fileExplorerToolbar(_:)))
+        stack.addArrangedSubview(fileExplorerButton)
         configureCompactPopUp(shellPopUp, items: [""], width: ToolStripHighlightView.imageDropDownWidth, action: #selector(shellProviderSelected(_:)))
         shellPopUp.pullsDown = true
         shellPopUp.imagePosition = .imageLeading
         shellPopUp.setAccessibilityIdentifier("Browse.ShellProviders")
         shellPopUp.onPrimaryClick = { [weak self] in self?.uiCommands.openTerminal() }
         stack.addArrangedSubview(shellPopUp)
-        stack.addArrangedSubview(AppKitFactory.resourceButton("Settings", tooltip: "Settings", target: self, action: #selector(settingsToolbarButton(_:))))
+        let settingsButton = AppKitFactory.resourceButton("Settings", tooltip: "Settings", target: self, action: #selector(settingsToolbarButton(_:)))
+        stack.addArrangedSubview(settingsButton)
 
         let toolbarGap = NSView()
         toolbarGap.translatesAutoresizingMaskIntoConstraints = false
@@ -974,10 +1001,30 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
         stack.addArrangedSubview(filterOverflow.button)
         filterOverflow.isAvailable = { [weak self] view in
             guard let self else { return true }
+            // Items the toolbar hides for the repository state are not overflow.
+            if view === self.shellPopUp && self.shellProvider.available.isEmpty { return false }
+            if view === self.worktreeButton || view === self.worktreeDropdownButton,
+               (self.repositoryNavigation?.worktrees.count ?? 0) <= 1 { return false }
             return self.toolbarItems.filter { $0.views.contains(view) }
                 .allSatisfy { (self.toolbarVisible[$0.toolbar] ?? true) && self.isToolbarItemVisible($0.key) }
         }
-        filterOverflow.attach(to: stack, groups: filterToolbar.overflowGroups)
+        // When the toolbar is narrower than its items (a small window, a long
+        // working directory or a large zoom), the filter items move into the
+        // "»" overflow first, then the standard items from the right. The
+        // refresh, layout and working directory items always stay.
+        let standardGroups: [[NSView]] = [
+            [levelUpButton, submoduleDropdown],
+            [worktreeButton, worktreeDropdownButton],
+            [branchPopUp],
+            [pullSeparator] + Self.pullShortcutButtons.compactMap { pullShortcutViews[$0.0] } + [pullPopUp],
+            [pushButton, pushCommitGap],
+            [commitButton, commitStashGap],
+            [stashSplitButton],
+            [fileExplorerSeparator, fileExplorerButton],
+            [shellPopUp],
+            [settingsButton],
+        ]
+        filterOverflow.attach(to: stack, groups: standardGroups + filterToolbar.overflowGroups)
 
         let scripts = AppKitFactory.popUp("Scripts", width: 58)
         scripts.pullsDown = true
@@ -2223,7 +2270,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             menuItem.state = index == layout.commitInfoPosition.rawValue ? .on : .off
             menu.addItem(menuItem)
         }
-        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.maxY + 2), in: sender)
+        menu.popUpZoomed(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.maxY + 2), in: sender)
     }
 
     @objc private func chooseCommitInfoPosition(_ sender: NSMenuItem) {
@@ -2571,6 +2618,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
             Right click starts the "Open repository" dialog.
             """
         updatePopUpWidth(workingDirectoryPopUp, constraint: workingDirectoryWidthConstraint, title: caption, minimum: 40, includesLeadingImage: false)
+        workingDirectoryPreferredWidthConstraint?.constant = workingDirectoryWidthConstraint?.constant ?? 0
     }
 
     @objc private func configureWorkingDirectoryMenu() {
@@ -2671,7 +2719,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
 
     @objc private func showWorktreesMenu(_ sender: NSButton) {
         let menu = worktreesMenu()
-        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.height), in: sender)
+        menu.popUpZoomed(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.height), in: sender)
     }
 
     func worktreesMenu() -> NSMenu {
@@ -2701,7 +2749,7 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
     @objc private func manageSubmodulesToolbar() { uiCommands.startSubmoduleManagement() }
 
     @objc private func showSubmodulesMenu(_ sender: NSButton) {
-        submodulesMenu().popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.maxY), in: sender)
+        submodulesMenu().popUpZoomed(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.maxY), in: sender)
     }
 
     func submodulesMenu() -> NSMenu {
@@ -3926,6 +3974,22 @@ final class RepositoryBrowserViewController: NSViewController, NSTextFieldDelega
 }
 
 final class WorkingDirectoryPopUpButton: NSPopUpButton {
+    /// Keeps a truncated path clear of the toolbar's drop-down arrow, which
+    /// `ToolStripHighlightView` draws over the button's trailing edge.
+    private final class Cell: NSPopUpButtonCell {
+        override func drawTitle(_ title: NSAttributedString, withFrame frame: NSRect, in controlView: NSView) -> NSRect {
+            var frame = frame
+            let reserved = controlView.bounds.maxX - ToolStripHighlightView.dropDownWidth
+            frame.size.width = max(0, min(frame.width, reserved - frame.minX))
+            return super.drawTitle(title, withFrame: frame, in: controlView)
+        }
+    }
+
+    override class var cellClass: AnyClass? {
+        get { Cell.self }
+        set {}
+    }
+
     var onRightClick: (() -> Void)?
 
     override func rightMouseDown(with event: NSEvent) {

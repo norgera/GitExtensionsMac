@@ -892,6 +892,7 @@ final class DiffContentViewController: NSViewController, NSTableViewDataSource, 
         scroll.autohidesScrollers = true
         scroll.borderType = .noBorder
         scroll.translatesAutoresizingMaskIntoConstraints = false
+        ContentZoomController.shared.register(scroll)
 
         root.addSubview(scroll)
         emptyStateLabel.textColor = .secondaryLabelColor

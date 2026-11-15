@@ -723,7 +723,7 @@ final class UserRepositoriesListViewController: NSViewController, NSCollectionVi
             add("Rename category", image: "FileStatusModified") { [weak self] in self?.renameCategory(group.title) }
             add("Delete category", image: "StarRemove") { [weak self] in self?.deleteCategory(group.title, count: group.tiles.count) }
         }
-        menu.popUp(positioning: nil, at: NSPoint(x: view.bounds.maxX - 60, y: view.bounds.maxY), in: view)
+        menu.popUpZoomed(positioning: nil, at: NSPoint(x: view.bounds.maxX - 60, y: view.bounds.maxY), in: view)
     }
 
     private func confirm(_ question: String, caption: String, completion: @escaping () -> Void) {

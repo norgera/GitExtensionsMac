@@ -19,9 +19,9 @@ final class BuildServerCredentialsController: NSViewController, NSWindowDelegate
     var onComplete: (BuildServerCredentials?) -> Void = { _ in }
     private let key: String
     private var original: BuildServerCredentials
-    private let guest = NSButton(radioButtonWithTitle: "Guest access", target: nil, action: nil)
-    private let authenticated = NSButton(radioButtonWithTitle: "Authenticated user", target: nil, action: nil)
-    private let bearer = NSButton(radioButtonWithTitle: "Bearer token", target: nil, action: nil)
+    private let guest = PixelSnapTolerantButton(radioButtonWithTitle: "Guest access", target: nil, action: nil)
+    private let authenticated = PixelSnapTolerantButton(radioButtonWithTitle: "Authenticated user", target: nil, action: nil)
+    private let bearer = PixelSnapTolerantButton(radioButtonWithTitle: "Bearer token", target: nil, action: nil)
     private let username = NSTextField(string: "")
     private let password = NSSecureTextField(string: "")
     private let token = NSSecureTextField(string: "")

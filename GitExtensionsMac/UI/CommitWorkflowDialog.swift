@@ -275,16 +275,16 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
     private let unstageAllFilesButton = NSButton(title: "Unstage All", target: nil, action: nil)
     private let messageView = CommitMessageTextView()
     private let commitDiffView = CommitDiffView()
-    private let amend = NSButton(checkboxWithTitle: "Amend commit", target: nil, action: nil)
+    private let amend = PixelSnapTolerantButton(checkboxWithTitle: "Amend commit", target: nil, action: nil)
     private let amendPanel = NSStackView()
     private let messageMenu = NSPopUpButton()
     private let templatesMenu = NSPopUpButton()
     private let optionsMenu = NSPopUpButton()
-    private let stageAll = NSButton(checkboxWithTitle: "Stage all before committing", target: nil, action: nil)
-    private let signOff = NSButton(checkboxWithTitle: "Sign-off commit", target: nil, action: nil)
-    private let resetAuthor = NSButton(checkboxWithTitle: "Reset author", target: nil, action: nil)
+    private let stageAll = PixelSnapTolerantButton(checkboxWithTitle: "Stage all before committing", target: nil, action: nil)
+    private let signOff = PixelSnapTolerantButton(checkboxWithTitle: "Sign-off commit", target: nil, action: nil)
+    private let resetAuthor = PixelSnapTolerantButton(checkboxWithTitle: "Reset author", target: nil, action: nil)
     private let author = NSTextField(string: "")
-    private let stageInSuperproject = NSButton(checkboxWithTitle: CommitSuperprojectStaging.title, target: nil, action: nil)
+    private let stageInSuperproject = PixelSnapTolerantButton(checkboxWithTitle: CommitSuperprojectStaging.title, target: nil, action: nil)
     private var superprojectSubmodule: RepositorySuperprojectSubmodule?
     private var pendingSuperprojectStage: RepositorySuperprojectSubmodule?
     private let authorStatus = CommitAuthorStatusButton()
@@ -981,7 +981,7 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
             let inWindow = window.convertFromScreen(caret).origin
             return messageView.convert(inWindow, from: nil)
         } ?? .zero
-        menu.popUp(positioning: positioning, at: location, in: messageView)
+        menu.popUpZoomed(positioning: positioning, at: location, in: messageView)
     }
 
     @objc private func stageInSuperprojectChanged() {
@@ -2706,7 +2706,7 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
                 : "Reset the index and working tree to HEAD? This cannot be undone."
             alert.addButton(withTitle: "Reset")
             alert.addButton(withTitle: "Cancel")
-            let clean = NSButton(checkboxWithTitle: "Delete new files and directories", target: nil, action: nil)
+            let clean = PixelSnapTolerantButton(checkboxWithTitle: "Delete new files and directories", target: nil, action: nil)
             clean.state = .off
             clean.isEnabled = commitState?.mutationState.hasUntrackedFiles == true
             alert.accessoryView = clean
@@ -3109,8 +3109,9 @@ private final class CommitWorkflowViewController: NSViewController, NSOutlineVie
     private func saveGeometry() {
         guard let commitWindow else { return }
         var preferences = settings.commitPreferences
-        preferences.windowWidth = commitWindow.contentLayoutRect.width
-        preferences.windowHeight = commitWindow.contentLayoutRect.height
+        let geometry = ContentZoomController.shared.unzoomed(commitWindow.contentLayoutRect.size, in: commitWindow)
+        preferences.windowWidth = geometry.width
+        preferences.windowHeight = geometry.height
         settings.saveCommitPreferences(preferences)
         splitterManager.saveSplitters()
     }
@@ -3659,13 +3660,13 @@ final class CommitTemplateSettingsViewController: NSViewController, NSWindowDele
     private var didFinish = false
     private let slots = NSPopUpButton()
     private let nameField = NSTextField(string: "")
-    private let regexCheck = NSButton(checkboxWithTitle: "Enable regex", target: nil, action: nil)
+    private let regexCheck = PixelSnapTolerantButton(checkboxWithTitle: "Enable regex", target: nil, action: nil)
     private let textView = NSTextView()
     private let subjectLength = NSTextField(string: "0")
     private let lineLength = NSTextField(string: "0")
-    private let secondLine = NSButton(checkboxWithTitle: "", target: nil, action: nil)
-    private let autoWrap = NSButton(checkboxWithTitle: "", target: nil, action: nil)
-    private let indent = NSButton(checkboxWithTitle: "", target: nil, action: nil)
+    private let secondLine = PixelSnapTolerantButton(checkboxWithTitle: "", target: nil, action: nil)
+    private let autoWrap = PixelSnapTolerantButton(checkboxWithTitle: "", target: nil, action: nil)
+    private let indent = PixelSnapTolerantButton(checkboxWithTitle: "", target: nil, action: nil)
     private let subjectStepper = NSStepper()
     private let lineStepper = NSStepper()
     private let validationRegex = NSTextField(string: "")

@@ -155,7 +155,7 @@ private class BranchFormViewController<Result>: NSViewController, NSWindowDelega
     weak var panel: NSPanel?
     var onClose: ((Result?) -> Void)?
     private var didClose = false
-    private var fixedFrameHeight: CGFloat?
+    private var fixedContentHeight: CGFloat?
 
     func finish(_ result: Result?) {
         guard !didClose else { return }
@@ -179,24 +179,32 @@ private class BranchFormViewController<Result>: NSViewController, NSWindowDelega
     func windowDidEndLiveResize(_ notification: Notification) { persistWindowWidth() }
 
     func windowWillResize(_ sender: NSWindow, to frameSize: NSSize) -> NSSize {
-        guard let fixedFrameHeight else { return frameSize }
-        return NSSize(width: frameSize.width, height: fixedFrameHeight)
+        // Only the user's drag is locked to the fixed height; programmatic
+        // resizes (including the zoom growing the dialog) pass through.
+        guard let fixedContentHeight, sender.inLiveResize else { return frameSize }
+        // The fixed height is a design size; a zoomed dialog is taller.
+        let chrome = sender.frame.height - sender.contentLayoutRect.height
+        return NSSize(width: frameSize.width, height: chrome + (fixedContentHeight * ContentZoomController.shared.windowScale(sender)).rounded())
     }
 
     func setFixedContentHeight(_ height: CGFloat) {
         guard let panel else { return }
-        panel.setContentSize(NSSize(width: panel.contentView?.bounds.width ?? panel.frame.width, height: height))
-        fixedFrameHeight = panel.frame.height
+        fixedContentHeight = height
+        // Design points: a zoomed dialog adopts this and grows with the zoom.
+        panel.setContentSize(NSSize(width: ContentZoomController.shared.unzoomed(panel.contentLayoutRect.size, in: panel).width, height: height))
     }
 
     private func persistWindowWidth() {
         guard let panel else { return }
         var preferences = AppSettingsStore.shared.checkoutBranchPreferences
+        // Store the 100% width; a zoomed dialog is wider on screen.
+        let chrome = panel.frame.width - panel.contentLayoutRect.width
+        let width = ContentZoomController.shared.unzoomed(panel.contentLayoutRect.size, in: panel).width + chrome
         switch panel.title {
-        case "Checkout branch": preferences.checkoutWindowWidth = panel.frame.width
-        case "Create branch": preferences.createWindowWidth = panel.frame.width
-        case "Delete branch": preferences.deleteWindowWidth = panel.frame.width
-        case "Rename branch": preferences.renameWindowWidth = panel.frame.width
+        case "Checkout branch": preferences.checkoutWindowWidth = width
+        case "Create branch": preferences.createWindowWidth = width
+        case "Delete branch": preferences.deleteWindowWidth = width
+        case "Rename branch": preferences.renameWindowWidth = width
         default: return
         }
         AppSettingsStore.shared.saveCheckoutBranchPreferences(preferences)
@@ -211,20 +219,20 @@ private final class CheckoutBranchViewController: BranchFormViewController<Check
     private let updateSubmodules: Bool
     private let localBranches: [Branch]
     private let remoteBranches: [Branch]
-    private let localRadio = NSButton(radioButtonWithTitle: "Local branch", target: nil, action: nil)
-    private let remoteRadio = NSButton(radioButtonWithTitle: "Remote branch", target: nil, action: nil)
+    private let localRadio = PixelSnapTolerantButton(radioButtonWithTitle: "Local branch", target: nil, action: nil)
+    private let remoteRadio = PixelSnapTolerantButton(radioButtonWithTitle: "Remote branch", target: nil, action: nil)
     private let branches = NSComboBox()
-    private let resetRemote = NSButton(radioButtonWithTitle: "Reset local branch with the name", target: nil, action: nil)
-    private let customRemote = NSButton(radioButtonWithTitle: "Create local branch with custom name", target: nil, action: nil)
-    private let detachedRemote = NSButton(radioButtonWithTitle: "Checkout the commit (in detached head)", target: nil, action: nil)
+    private let resetRemote = PixelSnapTolerantButton(radioButtonWithTitle: "Reset local branch with the name", target: nil, action: nil)
+    private let customRemote = PixelSnapTolerantButton(radioButtonWithTitle: "Create local branch with custom name", target: nil, action: nil)
+    private let detachedRemote = PixelSnapTolerantButton(radioButtonWithTitle: "Checkout the commit (in detached head)", target: nil, action: nil)
     private let customName = NSTextField(string: "")
     private let remoteOptions = NSStackView()
     private let changesGroup = NSBox()
-    private let keepChanges = NSButton(radioButtonWithTitle: "Don’t change", target: nil, action: nil)
-    private let mergeChanges = NSButton(radioButtonWithTitle: "Merge", target: nil, action: nil)
-    private let stashChanges = NSButton(radioButtonWithTitle: "Stash", target: nil, action: nil)
-    private let forceChanges = NSButton(radioButtonWithTitle: "Reset", target: nil, action: nil)
-    private let setDefault = NSButton(checkboxWithTitle: "Set as default", target: nil, action: nil)
+    private let keepChanges = PixelSnapTolerantButton(radioButtonWithTitle: "Don’t change", target: nil, action: nil)
+    private let mergeChanges = PixelSnapTolerantButton(radioButtonWithTitle: "Merge", target: nil, action: nil)
+    private let stashChanges = PixelSnapTolerantButton(radioButtonWithTitle: "Stash", target: nil, action: nil)
+    private let forceChanges = PixelSnapTolerantButton(radioButtonWithTitle: "Reset", target: nil, action: nil)
+    private let setDefault = PixelSnapTolerantButton(checkboxWithTitle: "Set as default", target: nil, action: nil)
     private let checkoutButton = NSButton(title: "Checkout", target: nil, action: nil)
     private let validation = NSTextField(labelWithString: "")
     private let aheadBehind = NSTextField(labelWithString: "")
@@ -567,7 +575,7 @@ private final class CheckoutRevisionViewController: BranchFormViewController<Rep
     private let source: any RepositoryCheckoutBranchDataSource
     private let updateSubmodules: Bool
     private let revision: CommitPickerSmallControl
-    private let force = NSButton(checkboxWithTitle: "Force (reset local changes)", target: nil, action: nil)
+    private let force = PixelSnapTolerantButton(checkboxWithTitle: "Force (reset local changes)", target: nil, action: nil)
     private let checkout = NSButton(title: "Checkout", target: nil, action: nil)
     private let validation = NSTextField(labelWithString: "")
 
@@ -672,9 +680,9 @@ private final class CreateBranchViewController: BranchFormViewController<Reposit
     private let name: NSTextField
     private let source: CommitPickerSmallControl
     private let sourceCaption = NSTextField(labelWithString: "Create branch at this revision:")
-    private let checkout = NSButton(checkboxWithTitle: "Checkout after create", target: nil, action: nil)
-    private let orphan = NSButton(checkboxWithTitle: "Create orphan", target: nil, action: nil)
-    private let clear = NSButton(checkboxWithTitle: "Clear working directory and index", target: nil, action: nil)
+    private let checkout = PixelSnapTolerantButton(checkboxWithTitle: "Checkout after create", target: nil, action: nil)
+    private let orphan = PixelSnapTolerantButton(checkboxWithTitle: "Create orphan", target: nil, action: nil)
+    private let clear = PixelSnapTolerantButton(checkboxWithTitle: "Clear working directory and index", target: nil, action: nil)
     private let create = NSButton(title: "Create branch", target: nil, action: nil)
     private let validation = NSTextField(labelWithString: "")
     private let summary = CommitSummaryView()
@@ -1002,7 +1010,7 @@ final class MultipleBranchSelectionViewController:
     func numberOfRows(in tableView: NSTableView) -> Int { branches.count }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        let button = NSButton(
+        let button = PixelSnapTolerantButton(
             checkboxWithTitle: branches[row].name + (branches[row].isCurrent ? " (current)" : ""),
             target: self,
             action: #selector(toggle(_:))

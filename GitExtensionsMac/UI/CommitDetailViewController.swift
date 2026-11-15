@@ -99,6 +99,7 @@ final class CommitDetailViewController: NSViewController, NSTextViewDelegate {
         scrollView.hasVerticalScroller = true
         scrollView.hasHorizontalScroller = false
         scrollView.borderType = .noBorder
+        ContentZoomController.shared.register(scrollView)
         view = scrollView
         stack.isHidden = true
     }

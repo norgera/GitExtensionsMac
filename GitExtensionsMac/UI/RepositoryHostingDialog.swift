@@ -296,7 +296,7 @@ private final class HostingProcessViewController: NSViewController, NSWindowDele
     private let progress = NSProgressIndicator()
     private let status = NSTextField(labelWithString: "Running…")
     private let outputView = NSTextView()
-    private let keepOpen = NSButton(checkboxWithTitle: "Keep dialog open", target: nil, action: nil)
+    private let keepOpen = PixelSnapTolerantButton(checkboxWithTitle: "Keep dialog open", target: nil, action: nil)
     private let abortButton = NSButton(title: "Abort", target: nil, action: nil)
     private let closeButton = NSButton(title: "OK", target: nil, action: nil)
     let processInput = ProcessInputController()

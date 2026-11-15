@@ -115,7 +115,7 @@ enum ApplicationShellDialogs {
     }
 
     private static func checkBox(_ title: String, _ value: Bool) -> NSButton {
-        let button = NSButton(checkboxWithTitle: title, target: nil, action: nil)
+        let button = PixelSnapTolerantButton(checkboxWithTitle: title, target: nil, action: nil)
         button.state = value ? .on : .off
         return button
     }
@@ -166,9 +166,9 @@ private final class NetworkDialogViewController: NSViewController, NSWindowDeleg
     private let helpToggle = NetworkHelpToggleButton()
     private var helpWidthConstraint: NSLayoutConstraint?
     private var isHelpExpanded = true
-    private let mergeMode = NSButton(radioButtonWithTitle: "Merge remote branch into current branch", target: nil, action: nil)
-    private let rebaseMode = NSButton(radioButtonWithTitle: "Rebase current branch on top of remote branch, creates linear history (use with caution)", target: nil, action: nil)
-    private let fetchMode = NSButton(radioButtonWithTitle: "Do not merge, only fetch remote changes", target: nil, action: nil)
+    private let mergeMode = PixelSnapTolerantButton(radioButtonWithTitle: "Merge remote branch into current branch", target: nil, action: nil)
+    private let rebaseMode = PixelSnapTolerantButton(radioButtonWithTitle: "Rebase current branch on top of remote branch, creates linear history (use with caution)", target: nil, action: nil)
+    private let fetchMode = PixelSnapTolerantButton(radioButtonWithTitle: "Do not merge, only fetch remote changes", target: nil, action: nil)
 
     init(
         kind: NetworkOperationKind,
@@ -320,9 +320,9 @@ private final class NetworkDialogViewController: NSViewController, NSWindowDeleg
         let url = NSTextField(string: context.remotes.first?.fetchURL ?? "")
         remoteURLField = url
         url.isEnabled = false
-        let remoteChoice = NSButton(radioButtonWithTitle: "Remote", target: nil, action: nil)
+        let remoteChoice = PixelSnapTolerantButton(radioButtonWithTitle: "Remote", target: nil, action: nil)
         remoteChoice.state = .on
-        let urlChoice = NSButton(radioButtonWithTitle: "URL", target: nil, action: nil)
+        let urlChoice = PixelSnapTolerantButton(radioButtonWithTitle: "URL", target: nil, action: nil)
         let manage = NSButton(title: "Manage remotes", target: self, action: #selector(manageRemotes))
         manage.image = AppKitFactory.resourceImage("Remotes", accessibilityDescription: "Manage remotes")
         manage.imagePosition = .imageLeading
@@ -362,16 +362,16 @@ private final class NetworkDialogViewController: NSViewController, NSWindowDeleg
         if kind == .fetch { fetchMode.state = .on } else { mergeMode.state = .on }
         let mergeOptions = vertical([mergeMode, rebaseMode, fetchMode], spacing: 6)
 
-        let reachable = NSButton(radioButtonWithTitle: "Follow tagopt, if not specified, fetch tags reachable from remote HEAD", target: nil, action: nil)
+        let reachable = PixelSnapTolerantButton(radioButtonWithTitle: "Follow tagopt, if not specified, fetch tags reachable from remote HEAD", target: nil, action: nil)
         reachable.state = .on
         reachableTagsButton = reachable
-        let noTags = NSButton(radioButtonWithTitle: "Fetch no tag", target: nil, action: nil)
-        let allTags = NSButton(radioButtonWithTitle: "Fetch all tags", target: nil, action: nil)
+        let noTags = PixelSnapTolerantButton(radioButtonWithTitle: "Fetch no tag", target: nil, action: nil)
+        let allTags = PixelSnapTolerantButton(radioButtonWithTitle: "Fetch all tags", target: nil, action: nil)
         allTagsButton = allTags
         let tagOptions = vertical([reachable, noTags, allTags], spacing: 6)
 
-        let prune = NSButton(checkboxWithTitle: "Prune remote branches", target: nil, action: nil)
-        let pruneTags = NSButton(checkboxWithTitle: "Prune remote branches and tags", target: nil, action: nil)
+        let prune = PixelSnapTolerantButton(checkboxWithTitle: "Prune remote branches", target: nil, action: nil)
+        let pruneTags = PixelSnapTolerantButton(checkboxWithTitle: "Prune remote branches and tags", target: nil, action: nil)
         pruneButton = prune
         pruneTagsButton = pruneTags
         let stack = vertical([
@@ -401,10 +401,10 @@ private final class NetworkDialogViewController: NSViewController, NSWindowDeleg
         grid.column(at: 0).width = 120
         grid.rowSpacing = 8
         grid.columnSpacing = 8
-        let forceLease = NSButton(checkboxWithTitle: "Force with lease", target: nil, action: nil)
-        let force = NSButton(checkboxWithTitle: "Force", target: nil, action: nil)
-        let tags = NSButton(checkboxWithTitle: "Push tags", target: nil, action: nil)
-        let allBranches = NSButton(checkboxWithTitle: "Push all branches", target: nil, action: nil)
+        let forceLease = PixelSnapTolerantButton(checkboxWithTitle: "Force with lease", target: nil, action: nil)
+        let force = PixelSnapTolerantButton(checkboxWithTitle: "Force", target: nil, action: nil)
+        let tags = PixelSnapTolerantButton(checkboxWithTitle: "Push tags", target: nil, action: nil)
+        let allBranches = PixelSnapTolerantButton(checkboxWithTitle: "Push all branches", target: nil, action: nil)
         let stack = vertical([group("Push to", grid), group("Options", vertical([forceLease, force, tags, allBranches], spacing: 7))], spacing: 10)
         stack.edgeInsets = NSEdgeInsets(top: 3, left: 3, bottom: 10, right: 10)
         stack.widthAnchor.constraint(greaterThanOrEqualToConstant: 450).isActive = true
@@ -414,7 +414,7 @@ private final class NetworkDialogViewController: NSViewController, NSWindowDeleg
     private func makeFooter() -> NSView {
         let conflicts = disabledButton("Solve conflicts")
         let stash = disabledButton("Stash changes")
-        let autoStash = NSButton(checkboxWithTitle: "Auto stash", target: nil, action: nil)
+        let autoStash = PixelSnapTolerantButton(checkboxWithTitle: "Auto stash", target: nil, action: nil)
         let status = NSTextField(labelWithString: "Network execution is not implemented")
         status.textColor = .secondaryLabelColor
         status.font = AppSettingsStore.shared.applicationFont(size: 10.5)
@@ -1726,7 +1726,7 @@ final class SettingsViewController: NSViewController, NSOutlineViewDataSource, N
     }
 
     private func disabledToggle(_ title: String, _ value: Bool) -> NSButton {
-        let button = NSButton(checkboxWithTitle: title, target: nil, action: nil)
+        let button = PixelSnapTolerantButton(checkboxWithTitle: title, target: nil, action: nil)
         button.state = value ? .on : .off
         button.isEnabled = false
         button.toolTip = "Not implemented yet"
@@ -3073,7 +3073,7 @@ final class SettingsSourceHeader: NSStackView {
         label.alignment = .left
         var units: [NSView] = []
         for (index, option) in options.enumerated() {
-            let radio = NSButton(radioButtonWithTitle: option.title, target: self, action: #selector(radioClicked(_:)))
+            let radio = PixelSnapTolerantButton(radioButtonWithTitle: option.title, target: self, action: #selector(radioClicked(_:)))
             radio.setAccessibilityIdentifier("SettingsSource.\(option.id)")
             radios.append(radio)
             guard index > 0 else { units.append(radio); continue }
@@ -3152,7 +3152,7 @@ final class SettingsRadioGroup: NSBox {
         stack.alignment = .leading
         stack.spacing = 6
         for option in options {
-            let button = NSButton(radioButtonWithTitle: option.title, target: self, action: #selector(select(_:)))
+            let button = PixelSnapTolerantButton(radioButtonWithTitle: option.title, target: self, action: #selector(select(_:)))
             button.state = option.value == selected ? .on : .off
             buttons.append(button)
             stack.addArrangedSubview(button)

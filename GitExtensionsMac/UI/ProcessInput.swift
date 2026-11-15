@@ -18,7 +18,7 @@ final class ProcessInputController: NSObject, NSTextFieldDelegate {
     static let sendTitle = "Send input"
     static let revealToolTip = "Show or hide the input"
 
-    let toggle = NSButton(checkboxWithTitle: ProcessInputController.toggleTitle, target: nil, action: nil)
+    let toggle = PixelSnapTolerantButton(checkboxWithTitle: ProcessInputController.toggleTitle, target: nil, action: nil)
     let inputRow = NSStackView()
     let secureField = NSSecureTextField()
     let plainField = NSTextField()

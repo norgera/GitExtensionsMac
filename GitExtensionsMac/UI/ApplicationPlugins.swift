@@ -392,7 +392,7 @@ final class PluginSettingsViewController: NSViewController {
                 case .information:
                     rows.addArrangedSubview(NSTextField(wrappingLabelWithString: setting.caption)); continue
                 case .boolean:
-                    let checkbox = NSButton(checkboxWithTitle: "", target: nil, action: nil)
+                    let checkbox = PixelSnapTolerantButton(checkboxWithTitle: "", target: nil, action: nil)
                     checkbox.allowsMixedState = true
                     checkbox.state = value == nil ? .mixed : value?.lowercased() == "true" ? .on : .off; control = checkbox
                 case .choice(let values):

@@ -1769,9 +1769,9 @@ final class FindInCommitFilesGitGrepWindowController: NSWindowController, NSWind
     private let closed: () -> Void
     private let findBox = NSComboBox()
     private let optionsField = NSTextField()
-    private let matchCase = NSButton(checkboxWithTitle: "Match case", target: nil, action: nil)
-    private let wholeWord = NSButton(checkboxWithTitle: "Match whole word", target: nil, action: nil)
-    private let showSearchBox = NSButton(checkboxWithTitle: "Show 'Find in commit files using git-grep'", target: nil, action: nil)
+    private let matchCase = PixelSnapTolerantButton(checkboxWithTitle: "Match case", target: nil, action: nil)
+    private let wholeWord = PixelSnapTolerantButton(checkboxWithTitle: "Match whole word", target: nil, action: nil)
+    private let showSearchBox = PixelSnapTolerantButton(checkboxWithTitle: "Show 'Find in commit files using git-grep'", target: nil, action: nil)
     private var hasLoaded = false
 
     init(locate: @escaping (String) -> Void, toggle: @escaping (Bool) -> Void, closed: @escaping () -> Void) {

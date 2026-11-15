@@ -69,12 +69,12 @@ private final class CherryPickViewController: NSViewController, NSTableViewDataS
         self.chooseCommit = chooseCommit
         self.commit = commit
         self.history = history.filter { !$0.isArtificial }
-        automaticallyCommit = NSButton(
+        automaticallyCommit = PixelSnapTolerantButton(
             checkboxWithTitle: "Automatically create a commit",
             target: nil,
             action: nil
         )
-        addReference = NSButton(
+        addReference = PixelSnapTolerantButton(
             checkboxWithTitle: "Add commit reference to commit message",
             target: nil,
             action: nil

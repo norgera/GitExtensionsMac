@@ -133,7 +133,7 @@ final class CommandLogWindowController: NSWindowController, NSWindowDelegate, NS
         tabs.heightAnchor.constraint(greaterThanOrEqualToConstant: 150).isActive = true
         let controls = NSStackView()
         for (title, action) in [("Always on top", #selector(top(_:))), ("Word wrap", #selector(wrap(_:))), ("Capture call stacks", #selector(capture(_:)))] {
-            let button = NSButton(checkboxWithTitle: title, target: self, action: action)
+            let button = PixelSnapTolerantButton(checkboxWithTitle: title, target: self, action: action)
             button.state = title == "Word wrap" || (title == "Capture call stacks" && CommandLog.shared.capturesCallStacks) ? .on : .off
             controls.addArrangedSubview(button)
         }

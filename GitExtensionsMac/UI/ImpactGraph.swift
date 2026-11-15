@@ -377,7 +377,7 @@ final class ImpactWindowController: NSWindowController, NSWindowDelegate {
     let graph = ImpactGraphView()
     let authorLabel = NSTextField(labelWithString: "Author")
     let authorColor = NSView()
-    let submodules = NSButton(checkboxWithTitle: "Including submodules", target: nil, action: nil)
+    let submodules = PixelSnapTolerantButton(checkboxWithTitle: "Including submodules", target: nil, action: nil)
     let errorLabel = NSTextField(labelWithString: "")
     let progress = NSProgressIndicator()
     private let scroll = NSScrollView()
@@ -433,6 +433,7 @@ final class ImpactWindowController: NSWindowController, NSWindowDelegate {
         scroll.documentView = graph
         scroll.drawsBackground = true
         scroll.backgroundColor = .textBackgroundColor
+        ContentZoomController.shared.register(scroll)
         for view in [top, scroll] { view.translatesAutoresizingMaskIntoConstraints = false; content.addSubview(view) }
         for view in [authorColor, authorLabel, errorLabel, progress, submodules] {
             view.translatesAutoresizingMaskIntoConstraints = false

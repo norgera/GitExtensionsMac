@@ -13,6 +13,7 @@ package final class GitExtensionsApplicationDelegate: NSObject, NSApplicationDel
         super.init()
 
         UserDefaults.standard.register(defaults: ["ApplePersistenceIgnoreState": true, "NSTreatUnknownArgumentsAsOpen": "NO"])
+        ZoomedToolTipController.suppressSystemToolTips()
     }
 
     package func applicationShouldSaveApplicationState(_ app: NSApplication, coder: NSCoder) -> Bool { false }
@@ -20,7 +21,12 @@ package final class GitExtensionsApplicationDelegate: NSObject, NSApplicationDel
 
     package func applicationWillFinishLaunching(_ notification: Notification) {
         NSWindow.allowsAutomaticWindowTabbing = false
-        MainActor.assumeIsolated { ApplicationLifecycle.terminatesWithMainWindow = true }
+        MainActor.assumeIsolated {
+            ApplicationLifecycle.terminatesWithMainWindow = true
+            ContentZoomController.installKeyboardShortcuts()
+            ZoomedToolTipController.shared.install()
+            ZoomedMenuController.shared.install()
+        }
     }
 
     package func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
@@ -78,6 +84,27 @@ package struct GitExtensionsAppScene: Scene {
         .commands {
             GitExtensionsMenuCommands()
         }
+    }
+}
+
+/// View-menu zoom commands. They live in their own view so SwiftUI refreshes
+/// their enabled state and the percentage label whenever the zoom changes;
+/// state observed directly by a `Commands` body is not re-applied to the menu,
+/// which left Actual Size (⌘0) disabled after zooming.
+private struct ZoomMenuItems: View {
+    @ObservedObject private var zoom = ContentZoomController.shared
+
+    var body: some View {
+        Button("Zoom In") { zoom.zoomIn() }
+            .keyboardShortcut("+", modifiers: .command)
+            .disabled(!zoom.canZoomIn)
+        Button("Zoom Out") { zoom.zoomOut() }
+            .keyboardShortcut("-", modifiers: .command)
+            .disabled(!zoom.canZoomOut)
+        Button("Actual Size") { zoom.resetZoom() }
+            .keyboardShortcut("0", modifiers: .command)
+            .disabled(zoom.isActualSize)
+        Text("Zoom: \(zoom.percent)%")
     }
 }
 
@@ -237,6 +264,8 @@ private struct GitExtensionsMenuCommands: Commands {
                     }
                 }
             }
+            Divider()
+            ZoomMenuItems()
         }
         CommandMenu("Navigate") {
             revisionGridItems(RevisionGridMenuModel.navigate(availability.gridMenuState ?? .init()))

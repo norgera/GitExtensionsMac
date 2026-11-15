@@ -104,10 +104,10 @@ private final class CloneRepositoryViewController: NSViewController, NSWindowDel
     private let destinationField = NSComboBox()
     private let subdirectoryField = NSTextField()
     private let branchField = NSComboBox()
-    private let recursive = NSButton(checkboxWithTitle: "Initialize all submodules", target: nil, action: nil)
-    private let fullHistory = NSButton(checkboxWithTitle: "Download full history", target: nil, action: nil)
-    private let personal = NSButton(radioButtonWithTitle: "Personal repository", target: nil, action: nil)
-    private let bare = NSButton(radioButtonWithTitle: "Public repository, no working directory (--bare)", target: nil, action: nil)
+    private let recursive = PixelSnapTolerantButton(checkboxWithTitle: "Initialize all submodules", target: nil, action: nil)
+    private let fullHistory = PixelSnapTolerantButton(checkboxWithTitle: "Download full history", target: nil, action: nil)
+    private let personal = PixelSnapTolerantButton(radioButtonWithTitle: "Personal repository", target: nil, action: nil)
+    private let bare = PixelSnapTolerantButton(radioButtonWithTitle: "Public repository, no working directory (--bare)", target: nil, action: nil)
     private let destinationStatus = NSTextField(wrappingLabelWithString: "")
     private let errorLabel = NSTextField(wrappingLabelWithString: "")
     private let cloneButton = NSButton(title: "Clone", target: nil, action: nil)
@@ -394,7 +394,8 @@ private final class CloneRepositoryViewController: NSViewController, NSWindowDel
     }
 
     private func saveGeometry() {
-        guard let size = panel?.contentView?.bounds.size else { return }
+        guard let rawSize = panel?.contentView?.bounds.size else { return }
+        let size = ContentZoomController.shared.unzoomed(rawSize, in: panel)
         var preferences = AppSettingsStore.shared.repositoryCreationPreferences
         preferences.cloneWindowWidth = size.width; preferences.cloneWindowHeight = size.height
         AppSettingsStore.shared.saveRepositoryCreationPreferences(preferences)
@@ -412,8 +413,8 @@ private final class InitializeRepositoryViewController: NSViewController, NSWind
     private let initialDirectory: URL?
     private let onCreated: (RepositoryCreationResult) -> Void
     private let directoryField = NSComboBox()
-    private let personal = NSButton(radioButtonWithTitle: "Personal repository", target: nil, action: nil)
-    private let bare = NSButton(radioButtonWithTitle: "Central repository, no working directory (--bare --shared=all)", target: nil, action: nil)
+    private let personal = PixelSnapTolerantButton(radioButtonWithTitle: "Personal repository", target: nil, action: nil)
+    private let bare = PixelSnapTolerantButton(radioButtonWithTitle: "Central repository, no working directory (--bare --shared=all)", target: nil, action: nil)
     private let errorLabel = NSTextField(wrappingLabelWithString: "")
     private let createButton = NSButton(title: "Create", target: nil, action: nil)
 
@@ -501,7 +502,8 @@ private final class InitializeRepositoryViewController: NSViewController, NSWind
     func windowDidResize(_ notification: Notification) { saveGeometry() }
     private func closePanel() { guard let panel else { return }; saveGeometry(); if let owner = panel.sheetParent { owner.endSheet(panel) } else { panel.close() } }
     private func saveGeometry() {
-        guard let size = panel?.contentView?.bounds.size else { return }
+        guard let rawSize = panel?.contentView?.bounds.size else { return }
+        let size = ContentZoomController.shared.unzoomed(rawSize, in: panel)
         var preferences = AppSettingsStore.shared.repositoryCreationPreferences
         preferences.initWindowWidth = size.width; preferences.initWindowHeight = size.height
         AppSettingsStore.shared.saveRepositoryCreationPreferences(preferences)
@@ -542,7 +544,7 @@ private final class RepositoryCreationProcessViewController: NSViewController, N
     private let progress = NSProgressIndicator()
     private let status = NSTextField(labelWithString: "Waiting…")
     private let outputView = NSTextView()
-    private let keepOpen = NSButton(checkboxWithTitle: "Keep dialog open", target: nil, action: nil)
+    private let keepOpen = PixelSnapTolerantButton(checkboxWithTitle: "Keep dialog open", target: nil, action: nil)
     private let abortButton = NSButton(title: "Abort", target: nil, action: nil)
     private let closeButton = NSButton(title: "OK", target: nil, action: nil)
     let processInput = ProcessInputController()

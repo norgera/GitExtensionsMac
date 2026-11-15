@@ -34,16 +34,16 @@ private final class ArchiveViewController: NSViewController {
     var comparison: Commit?
     private let summary = CommitSummaryView()
     private let comparisonSummary = NSTextField(wrappingLabelWithString: "...")
-    private let zip = NSButton(radioButtonWithTitle: "zip", target: nil, action: nil)
-    private let tar = NSButton(radioButtonWithTitle: "tar", target: nil, action: nil)
-    private let pathFilter = NSButton(checkboxWithTitle: "Archive specific paths only", target: nil, action: nil)
-    private let revisionFilter = NSButton(checkboxWithTitle: "Take the files that have changed from the revision above to this one and archive only those", target: nil, action: nil)
+    private let zip = PixelSnapTolerantButton(radioButtonWithTitle: "zip", target: nil, action: nil)
+    private let tar = PixelSnapTolerantButton(radioButtonWithTitle: "tar", target: nil, action: nil)
+    private let pathFilter = PixelSnapTolerantButton(checkboxWithTitle: "Archive specific paths only", target: nil, action: nil)
+    private let revisionFilter = PixelSnapTolerantButton(checkboxWithTitle: "Take the files that have changed from the revision above to this one and archive only those", target: nil, action: nil)
     private let paths = NSTextView()
     private let chooseComparison = NSButton(image: AppKitFactory.resourceImage("SelectRevision", accessibilityDescription: "Choose revision to compare with first") ?? NSImage(), target: nil, action: nil)
     private let chooseTarget = NSButton(image: AppKitFactory.resourceImage("SelectRevision", accessibilityDescription: "Choose another revision") ?? NSImage(), target: nil, action: nil)
     private let save = LeadingImageButton(title: "Save as...", target: nil, action: nil)
     private let close = NSButton(title: "Close", target: nil, action: nil)
-    private let keepOpen = NSButton(checkboxWithTitle: "Keep dialog open", target: nil, action: nil)
+    private let keepOpen = PixelSnapTolerantButton(checkboxWithTitle: "Keep dialog open", target: nil, action: nil)
     private let output = NSTextView()
     private var operation: Task<Void, Never>?
     var isBusy: Bool { operation != nil }

@@ -81,7 +81,7 @@ enum ResetDialogs {
         alert.informativeText = "Update and initialize submodules after reset?"
         alert.addButton(withTitle: "Update")
         alert.addButton(withTitle: "Not now")
-        let remember = NSButton(checkboxWithTitle: "Remember my answer", target: nil, action: nil)
+        let remember = PixelSnapTolerantButton(checkboxWithTitle: "Remember my answer", target: nil, action: nil)
         alert.accessoryView = remember
         let update = await alert.beginSheetModal(for: owner) == .alertFirstButtonReturn
         if remember.state == .on { AppSettingsStore.shared.rememberUpdateSubmodulesOnCheckout(update) }
@@ -98,7 +98,7 @@ enum ResetDialogs {
         alert.alertStyle = .critical
         alert.messageText = "Reset changes"
         alert.informativeText = (message ?? "Are you sure you want to reset your changes?") + "\n\nThis will delete any uncommitted work."
-        let deleteNew = NSButton(checkboxWithTitle: "Also delete new files and/or directories", target: nil, action: nil)
+        let deleteNew = PixelSnapTolerantButton(checkboxWithTitle: "Also delete new files and/or directories", target: nil, action: nil)
         if !hasTrackedChanges {
             deleteNew.state = .on
             deleteNew.isEnabled = false
@@ -129,11 +129,11 @@ private final class ResetCurrentBranchViewController: NSViewController, NSWindow
     private let initialMode: RepositoryResetMode
     private let completion: (RepositoryResetMode?) -> Void
     private let summary = CommitSummaryView()
-    private let soft = NSButton(radioButtonWithTitle: "Soft: leave working directory and index untouched", target: nil, action: nil)
-    private let mixed = NSButton(radioButtonWithTitle: "Mixed: leave working directory untouched, reset index", target: nil, action: nil)
-    private let keep = NSButton(radioButtonWithTitle: "Keep: update working directory to the commit (abort if there are local changes), reset index", target: nil, action: nil)
-    private let merge = NSButton(radioButtonWithTitle: "Merge: update working directory to the commit and keep local changes (abort on conflicts), reset index", target: nil, action: nil)
-    private let hard = NSButton(radioButtonWithTitle: "Hard: reset working directory and index (discard ALL local changes)", target: nil, action: nil)
+    private let soft = PixelSnapTolerantButton(radioButtonWithTitle: "Soft: leave working directory and index untouched", target: nil, action: nil)
+    private let mixed = PixelSnapTolerantButton(radioButtonWithTitle: "Mixed: leave working directory untouched, reset index", target: nil, action: nil)
+    private let keep = PixelSnapTolerantButton(radioButtonWithTitle: "Keep: update working directory to the commit (abort if there are local changes), reset index", target: nil, action: nil)
+    private let merge = PixelSnapTolerantButton(radioButtonWithTitle: "Merge: update working directory to the commit and keep local changes (abort on conflicts), reset index", target: nil, action: nil)
+    private let hard = PixelSnapTolerantButton(radioButtonWithTitle: "Hard: reset working directory and index (discard ALL local changes)", target: nil, action: nil)
     private var completed = false
 
     init(branchName: String?, target: Commit, initialMode: RepositoryResetMode, completion: @escaping (RepositoryResetMode?) -> Void) {
@@ -293,8 +293,8 @@ private final class ResetAnotherBranchViewController: NSViewController, NSWindow
     private var isDropdownOpen = false
     private var pendingDropdownSelection: (String, NSRange)?
     private let summary = CommitSummaryView()
-    private let checkout = NSButton(checkboxWithTitle: "Checkout branch after reset", target: nil, action: nil)
-    private let force = NSButton(checkboxWithTitle: "Force reset for a non-fast-forward reset", target: nil, action: nil)
+    private let checkout = PixelSnapTolerantButton(checkboxWithTitle: "Checkout branch after reset", target: nil, action: nil)
+    private let force = PixelSnapTolerantButton(checkboxWithTitle: "Force reset for a non-fast-forward reset", target: nil, action: nil)
     private let validation = NSTextField(wrappingLabelWithString: "")
     private let reset = NSButton(title: "OK", target: nil, action: nil)
     private var validationTask: Task<Void, Never>?

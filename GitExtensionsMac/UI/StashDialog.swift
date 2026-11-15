@@ -92,7 +92,7 @@ private final class StashViewController: RetainingSplitViewController, NSWindowD
     private let selector = NSPopUpButton()
     private let messageView = NSTextView()
     private let includeUntracked = WrappingCheckbox(checkboxWithTitle: "Include untracked files", target: nil, action: nil)
-    private let keepIndex = NSButton(checkboxWithTitle: "Keep index", target: nil, action: nil)
+    private let keepIndex = PixelSnapTolerantButton(checkboxWithTitle: "Keep index", target: nil, action: nil)
     private let stashAllButton = NSButton(title: "Stash all changes", target: nil, action: nil)
     private let stashSelectedButton = NSButton(title: "Stash selected changes", target: nil, action: nil)
     private let dropButton = NSButton(title: "Drop Selected Stash", target: nil, action: nil)
@@ -700,8 +700,9 @@ private final class StashViewController: RetainingSplitViewController, NSWindowD
         var preferences = AppSettingsStore.shared.stashPreferences
         preferences.keepIndex = keepIndex.state == .on
         preferences.includeUntracked = includeUntracked.state == .on
-        preferences.windowWidth = panel.contentLayoutRect.width
-        preferences.windowHeight = panel.contentLayoutRect.height
+        let geometry = ContentZoomController.shared.unzoomed(panel.contentLayoutRect.size, in: panel)
+        preferences.windowWidth = geometry.width
+        preferences.windowHeight = geometry.height
         if let leading = splitView.arrangedSubviews.first {
             preferences.dividerPosition = leading.frame.width
         }

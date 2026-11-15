@@ -46,7 +46,7 @@ final class CommandLineAddFilesWindow: NSWindowController {
         let source: any RepositoryAddingFilesDataSource
         let changed: () -> Void
         let filter = NSTextField()
-        let force = NSButton(checkboxWithTitle: "Force", target: nil, action: nil)
+        let force = PixelSnapTolerantButton(checkboxWithTitle: "Force", target: nil, action: nil)
         var task: Task<Void, Never>?
         init(source: any RepositoryAddingFilesDataSource, paths: [String], changed: @escaping () -> Void) {
             self.source = source; self.changed = changed
