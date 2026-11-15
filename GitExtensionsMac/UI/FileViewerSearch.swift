@@ -128,8 +128,8 @@ final class FileViewerFindPanel: NSWindowController {
     var loadNext: ((FileViewerSearchState.Direction) async -> String?)?
     private var searchTask: Task<Void, Never>?
     private let query = NSSearchField()
-    private let matchCase = NSButton(checkboxWithTitle: "Match case", target: nil, action: nil)
-    private let wholeWord = NSButton(checkboxWithTitle: "Match whole word", target: nil, action: nil)
+    private let matchCase = PixelSnapTolerantButton(checkboxWithTitle: "Match case", target: nil, action: nil)
+    private let wholeWord = PixelSnapTolerantButton(checkboxWithTitle: "Match whole word", target: nil, action: nil)
 
     init(state: FileViewerSearchState, caret: @escaping () -> Int, changed: @escaping () -> Void) {
         self.state = state

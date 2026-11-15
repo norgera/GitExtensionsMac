@@ -65,6 +65,9 @@ final class ApplicationHostViewController: NSViewController {
     private let launch: RepositoryBrowserLaunch
     private let store = AppSettingsStore.shared
     private let container = NSView()
+    /// Hosts the whole window content so `ContentZoomController` can lay it out
+    /// at viewport/level and magnify it.
+    let contentScrollView = NSScrollView()
     private(set) var activeController: NSViewController?
     private var commandObserver: NSObjectProtocol?
     private var windowCloseObserver: NSObjectProtocol?
@@ -90,14 +93,25 @@ final class ApplicationHostViewController: NSViewController {
     }
 
     override func loadView() {
-        container.translatesAutoresizingMaskIntoConstraints = false
+        // The whole window content is hosted in a scroll view. Zooming lays the
+        // document view out at viewport/level and magnifies it, which reflows
+        // the entire UI instead of only scaling pixels.
+        container.translatesAutoresizingMaskIntoConstraints = true
+        container.frame = NSRect(x: 0, y: 0, width: 800, height: 600)
+        contentScrollView.drawsBackground = false
+        contentScrollView.borderType = .noBorder
+        contentScrollView.hasVerticalScroller = false
+        contentScrollView.hasHorizontalScroller = false
+        contentScrollView.allowsMagnification = true
+        contentScrollView.documentView = container
+        contentScrollView.translatesAutoresizingMaskIntoConstraints = false
         let root = NSView()
-        root.addSubview(container)
+        root.addSubview(contentScrollView)
         NSLayoutConstraint.activate([
-            container.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            container.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            container.topAnchor.constraint(equalTo: root.topAnchor),
-            container.bottomAnchor.constraint(equalTo: root.bottomAnchor)
+            contentScrollView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            contentScrollView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            contentScrollView.topAnchor.constraint(equalTo: root.topAnchor),
+            contentScrollView.bottomAnchor.constraint(equalTo: root.bottomAnchor)
         ])
         view = root
         commandObserver = NotificationCenter.default.addObserver(
@@ -125,8 +139,18 @@ final class ApplicationHostViewController: NSViewController {
         }
     }
 
+    override func viewWillAppear() {
+        super.viewWillAppear()
+        // Register before the window becomes key so the repository window is
+        // never mistaken for a dialog and wrapped twice.
+        ContentZoomController.shared.registerContentScrollView(contentScrollView)
+    }
+
     override func viewDidAppear() {
         super.viewDidAppear()
+        // The hosting window is the main repository window: zoom its whole
+        // content, not just the panes.
+        ContentZoomController.shared.registerContentScrollView(contentScrollView)
         if !didDispatchCommandLine {
             switch launch {
             case .commandLine(let request):

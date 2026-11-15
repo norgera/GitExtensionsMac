@@ -116,7 +116,7 @@ final class BuiltInPluginDialog: NSWindowController, NSWindowDelegate, NSTableVi
         inputsChanged()
     }
     private func check(_ key: String, _ caption: String, value: Bool) {
-        let button = NSButton(checkboxWithTitle: caption, target: self, action: #selector(inputsChanged))
+        let button = PixelSnapTolerantButton(checkboxWithTitle: caption, target: self, action: #selector(inputsChanged))
         button.state = value ? .on : .off; checks[key] = button; stack.addArrangedSubview(button)
         if key == "unmerged" { button.action = #selector(unmergedChanged) }
     }
@@ -226,7 +226,7 @@ final class BuiltInPluginDialog: NSWindowController, NSWindowDelegate, NSTableVi
                 value.widthAnchor.constraint(greaterThanOrEqualToConstant: 180).isActive = true
                 fields[key] = value
             }
-            let scope = NSButton(checkboxWithTitle: "Apply globally", target: self, action: #selector(inputsChanged))
+            let scope = PixelSnapTolerantButton(checkboxWithTitle: "Apply globally", target: self, action: #selector(inputsChanged))
             scope.state = .on
             checks["global"] = scope
             let labels = [NSTextField(labelWithString: "Local http.proxy:"), NSTextField(labelWithString: "Global http.proxy:")]
@@ -608,7 +608,7 @@ final class BuiltInPluginDialog: NSWindowController, NSWindowDelegate, NSTableVi
         let key = tableColumn?.identifier.rawValue ?? ""
         let id = plugin.kind == .largeFiles ? objects[row].id.string : branches[row].name
         if key == "delete" {
-            let check = NSButton(checkboxWithTitle: "", target: self, action: #selector(toggleRow(_:)))
+            let check = PixelSnapTolerantButton(checkboxWithTitle: "", target: self, action: #selector(toggleRow(_:)))
             check.tag = row; check.state = selected.contains(id) ? .on : .off; check.isEnabled = !busy; return check
         }
         let value: String

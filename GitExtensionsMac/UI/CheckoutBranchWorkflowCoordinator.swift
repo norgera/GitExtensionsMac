@@ -490,7 +490,7 @@ final class CheckoutBranchWorkflowCoordinator {
         alert.addButton(withTitle: "Apply")
         alert.addButton(withTitle: "Keep stash")
         alert.addButton(withTitle: "Cancel")
-        let remember = NSButton(checkboxWithTitle: "Remember my answer", target: nil, action: nil)
+        let remember = PixelSnapTolerantButton(checkboxWithTitle: "Remember my answer", target: nil, action: nil)
         alert.accessoryView = remember
         let answer = StashReapplyAnswer(await response(alert, owner: owner))
         if let remembered = answer.rememberedChoice(remember: remember.state == .on) {
@@ -509,7 +509,7 @@ final class CheckoutBranchWorkflowCoordinator {
         alert.informativeText = "Since this repository has submodules, it's necessary to update them on every checkout.\n\nThis will just checkout on the submodule the commit determined by the superproject."
         alert.addButton(withTitle: "Yes")
         alert.addButton(withTitle: "No")
-        let remember = NSButton(checkboxWithTitle: "Remember choice", target: nil, action: nil)
+        let remember = PixelSnapTolerantButton(checkboxWithTitle: "Remember choice", target: nil, action: nil)
         alert.accessoryView = remember
         let update = await response(alert, owner: owner) == .alertFirstButtonReturn
         if remember.state == .on { AppSettingsStore.shared.rememberUpdateSubmodulesOnCheckout(update) }
@@ -539,7 +539,7 @@ final class CheckoutBranchWorkflowCoordinator {
         alert.informativeText = "The selected branches have not been merged into HEAD. Proceed?\n\n\(names.joined(separator: "\n"))\n\nThe commits may still be recoverable from the reflog."
         alert.addButton(withTitle: "No")
         alert.addButton(withTitle: "Yes")
-        let dontAsk = NSButton(checkboxWithTitle: "Do not ask again", target: nil, action: nil)
+        let dontAsk = PixelSnapTolerantButton(checkboxWithTitle: "Do not ask again", target: nil, action: nil)
         alert.accessoryView = dontAsk
         let confirmed = await response(alert, owner: owner) == .alertSecondButtonReturn
         if confirmed, dontAsk.state == .on {

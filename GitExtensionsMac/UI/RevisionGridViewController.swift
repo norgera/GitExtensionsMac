@@ -121,6 +121,7 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
         scrollView.backgroundColor = .controlBackgroundColor
         scrollView.contentView.postsBoundsChangedNotifications = true
         scrollView.contentView.postsFrameChangedNotifications = true
+        ContentZoomController.shared.register(scrollView)
 
         tableView.headerView = nil
         tableView.rowHeight = BrowserMetrics.revisionRowHeight
@@ -841,9 +842,21 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
         fitMessageColumn()
     }
 
+    private var isFillingMessageColumn = false
+
     private func fill(_ column: NSTableColumn) {
-        guard let width = fillWidth(column) else { return }
-        if abs(column.width - width) >= 0.5 { column.width = width }
+        // Resizing the column changes the table frame, which posts the very
+        // notifications that call back here; never re-enter.
+        guard !isFillingMessageColumn, let width = fillWidth(column) else { return }
+        // A zoomed (magnified) grid reports fractional clip widths, so the
+        // floored fill width can alternate by one point on every pass. Always
+        // shrink so the grid never overflows, but only grow by more than a
+        // point, which ends the back-and-forth instead of resizing forever.
+        let overflow = column.width - width
+        guard overflow >= 0.5 || overflow < -1 else { return }
+        isFillingMessageColumn = true
+        defer { isFillingMessageColumn = false }
+        column.width = width
     }
 
     private func fillWidth(_ message: NSTableColumn) -> CGFloat? {
@@ -855,7 +868,7 @@ final class RevisionGridViewController: NSViewController, NSTableViewDataSource,
         }
         let inset = max(0, rects.first?.rect.minX ?? 0)
         let padding = rects.reduce(0) { $0 + max(0, $1.rect.width - $1.column.width) }
-        return max(message.minWidth, floor(clipWidth - others - inset * 2 - padding - tableView.intercellSpacing.width * CGFloat(visible.count)))
+        return max(message.minWidth, floor(clipWidth - others - inset * 2 - padding - tableView.intercellSpacing.width * CGFloat(visible.count) + 0.01))
     }
     var messageColumnWidth: CGFloat { tableView.tableColumn(withIdentifier: .init("Message"))?.width ?? 0 }
 
@@ -1960,7 +1973,7 @@ final class RevisionTableView: NSTableView {
     }
 }
 
-final class CommitGraphCellView: NSTableCellView {
+final class CommitGraphCellView: NSTableCellView, ZoomedToolTipSource {
     var laneDescription: ((Int) -> String?)?
     private var graphRow: RevisionGraphLayout.Row?
     private var configuration = RevisionGraphLayout.Configuration.gitExtensionsDefault
@@ -1977,6 +1990,13 @@ final class CommitGraphCellView: NSTableCellView {
 
     @objc func view(_ view: NSView, stringForToolTip tag: NSView.ToolTipTag, point: NSPoint, userData: UnsafeMutableRawPointer?) -> String {
         laneDescription?(Int(floor((point.x - 6) / 16))) ?? ""
+    }
+
+    func zoomedToolTip(at point: NSPoint) -> String? {
+        guard let graphRow, point.x >= 6 else { return nil }
+        let lane = Int(floor((point.x - 6) / 16))
+        guard lane < graphRow.laneCount else { return nil }
+        return laneDescription?(lane)
     }
 
     func configure(row: RevisionGraphLayout.Row?, configuration: RevisionGraphLayout.Configuration = .gitExtensionsDefault,

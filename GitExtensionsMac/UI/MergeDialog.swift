@@ -69,20 +69,20 @@ private final class MergeDialogViewController: NSViewController, NSWindowDelegat
 
     private let targetCombo = NSComboBox()
     private let currentBranch = NSTextField(labelWithString: "")
-    private let fastForward = NSButton(radioButtonWithTitle: "Keep a single branch line if possible (fast forward)", target: nil, action: nil)
-    private let noFastForward = NSButton(radioButtonWithTitle: "Always create a new merge commit", target: nil, action: nil)
-    private let noCommit = NSButton(checkboxWithTitle: "Do not commit", target: nil, action: nil)
-    private let advanced = NSButton(checkboxWithTitle: "Show advanced options", target: nil, action: nil)
+    private let fastForward = PixelSnapTolerantButton(radioButtonWithTitle: "Keep a single branch line if possible (fast forward)", target: nil, action: nil)
+    private let noFastForward = PixelSnapTolerantButton(radioButtonWithTitle: "Always create a new merge commit", target: nil, action: nil)
+    private let noCommit = PixelSnapTolerantButton(checkboxWithTitle: "Do not commit", target: nil, action: nil)
+    private let advanced = PixelSnapTolerantButton(checkboxWithTitle: "Show advanced options", target: nil, action: nil)
     private let advancedPanel = NSStackView()
-    private let useStrategy = NSButton(checkboxWithTitle: "Use non-default merge strategy", target: nil, action: nil)
+    private let useStrategy = PixelSnapTolerantButton(checkboxWithTitle: "Use non-default merge strategy", target: nil, action: nil)
     private let strategy = NSComboBox()
     private let strategyHelp = NSButton(title: "Help", target: nil, action: nil)
-    private let squash = NSButton(checkboxWithTitle: "Squash commits", target: nil, action: nil)
-    private let allowUnrelated = NSButton(checkboxWithTitle: "Allow unrelated histories", target: nil, action: nil)
-    private let addLog = NSButton(checkboxWithTitle: "Add log messages", target: nil, action: nil)
+    private let squash = PixelSnapTolerantButton(checkboxWithTitle: "Squash commits", target: nil, action: nil)
+    private let allowUnrelated = PixelSnapTolerantButton(checkboxWithTitle: "Allow unrelated histories", target: nil, action: nil)
+    private let addLog = PixelSnapTolerantButton(checkboxWithTitle: "Add log messages", target: nil, action: nil)
     private let logCount = NSTextField(string: "20")
     private let logStepper = NSStepper()
-    private let specifyMessage = NSButton(checkboxWithTitle: "Specify merge message", target: nil, action: nil)
+    private let specifyMessage = PixelSnapTolerantButton(checkboxWithTitle: "Specify merge message", target: nil, action: nil)
     private let mergeMessage = NSTextView()
     private let mergeButton = NSButton(title: "Merge", target: nil, action: nil)
     private let helpImage = PullHelpImageView()
@@ -727,7 +727,7 @@ private final class MergeTargetSelectionViewController: NSViewController, NSWind
         list.alignment = .leading
         list.spacing = 3
         for (index, choice) in choices.enumerated() {
-            let button = NSButton(checkboxWithTitle: choice.title, target: self, action: #selector(changed(_:)))
+            let button = PixelSnapTolerantButton(checkboxWithTitle: choice.title, target: self, action: #selector(changed(_:)))
             button.tag = index
             button.state = selected.contains(choice.value) ? .on : .off
             list.addArrangedSubview(button)
@@ -832,7 +832,7 @@ private final class MergeProcessViewController: NSViewController, NSWindowDelega
     private let progress = NSProgressIndicator()
     private let status = NSTextField(labelWithString: "Waiting…")
     private let outputView = NSTextView()
-    private let keepOpen = NSButton(checkboxWithTitle: "Keep dialog open", target: nil, action: nil)
+    private let keepOpen = PixelSnapTolerantButton(checkboxWithTitle: "Keep dialog open", target: nil, action: nil)
     private let abortButton = NSButton(title: "Abort", target: nil, action: nil)
     private let closeButton = NSButton(title: "OK", target: nil, action: nil)
     let processInput = ProcessInputController()

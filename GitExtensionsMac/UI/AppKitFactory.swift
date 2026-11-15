@@ -680,6 +680,16 @@ final class GitExtensionsSelectionRowView: NSTableRowView {
     override var isOpaque: Bool { false }
 }
 
+class PixelSnapTolerantButton: NSButton {
+    static let snapAllowance: CGFloat = 1
+
+    override var intrinsicContentSize: NSSize {
+        let size = super.intrinsicContentSize
+        guard size.width != NSView.noIntrinsicMetric, !title.isEmpty else { return size }
+        return NSSize(width: size.width + Self.snapAllowance, height: size.height)
+    }
+}
+
 class LeadingImageButton: NSButton {
     override class var cellClass: AnyClass? {
         get { LeadingImageButtonCell.self }

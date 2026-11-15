@@ -68,8 +68,8 @@ private final class CreateWorktreeViewController: NSViewController, NSTextFieldD
     let context: RepositoryWorktreeContext
     let execute: (RepositoryCreateWorktreeRequest, @escaping GitOutputHandler) async throws -> RepositoryWorktreeResult
     let completion: (String?) -> Void
-    private let existing = NSButton(radioButtonWithTitle: "Checkout an existing branch:", target: nil, action: nil)
-    private let new = NSButton(radioButtonWithTitle: "Create a new branch:\n(from current commit)", target: nil, action: nil)
+    private let existing = PixelSnapTolerantButton(radioButtonWithTitle: "Checkout an existing branch:", target: nil, action: nil)
+    private let new = PixelSnapTolerantButton(radioButtonWithTitle: "Create a new branch:\n(from current commit)", target: nil, action: nil)
     private let branches = NSPopUpButton()
     private let name = NSTextField()
     private let path = NSTextField()

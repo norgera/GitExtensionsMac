@@ -72,6 +72,10 @@
 		63D5DA615AC4DD37BEBD4A9E /* RepositoryStatusTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 73C61055DEB5D71CBE121A9C /* RepositoryStatusTests.swift */; };
 		6B03EEF16BD3977AD726C987 /* CommitSummaryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB7300000000000000000004 /* CommitSummaryView.swift */; };
 		6B3AB257817F754C28186364 /* GitUICommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB9900000000000000000001 /* GitUICommands.swift */; };
+		FD2B00000000000000000001 /* ContentZoom.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD2A00000000000000000001 /* ContentZoom.swift */; };
+		FD2B0000000000000000000A /* ZoomedToolTips.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD2A0000000000000000000A /* ZoomedToolTips.swift */; };
+		FD2B0000000000000000000B /* ZoomedMenus.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD2A0000000000000000000B /* ZoomedMenus.swift */; };
+		FD2B00000000000000000002 /* ContentZoomTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD2A00000000000000000002 /* ContentZoomTests.swift */; };
 		70470A8838427422B47E7F7D /* RepoStateUnknown.png in Resources */ = {isa = PBXBuildFile; fileRef = FB98A4C48BC13E13D8247FD3 /* RepoStateUnknown.png */; };
 		70C94470C408E093B08E19A6 /* PullFetch.png in Resources */ = {isa = PBXBuildFile; fileRef = 9E8DFE99C873C006EE7C3F47 /* PullFetch.png */; };
 		713F21B350CD76FECC154CB7 /* Cocoa.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A951A517309105DBD1E33BF3 /* Cocoa.framework */; };
@@ -609,6 +613,10 @@
 		BB7300000000000000000003 /* CheckoutBranchWorkflowCoordinator.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CheckoutBranchWorkflowCoordinator.swift; sourceTree = "<group>"; };
 		BB7300000000000000000004 /* CommitSummaryView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = CommitSummaryView.swift; sourceTree = "<group>"; };
 		BB9900000000000000000001 /* GitUICommands.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GitUICommands.swift; sourceTree = "<group>"; };
+		FD2A00000000000000000001 /* ContentZoom.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ContentZoom.swift; sourceTree = "<group>"; };
+		FD2A0000000000000000000A /* ZoomedToolTips.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ZoomedToolTips.swift; sourceTree = "<group>"; };
+		FD2A0000000000000000000B /* ZoomedMenus.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ZoomedMenus.swift; sourceTree = "<group>"; };
+		FD2A00000000000000000002 /* ContentZoomTests.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = ContentZoomTests.swift; sourceTree = "<group>"; };
 		BBEDB96630D3A6554E27BED0 /* RepoStateUntrackedOnly.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = RepoStateUntrackedOnly.png; sourceTree = "<group>"; };
 		C00000000000000000000001 /* GitProcess.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GitProcess.swift; sourceTree = "<group>"; };
 		C00000000000000000000002 /* GitParsers.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = GitParsers.swift; sourceTree = "<group>"; };
@@ -1037,6 +1045,9 @@
 				FD9100000000000000000002 /* AvatarProviders.swift */,
 				FC2000000000000000000004 /* ApplicationScripts.swift */,
 				FA9000000000000000000002 /* ApplicationScriptPrompts.swift */,
+				FD2A00000000000000000001 /* ContentZoom.swift */,
+				FD2A0000000000000000000A /* ZoomedToolTips.swift */,
+				FD2A0000000000000000000B /* ZoomedMenus.swift */,
 				FA9000000000000000000012 /* SplitterManager.swift */,
 				FA9000000000000000000006 /* ApplicationErrorReporter.swift */,
 				FA4000000000000000000004 /* BuiltInPlugins.swift */,
@@ -1454,6 +1465,7 @@
 				CE1000000000000000000003 /* CommitDialogTests.swift */,
 				FDEC203A59831F24DA7D3B89 /* CommitInfoTests.swift */,
 				CE1000000000000000000025 /* ConflictResolutionTests.swift */,
+				FD2A00000000000000000002 /* ContentZoomTests.swift */,
 				CE90000000000000000000F1 /* DialogBehaviorTests.swift */,
 				CE6000000000000000000005 /* DiffAndFileTreeTests.swift */,
 				FDF1A0000000000000000004 /* FileHistoryTests.swift */,
@@ -2035,6 +2047,7 @@
 				F70000000000000000000003 /* GitReflogTests.swift in Sources */,
 				F80000000000000000000003 /* GitWorktreeTests.swift in Sources */,
 				F90000000000000000000003 /* GitSubmoduleTests.swift in Sources */,
+				FD2B00000000000000000002 /* ContentZoomTests.swift in Sources */,
 				210C0F1568AC2EB5B1268796 /* RevisionGraphLayoutTests.swift in Sources */,
 				FA9000000000000000000071 /* TestSupport.swift in Sources */,
 			);
@@ -2053,6 +2066,9 @@
 			buildActionMask = 2147483647;
 			files = (
 				C0501E000000000000000001 /* EmbeddedConsoleViewController.swift in Sources */,
+				FD2B00000000000000000001 /* ContentZoom.swift in Sources */,
+				FD2B0000000000000000000A /* ZoomedToolTips.swift in Sources */,
+				FD2B0000000000000000000B /* ZoomedMenus.swift in Sources */,
 				EAB7DBBE270E4B5D7FA8E034 /* AppKitFactory.swift in Sources */,
 				0F9C12342386BAB1984A9234 /* AppSettings.swift in Sources */,
 				CE1000000000000000000002 /* CommitMessageEditing.swift in Sources */,

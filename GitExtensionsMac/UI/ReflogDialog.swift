@@ -379,6 +379,7 @@ private final class ReflogTableView: NSTableView {
         super.mouseDown(with: event)
         guard row(at: convert(event.locationInWindow, from: nil)) >= 0, let menu else { return }
         prepareMenu?(menu)
+        ZoomedMenuController.shared.prepare(menu, for: self)
         NSMenu.popUpContextMenu(menu, with: event, for: self)
     }
 

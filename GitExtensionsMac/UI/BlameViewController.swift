@@ -138,6 +138,8 @@ final class BlameViewController: NSViewController, NSTableViewDataSource, NSTabl
         authorScroll.hasHorizontalScroller = true
         authorScroll.autohidesScrollers = false
         scroll.autohidesScrollers = false
+        ContentZoomController.shared.register(scroll)
+        ContentZoomController.shared.register(authorScroll)
         let panes = NSSplitView()
         panes.isVertical = true
         panes.dividerStyle = .thin

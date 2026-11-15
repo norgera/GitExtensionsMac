@@ -45,14 +45,14 @@ private final class PatchViewController: NSViewController, NSTableViewDataSource
     let initialFile: URL?
     let viewPatch: (URL) -> Void
     private let path = NSTextField(string: "")
-    private let directoryMode = NSButton(radioButtonWithTitle: "Patch directory", target: nil, action: nil)
-    private let fileMode = NSButton(radioButtonWithTitle: "Patch file", target: nil, action: nil)
+    private let directoryMode = PixelSnapTolerantButton(radioButtonWithTitle: "Patch directory", target: nil, action: nil)
+    private let fileMode = PixelSnapTolerantButton(radioButtonWithTitle: "Patch file", target: nil, action: nil)
     private let directoryPath = NSTextField(string: "")
     private let conflictNotice = NSTextField(labelWithString: "There are unresolved merge conflicts")
     private var showsInitialRecoveryState = true
-    private let ignoreWhitespace = NSButton(checkboxWithTitle: "Ignore whitespace", target: nil, action: nil)
-    private let signOff = NSButton(checkboxWithTitle: "Sign-Off", target: nil, action: nil)
-    private let keepOpen = NSButton(checkboxWithTitle: "Keep dialog open", target: nil, action: nil)
+    private let ignoreWhitespace = PixelSnapTolerantButton(checkboxWithTitle: "Ignore whitespace", target: nil, action: nil)
+    private let signOff = PixelSnapTolerantButton(checkboxWithTitle: "Sign-Off", target: nil, action: nil)
+    private let keepOpen = PixelSnapTolerantButton(checkboxWithTitle: "Keep dialog open", target: nil, action: nil)
     private let table = NSTableView()
     private let viewer = DiffContentViewController()
     override func cancelOperation(_ sender: Any?) { close() }
@@ -563,7 +563,7 @@ private final class PatchViewController: NSViewController, NSTableViewDataSource
             let paths = NSTextView(frame: NSRect(x: 0, y: 30, width: 380, height: 85))
             paths.string = "."
             paths.isRichText = false
-            let force = NSButton(checkboxWithTitle: "Force", target: nil, action: nil)
+            let force = PixelSnapTolerantButton(checkboxWithTitle: "Force", target: nil, action: nil)
             force.frame = NSRect(x: 0, y: 0, width: 180, height: 24)
             let content = NSView(frame: NSRect(x: 0, y: 0, width: 380, height: 120))
             content.addSubview(paths); content.addSubview(force); alert.accessoryView = content

@@ -1014,6 +1014,7 @@ final class AppSettingsStore {
         static let revisionGridRuntimeDefaults = "GitExtensionsMac.revisionGridRuntimeDefaults.v1"
         static let showBuildStatusIconColumn = "GitExtensionsMac.showbuildstatusiconcolumn"
         static let showBuildStatusTextColumn = "GitExtensionsMac.showbuildstatustextcolumn"
+        static let contentZoomLevel = "GitExtensionsMac.contentZoomLevel.v1"
     }
 
     private let defaults: UserDefaults
@@ -1293,6 +1294,13 @@ final class AppSettingsStore {
 
     var lastRepositoryPath: String? {
         defaults.string(forKey: Key.lastRepository)
+    }
+
+    /// Zoom factor shared by the repository content panes. `ContentZoomController`
+    /// clamps it to its supported range; 1.0 is 100%.
+    var contentZoomLevel: Double {
+        get { defaults.object(forKey: Key.contentZoomLevel) as? Double ?? 1 }
+        set { defaults.set(newValue, forKey: Key.contentZoomLevel) }
     }
 
     func save(_ preferences: AppPreferences) {

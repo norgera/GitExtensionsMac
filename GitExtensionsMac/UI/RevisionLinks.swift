@@ -560,7 +560,7 @@ private final class RevisionLinkSettingsTextField: NSTextField, NSTextFieldDeleg
 }
 
 @MainActor
-private final class RevisionLinkSettingsToggle: NSButton {
+private final class RevisionLinkSettingsToggle: PixelSnapTolerantButton {
     var onChange: ((Bool) -> Void)?
     @objc func invoke() { onChange?(state == .on) }
 }

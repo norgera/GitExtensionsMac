@@ -91,7 +91,10 @@ private final class PushDialogViewController: NSViewController,
         guard let window else { return }
         let minimum = minimumContentSize()
         window.contentMinSize = minimum
-        guard growWindow else { return }
+        // When zoomed, the window is larger than its design size; let the zoom
+        // adopt the new minimum (in design points) and grow the dialog.
+        ContentZoomController.shared.dialogGeometryDidChange(window)
+        guard growWindow, ContentZoomController.shared.windowScale(window) <= 1 else { return }
         let content = window.contentRect(forFrameRect: window.frame)
         guard content.width < minimum.width || content.height < minimum.height else { return }
         let grown = NSRect(x: content.minX, y: content.minY, width: max(content.width, minimum.width), height: max(content.height, minimum.height))
@@ -121,8 +124,8 @@ private final class PushDialogViewController: NSViewController,
     private var pullWindowController: NSWindowController?
     private var multipleBranchTask: Task<Void, Never>?
 
-    private let remoteChoice = NSButton(radioButtonWithTitle: "Remote", target: nil, action: nil)
-    private let urlChoice = NSButton(radioButtonWithTitle: "Url", target: nil, action: nil)
+    private let remoteChoice = PixelSnapTolerantButton(radioButtonWithTitle: "Remote", target: nil, action: nil)
+    private let urlChoice = PixelSnapTolerantButton(radioButtonWithTitle: "Url", target: nil, action: nil)
     private let remoteCombo = NSComboBox()
     private let destinationCombo = NSComboBox()
     private let manageRemotesButton = LeadingImageButton(title: "Manage remotes", target: nil, action: nil)
@@ -133,12 +136,12 @@ private final class PushDialogViewController: NSViewController,
     private let tagCombo = NSComboBox()
     private let showOptionsButton = NSButton()
     private let advancedOptions = NSView()
-    private let forceWithLease = NSButton(checkboxWithTitle: "Force with lease", target: nil, action: nil)
-    private let forceBranches = NSButton(checkboxWithTitle: "Force push", target: nil, action: nil)
-    private let replaceTracking = NSButton(checkboxWithTitle: "Replace tracking reference", target: nil, action: nil)
-    private let createPullRequest = NSButton(checkboxWithTitle: "Create pull request after push", target: nil, action: nil)
+    private let forceWithLease = PixelSnapTolerantButton(checkboxWithTitle: "Force with lease", target: nil, action: nil)
+    private let forceBranches = PixelSnapTolerantButton(checkboxWithTitle: "Force push", target: nil, action: nil)
+    private let replaceTracking = PixelSnapTolerantButton(checkboxWithTitle: "Replace tracking reference", target: nil, action: nil)
+    private let createPullRequest = PixelSnapTolerantButton(checkboxWithTitle: "Create pull request after push", target: nil, action: nil)
     private let recursiveSubmodules = NSPopUpButton()
-    private let forceTags = NSButton(checkboxWithTitle: "Force push", target: nil, action: nil)
+    private let forceTags = PixelSnapTolerantButton(checkboxWithTitle: "Force push", target: nil, action: nil)
     private let branchTable = NSTableView()
     private var branchRows: [PushBranchRow] = []
     private let pullButton = NSButton(title: "Pull", target: nil, action: nil)
@@ -637,7 +640,7 @@ private final class PushDialogViewController: NSViewController,
             value.alignment = .center
             return value
         case "push", "force", "delete":
-            let button = NSButton(checkboxWithTitle: "", target: self, action: #selector(multipleCheckChanged(_:)))
+            let button = PixelSnapTolerantButton(checkboxWithTitle: "", target: self, action: #selector(multipleCheckChanged(_:)))
             button.tag = row
             button.identifier = .init(identifier)
             button.state = switch identifier {
@@ -1205,6 +1208,7 @@ private final class PushBranchHeaderView: NSTableHeaderView {
         if columnIndex >= 0,
            tableView?.tableColumns[columnIndex].identifier.rawValue == "push",
            let pushSelectionMenu {
+            ZoomedMenuController.shared.prepare(pushSelectionMenu, for: self)
             NSMenu.popUpContextMenu(pushSelectionMenu, with: event, for: self)
             return
         }
@@ -1271,8 +1275,8 @@ final class RemoteBranchDeleteViewController: NSViewController, NSWindowDelegate
     private let branchesSelector = NSComboBox()
     private var multipleSelectionPanel: NSPanel?
     private var multipleSelectionController: MultipleBranchSelectionViewController?
-    private let deleteRemote = NSButton(checkboxWithTitle: "Delete branch(es) from remote repository", target: nil, action: nil)
-    private let deleteTracking = NSButton(checkboxWithTitle: "Delete local tracking branch (if available)", target: nil, action: nil)
+    private let deleteRemote = PixelSnapTolerantButton(checkboxWithTitle: "Delete branch(es) from remote repository", target: nil, action: nil)
+    private let deleteTracking = PixelSnapTolerantButton(checkboxWithTitle: "Delete local tracking branch (if available)", target: nil, action: nil)
     private let trackingCandidates = NSTextField(wrappingLabelWithString: "")
     private let deleteButton = NSButton(title: "Delete", target: nil, action: nil)
     private var state: RepositoryPushState?
@@ -1672,7 +1676,7 @@ private final class PushProcessViewController: NSViewController, NSWindowDelegat
     private let progress = NSProgressIndicator()
     private let status = NSTextField(labelWithString: "Waiting…")
     private let outputView = NSTextView()
-    private let keepOpen = NSButton(checkboxWithTitle: "Keep dialog open", target: nil, action: nil)
+    private let keepOpen = PixelSnapTolerantButton(checkboxWithTitle: "Keep dialog open", target: nil, action: nil)
     private let abortButton = NSButton(title: "Abort", target: nil, action: nil)
     private let closeButton = NSButton(title: "OK", target: nil, action: nil)
     let processInput = ProcessInputController()

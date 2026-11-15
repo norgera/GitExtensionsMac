@@ -49,6 +49,10 @@ extension UIIntegrationTests {
                     popUp.image = probeImage
                     #expect(cell.imageRect(forBounds: popUp.bounds).maxX <= arrowStart, "\(popUp.toolTip ?? ""): icon stays clear of its drop-down arrow")
                     popUp.image = saved
+                } else if popUp is WorkingDirectoryPopUpButton, popUp.frame.width < popUp.intrinsicContentSize.width {
+                    // A long path is shortened with a middle ellipsis instead of
+                    // pushing the rest of the toolbar out of the window.
+                    #expect((cell.lineBreakMode == .byTruncatingMiddle) && popUp.frame.width >= 80, "a long working directory is middle-truncated")
                 } else {
                     let text = ceil((popUp.title as NSString).size(withAttributes: [.font: popUp.font!]).width)
                     let image: CGFloat = popUp.imagePosition == .imageLeading ? 20 : 0

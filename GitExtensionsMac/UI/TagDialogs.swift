@@ -73,7 +73,7 @@ enum TagDialogs {
         messageScroll.widthAnchor.constraint(equalToConstant: 330).isActive = true
         messageScroll.heightAnchor.constraint(equalToConstant: 92).isActive = true
 
-        let push = NSButton(
+        let push = PixelSnapTolerantButton(
             checkboxWithTitle: remote.map { "Push tag to ‘\($0)’" } ?? "Push tag",
             target: nil,
             action: nil
@@ -142,7 +142,7 @@ enum TagDialogs {
         tag.stringValue = initial.name
         tag.widthAnchor.constraint(equalToConstant: 295).isActive = true
 
-        let deleteRemote = NSButton(
+        let deleteRemote = PixelSnapTolerantButton(
             checkboxWithTitle: "Delete tag also from the following remote(s):",
             target: nil,
             action: nil

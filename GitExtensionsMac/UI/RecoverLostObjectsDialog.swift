@@ -37,11 +37,11 @@ final class RecoverLostObjectsWindowController: NSWindowController, NSWindowDele
     private let onClose: () -> Void
 
     let table = LostObjectsTableView()
-    let unreachable = NSButton(checkboxWithTitle: Strings.unreachable, target: nil, action: nil)
-    let fullCheck = NSButton(checkboxWithTitle: Strings.fullCheck, target: nil, action: nil)
-    let noReflogs = NSButton(checkboxWithTitle: Strings.noReflogs, target: nil, action: nil)
-    let showCommitsAndTags = NSButton(checkboxWithTitle: Strings.showCommits, target: nil, action: nil)
-    let showOtherObjects = NSButton(checkboxWithTitle: Strings.showOther, target: nil, action: nil)
+    let unreachable = PixelSnapTolerantButton(checkboxWithTitle: Strings.unreachable, target: nil, action: nil)
+    let fullCheck = PixelSnapTolerantButton(checkboxWithTitle: Strings.fullCheck, target: nil, action: nil)
+    let noReflogs = PixelSnapTolerantButton(checkboxWithTitle: Strings.noReflogs, target: nil, action: nil)
+    let showCommitsAndTags = PixelSnapTolerantButton(checkboxWithTitle: Strings.showCommits, target: nil, action: nil)
+    let showOtherObjects = PixelSnapTolerantButton(checkboxWithTitle: Strings.showOther, target: nil, action: nil)
     private let diffViewer = DiffContentViewController()
     private let fileViewer = RevisionFileContentViewController()
     private let previewContainer = NSView()
@@ -379,7 +379,7 @@ final class RecoverLostObjectsWindowController: NSWindowController, NSWindowDele
         guard let column = tableColumn?.identifier.rawValue, displayed.indices.contains(row) else { return nil }
         let object = displayed[row]
         if column == "check" {
-            let box = NSButton(checkboxWithTitle: "", target: self, action: #selector(checkToggled(_:)))
+            let box = PixelSnapTolerantButton(checkboxWithTitle: "", target: self, action: #selector(checkToggled(_:)))
             box.imagePosition = .imageOnly
             box.controlSize = .small
             box.state = checked.contains(object.objectID) ? .on : .off

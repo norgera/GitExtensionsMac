@@ -35,7 +35,7 @@ final class SparseWorkingCopyWindowController: NSWindowController, NSWindowDeleg
     private let onSaved: () -> Void
     private let onClose: () -> Void
     let editor = EditableFileTextView()
-    let refreshCheckbox = NSButton(checkboxWithTitle: Strings.refreshOnSave, target: nil, action: nil)
+    let refreshCheckbox = PixelSnapTolerantButton(checkboxWithTitle: Strings.refreshOnSave, target: nil, action: nil)
     private var disabledViews: [NSView] = []
     private var enabledViews: [NSView] = []
     private var closing = false

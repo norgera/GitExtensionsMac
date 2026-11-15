@@ -208,8 +208,8 @@ final class BuildServerSettingsPageController: NSViewController, NSTextFieldDele
     private var tokenEdits: [String: String] = [:]
     private let stack = NSStackView()
     private var scopeHeader: SettingsSourceHeader?
-    private let enabled = NSButton(checkboxWithTitle: "Enable build server integration", target: nil, action: nil)
-    private let showPage = NSButton(checkboxWithTitle: "Show build result page", target: nil, action: nil)
+    private let enabled = PixelSnapTolerantButton(checkboxWithTitle: "Enable build server integration", target: nil, action: nil)
+    private let showPage = PixelSnapTolerantButton(checkboxWithTitle: "Show build result page", target: nil, action: nil)
     private let typePopup = NSPopUpButton()
     private let adapterPanel = NSStackView()
     private var adapterFields: [String: NSTextField] = [:]
@@ -621,7 +621,7 @@ final class BuildReportViewController: NSViewController, WKNavigationDelegate {
     @objc private func open() { if let url { NSWorkspace.shared.open(url) } }
 }
 
-final class InheritedValueCheckbox: NSButton {
+final class InheritedValueCheckbox: PixelSnapTolerantButton {
     func setInherited(_ value: Bool?) {
         allowsMixedState = value == nil
         state = value.map { $0 ? .on : .off } ?? .mixed
